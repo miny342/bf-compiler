@@ -1,0 +1,473 @@
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
+
+use crate::ast::{
+    AssignmentOperator, AstProgram, BinaryOperator, Expression, ExpressionKind, Name, Statement,
+    UnaryOperator,
+};
+use crate::{
+    CellId, CodegenError, Instruction, IrError, Program, TransferTarget, compile, lexer, parser,
+};
+
+/// A source-level compilation error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontendError {
+    offset: Option<usize>,
+    message: String,
+}
+
+impl FrontendError {
+    pub(crate) fn at(offset: usize, message: impl Into<String>) -> Self {
+        Self {
+            offset: Some(offset),
+            message: message.into(),
+        }
+    }
+
+    fn without_offset(message: impl Into<String>) -> Self {
+        Self {
+            offset: None,
+            message: message.into(),
+        }
+    }
+
+    pub const fn offset(&self) -> Option<usize> {
+        self.offset
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for FrontendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(offset) = self.offset {
+            write!(f, "{} at byte offset {offset}", self.message)
+        } else {
+            f.write_str(&self.message)
+        }
+    }
+}
+
+impl Error for FrontendError {}
+
+/// Error returned by [`compile_source`].
+#[derive(Debug)]
+pub enum SourceCompileError {
+    Frontend(FrontendError),
+    Codegen(CodegenError),
+}
+
+impl fmt::Display for SourceCompileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frontend(error) => error.fmt(f),
+            Self::Codegen(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for SourceCompileError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frontend(error) => Some(error),
+            Self::Codegen(error) => Some(error),
+        }
+    }
+}
+
+impl From<FrontendError> for SourceCompileError {
+    fn from(error: FrontendError) -> Self {
+        Self::Frontend(error)
+    }
+}
+
+impl From<CodegenError> for SourceCompileError {
+    fn from(error: CodegenError) -> Self {
+        Self::Codegen(error)
+    }
+}
+
+/// Parse and lower BFC source to validated cell IR.
+pub fn lower_source(source: &str) -> Result<Program, FrontendError> {
+    let tokens = lexer::lex(source)?;
+    let ast = parser::parse(tokens)?;
+    Lowerer::new().lower_program(&ast)
+}
+
+/// Compile BFC source directly to Brainfuck source.
+pub fn compile_source(source: &str) -> Result<String, SourceCompileError> {
+    let program = lower_source(source)?;
+    Ok(compile(&program)?)
+}
+
+struct Lowerer {
+    scopes: Vec<HashMap<String, CellId>>,
+    next_cell: usize,
+}
+
+impl Lowerer {
+    fn new() -> Self {
+        Self {
+            scopes: vec![HashMap::new()],
+            next_cell: 0,
+        }
+    }
+
+    fn lower_program(mut self, program: &AstProgram) -> Result<Program, FrontendError> {
+        let mut instructions = Vec::new();
+        self.lower_statements(&program.statements, &mut instructions)?;
+        Program::new(self.next_cell, instructions).map_err(Self::ir_error)
+    }
+
+    fn lower_statements(
+        &mut self,
+        statements: &[Statement],
+        output: &mut Vec<Instruction>,
+    ) -> Result<(), FrontendError> {
+        for statement in statements {
+            self.lower_statement(statement, output)?;
+        }
+        Ok(())
+    }
+
+    fn lower_statement(
+        &mut self,
+        statement: &Statement,
+        output: &mut Vec<Instruction>,
+    ) -> Result<(), FrontendError> {
+        match statement {
+            Statement::Empty => {}
+            Statement::Block(statements) => {
+                self.scopes.push(HashMap::new());
+                let result = self.lower_statements(statements, output);
+                self.scopes.pop();
+                result?;
+            }
+            Statement::Declaration { name, initializer } => {
+                if self.scopes.last().unwrap().contains_key(&name.text) {
+                    return Err(FrontendError::at(
+                        name.offset,
+                        format!("variable {:?} is already declared in this scope", name.text),
+                    ));
+                }
+
+                let cell = self.allocate_cell();
+                if let Some(initializer) = initializer {
+                    let value = self.allocate_cell();
+                    self.evaluate(initializer, value, output)?;
+                    self.move_value(value, cell, output);
+                } else {
+                    output.push(Instruction::Set {
+                        dst: cell,
+                        value: 0,
+                    });
+                }
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(name.text.clone(), cell);
+            }
+            Statement::Assignment {
+                name,
+                operator,
+                value,
+            } => {
+                let destination = self.resolve(name)?;
+                let temporary = self.allocate_cell();
+                self.evaluate(value, temporary, output)?;
+                match operator {
+                    AssignmentOperator::Set => self.move_value(temporary, destination, output),
+                    AssignmentOperator::Add => self.transfer(temporary, destination, 1, output),
+                    AssignmentOperator::Subtract => {
+                        self.transfer(temporary, destination, 255, output)
+                    }
+                }
+            }
+            Statement::Output(expression) => {
+                let value = self.allocate_cell();
+                self.evaluate(expression, value, output)?;
+                output.push(Instruction::Output { src: value });
+            }
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let condition_cell = self.allocate_cell();
+                self.evaluate(condition, condition_cell, output)?;
+                let mut then_body = Vec::new();
+                self.lower_statement(then_branch, &mut then_body)?;
+                let mut else_body = Vec::new();
+                if let Some(else_branch) = else_branch {
+                    self.lower_statement(else_branch, &mut else_body)?;
+                }
+                output.push(Instruction::Branch {
+                    condition: condition_cell,
+                    then_body,
+                    else_body,
+                });
+            }
+            Statement::While { condition, body } => {
+                let condition_cell = self.allocate_cell();
+                let mut evaluate_condition = Vec::new();
+                self.evaluate(condition, condition_cell, &mut evaluate_condition)?;
+                output.extend(evaluate_condition.iter().cloned());
+                let mut loop_body = Vec::new();
+                self.lower_statement(body, &mut loop_body)?;
+                loop_body.extend(evaluate_condition);
+                output.push(Instruction::Loop {
+                    condition: condition_cell,
+                    body: loop_body,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn evaluate(
+        &mut self,
+        expression: &Expression,
+        destination: CellId,
+        output: &mut Vec<Instruction>,
+    ) -> Result<(), FrontendError> {
+        match &expression.kind {
+            ExpressionKind::Literal(value) => output.push(Instruction::Set {
+                dst: destination,
+                value: *value,
+            }),
+            ExpressionKind::Variable(name) => {
+                let source = self.resolve(name)?;
+                self.copy_value(source, destination, output);
+            }
+            ExpressionKind::Input => output.push(Instruction::Input { dst: destination }),
+            ExpressionKind::Unary { operator, operand } => match operator {
+                UnaryOperator::Plus => self.evaluate(operand, destination, output)?,
+                UnaryOperator::Negate => {
+                    let value = self.allocate_cell();
+                    self.evaluate(operand, value, output)?;
+                    output.push(Instruction::Set {
+                        dst: destination,
+                        value: 0,
+                    });
+                    self.transfer(value, destination, 255, output);
+                }
+                UnaryOperator::Not => {
+                    let value = self.allocate_cell();
+                    self.evaluate(operand, value, output)?;
+                    output.push(Instruction::Set {
+                        dst: destination,
+                        value: 0,
+                    });
+                    output.push(Instruction::Branch {
+                        condition: value,
+                        then_body: Vec::new(),
+                        else_body: vec![Instruction::Set {
+                            dst: destination,
+                            value: 1,
+                        }],
+                    });
+                }
+            },
+            ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                self.evaluate(left, destination, output)?;
+                let right_value = self.allocate_cell();
+                self.evaluate(right, right_value, output)?;
+                let factor = match operator {
+                    BinaryOperator::Add => 1,
+                    BinaryOperator::Subtract => 255,
+                };
+                self.transfer(right_value, destination, factor, output);
+            }
+            ExpressionKind::IsNonZero(operand) => {
+                let value = self.allocate_cell();
+                self.evaluate(operand, value, output)?;
+                output.push(Instruction::Set {
+                    dst: destination,
+                    value: 0,
+                });
+                output.push(Instruction::Branch {
+                    condition: value,
+                    then_body: vec![Instruction::Set {
+                        dst: destination,
+                        value: 1,
+                    }],
+                    else_body: Vec::new(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_value(&mut self, source: CellId, destination: CellId, output: &mut Vec<Instruction>) {
+        let restore = self.allocate_cell();
+        output.push(Instruction::Set {
+            dst: destination,
+            value: 0,
+        });
+        output.push(Instruction::Transfer {
+            src: source,
+            targets: vec![
+                TransferTarget {
+                    dst: destination,
+                    factor: 1,
+                },
+                TransferTarget {
+                    dst: restore,
+                    factor: 1,
+                },
+            ],
+        });
+        self.transfer(restore, source, 1, output);
+    }
+
+    fn move_value(&mut self, source: CellId, destination: CellId, output: &mut Vec<Instruction>) {
+        output.push(Instruction::Set {
+            dst: destination,
+            value: 0,
+        });
+        self.transfer(source, destination, 1, output);
+    }
+
+    fn transfer(
+        &self,
+        source: CellId,
+        destination: CellId,
+        factor: u8,
+        output: &mut Vec<Instruction>,
+    ) {
+        output.push(Instruction::Transfer {
+            src: source,
+            targets: vec![TransferTarget {
+                dst: destination,
+                factor,
+            }],
+        });
+    }
+
+    fn allocate_cell(&mut self) -> CellId {
+        let cell = CellId::new(self.next_cell);
+        self.next_cell += 1;
+        cell
+    }
+
+    fn resolve(&self, name: &Name) -> Result<CellId, FrontendError> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name.text).copied())
+            .ok_or_else(|| {
+                FrontendError::at(name.offset, format!("undefined variable {:?}", name.text))
+            })
+    }
+
+    fn ir_error(error: IrError) -> FrontendError {
+        FrontendError::without_offset(format!("invalid generated IR: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bf_interpreter::run;
+
+    use super::*;
+
+    fn execute(source: &str, input: &[u8]) -> Vec<u8> {
+        let brainfuck = compile_source(source).unwrap();
+        run(brainfuck.as_bytes(), input).unwrap()
+    }
+
+    #[test]
+    fn compiles_an_echo_loop() {
+        let source = r#"
+            cell ch;
+            ch = input();
+            while (ch != 0) {
+                output(ch);
+                ch = input();
+            }
+        "#;
+        assert_eq!(execute(source, b"hello"), b"hello");
+    }
+
+    #[test]
+    fn arithmetic_wraps_and_variable_reads_are_non_destructive() {
+        let source = r#"
+            cell original = 'A';
+            cell next = original + 1;
+            output(original);
+            output(next);
+            original -= 66;
+            output(original);
+        "#;
+        assert_eq!(execute(source, b""), vec![b'A', b'B', 255]);
+    }
+
+    #[test]
+    fn if_else_not_and_nonzero_comparison_work() {
+        let source = r#"
+            cell value = input();
+            if (value != 0) {
+                output('T');
+            } else {
+                output('F');
+            }
+            if (!value) {
+                output('0');
+            } else {
+                output('1');
+            }
+            output(value);
+        "#;
+        assert_eq!(execute(source, &[7]), vec![b'T', b'1', 7]);
+        assert_eq!(execute(source, &[0]), vec![b'F', b'0', 0]);
+    }
+
+    #[test]
+    fn blocks_shadow_outer_variables() {
+        let source = r#"
+            // 外側の値は内側のブロックを抜けても残る。
+            cell value = 1;
+            {
+                cell value = 2;
+                /* 日本語の
+                   ブロックコメント */
+                output(value);
+            }
+            output(value);
+        "#;
+        assert_eq!(execute(source, b""), vec![2, 1]);
+    }
+
+    #[test]
+    fn reports_source_errors_with_offsets() {
+        let undefined = lower_source("output(missing);").unwrap_err();
+        assert_eq!(undefined.offset(), Some(7));
+        assert!(undefined.message().contains("undefined variable"));
+
+        let comparison = lower_source("cell x; if (x != 1) ;").unwrap_err();
+        assert!(comparison.message().contains("only comparison with zero"));
+
+        let future_feature = lower_source("push(1);").unwrap_err();
+        assert!(future_feature.message().contains("not implemented"));
+
+        let unbraced_declaration = lower_source("cell x; if (x) cell y;").unwrap_err();
+        assert!(unbraced_declaration.message().contains("inside a block"));
+
+        let comment = lower_source("/* no end").unwrap_err();
+        assert!(comment.message().contains("unterminated block comment"));
+
+        let non_ascii_code = lower_source("cell 値;").unwrap_err();
+        assert!(
+            non_ascii_code
+                .message()
+                .contains("only allowed inside comments")
+        );
+    }
+}

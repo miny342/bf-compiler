@@ -1,0 +1,81 @@
+cell f = 'f';
+cell i = 'i';
+cell z = 'z';
+cell b = 'b';
+cell u = 'u';
+cell nn = '\n';
+
+cell max_counter = 100;
+cell now = 0;
+
+while (max_counter != 0) {
+    max_counter -= 1;
+    now += 1;
+
+    // 3で割った余りを計算
+    cell mod_3_is_0 = 0;
+    cell tmp = now;
+    while (tmp != 0) {
+        mod_3_is_0 = 0;
+        tmp -= 1;
+        if (tmp != 0) {
+            tmp -= 1;
+            if (tmp != 0) {
+                tmp -= 1;
+                mod_3_is_0 = 1;
+            }
+        }
+    }
+
+    // 5で割った余りを計算
+    cell mod_5_is_0 = 0;
+    tmp = now;
+    while (tmp != 0) {
+        mod_5_is_0 = 0;
+        tmp -= 1;
+        if (tmp != 0) {
+            tmp -= 1;
+            if (tmp != 0) {
+                tmp -= 1;
+                if (tmp != 0) {
+                    tmp -= 1;
+                    if (tmp != 0) {
+                        tmp -= 1;
+                        mod_5_is_0 = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if (mod_3_is_0 != 0) {
+        if (mod_5_is_0 != 0) {
+            output(f);
+            output(i);
+            output(z);
+            output(z);
+            output(b);
+            output(u);
+            output(z);
+            output(z);
+        } else {
+            output(f);
+            output(i);
+            output(z);
+            output(z);
+        }
+    } else {
+        if (mod_5_is_0 != 0) {
+            output(b);
+            output(u);
+            output(z);
+            output(z);
+        } else {
+            // いったんあきらめる
+            tmp = 'n';
+            output(tmp);
+        }
+    }
+
+    output(nn);
+}
