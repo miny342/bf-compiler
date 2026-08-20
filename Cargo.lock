@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "bf-compiler"
+version = "0.1.0"
+dependencies = [
+ "bf-interpreter",
+]
+
+[[package]]
 name = "bf-interpreter"
 version = "0.1.0"

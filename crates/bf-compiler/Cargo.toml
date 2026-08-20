@@ -1,0 +1,13 @@
+[package]
+name = "bf-compiler"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "bf_compiler"
+path = "src/lib.rs"
+
+[dev-dependencies]
+bf-interpreter = { path = "../bf-interpreter" }
+
