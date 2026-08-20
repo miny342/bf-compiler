@@ -1,0 +1,14 @@
+[package]
+name = "bf-interpreter"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "bf_interpreter"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bf-interpreter"
+path = "src/main.rs"
+
