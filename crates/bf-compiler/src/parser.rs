@@ -52,7 +52,6 @@ impl Parser {
             TokenKind::Identifier(_) => self.parse_assignment(),
             TokenKind::RightBrace => Err(self.error_here("unexpected '}'")),
             TokenKind::Else => Err(self.error_here("'else' without a matching 'if'")),
-            TokenKind::EqualEqual => Err(self.error_here("only '!= 0' comparison is implemented")),
             _ => Err(self.error_here("expected a statement")),
         }
     }
@@ -145,44 +144,68 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, FrontendError> {
-        let expression = self.parse_additive()?;
-        if self.at(&TokenKind::BangEqual) {
-            let offset = self.current().offset;
-            self.advance();
-            match self.current().kind {
-                TokenKind::Number(0) => self.advance(),
-                _ => {
-                    return Err(FrontendError::at(
-                        offset,
-                        "only comparison with zero ('!= 0') is implemented",
-                    ));
-                }
-            }
-            Ok(Expression {
-                kind: ExpressionKind::IsNonZero(Box::new(expression)),
-                offset,
-            })
-        } else if self.at(&TokenKind::EqualEqual) {
-            Err(self.error_here("only '!= 0' comparison is implemented"))
-        } else {
-            Ok(expression)
-        }
+        self.parse_logical_or()
+    }
+
+    fn parse_logical_or(&mut self) -> Result<Expression, FrontendError> {
+        self.parse_binary_left_associative(
+            Self::parse_logical_and,
+            &[(TokenKind::PipePipe, BinaryOperator::LogicalOr)],
+        )
+    }
+
+    fn parse_logical_and(&mut self) -> Result<Expression, FrontendError> {
+        self.parse_binary_left_associative(
+            Self::parse_equality,
+            &[(TokenKind::AmpAmp, BinaryOperator::LogicalAnd)],
+        )
+    }
+
+    fn parse_equality(&mut self) -> Result<Expression, FrontendError> {
+        self.parse_binary_left_associative(
+            Self::parse_comparison,
+            &[
+                (TokenKind::EqualEqual, BinaryOperator::Equal),
+                (TokenKind::BangEqual, BinaryOperator::NotEqual),
+            ],
+        )
+    }
+
+    fn parse_comparison(&mut self) -> Result<Expression, FrontendError> {
+        self.parse_binary_left_associative(
+            Self::parse_additive,
+            &[
+                (TokenKind::Less, BinaryOperator::Less),
+                (TokenKind::LessEqual, BinaryOperator::LessEqual),
+                (TokenKind::Greater, BinaryOperator::Greater),
+                (TokenKind::GreaterEqual, BinaryOperator::GreaterEqual),
+            ],
+        )
     }
 
     fn parse_additive(&mut self) -> Result<Expression, FrontendError> {
-        let mut expression = self.parse_unary()?;
-        loop {
-            let operator = match self.current().kind {
-                TokenKind::Plus => BinaryOperator::Add,
-                TokenKind::Minus => BinaryOperator::Subtract,
-                _ => break,
-            };
+        self.parse_binary_left_associative(
+            Self::parse_unary,
+            &[
+                (TokenKind::Plus, BinaryOperator::Add),
+                (TokenKind::Minus, BinaryOperator::Subtract),
+            ],
+        )
+    }
+
+    fn parse_binary_left_associative(
+        &mut self,
+        parse_operand: fn(&mut Self) -> Result<Expression, FrontendError>,
+        operators: &[(TokenKind, BinaryOperator)],
+    ) -> Result<Expression, FrontendError> {
+        let mut expression = parse_operand(self)?;
+        while let Some((_, operator)) = operators.iter().find(|(token, _)| self.at(token)) {
             let offset = self.current().offset;
             self.advance();
-            let right = self.parse_unary()?;
+            let right = parse_operand(self)?;
             expression = Expression {
                 kind: ExpressionKind::Binary {
-                    operator,
+                    operator: *operator,
                     left: Box::new(expression),
                     right: Box::new(right),
                 },

@@ -31,6 +31,12 @@ pub(crate) enum TokenKind {
     MinusAssign,
     BangEqual,
     EqualEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    AmpAmp,
+    PipePipe,
     LeftBracket,
     RightBracket,
     Eof,
@@ -168,6 +174,24 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                         TokenKind::BangEqual
                     }
                     b'!' => TokenKind::Bang,
+                    b'<' if bytes.get(position) == Some(&b'=') => {
+                        position += 1;
+                        TokenKind::LessEqual
+                    }
+                    b'<' => TokenKind::Less,
+                    b'>' if bytes.get(position) == Some(&b'=') => {
+                        position += 1;
+                        TokenKind::GreaterEqual
+                    }
+                    b'>' => TokenKind::Greater,
+                    b'&' if bytes.get(position) == Some(&b'&') => {
+                        position += 1;
+                        TokenKind::AmpAmp
+                    }
+                    b'|' if bytes.get(position) == Some(&b'|') => {
+                        position += 1;
+                        TokenKind::PipePipe
+                    }
                     _ => {
                         return Err(FrontendError::at(
                             start,

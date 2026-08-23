@@ -61,7 +61,6 @@ pub(crate) enum ExpressionKind {
         left: Box<Expression>,
         right: Box<Expression>,
     },
-    IsNonZero(Box<Expression>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,4 +74,12 @@ pub(crate) enum UnaryOperator {
 pub(crate) enum BinaryOperator {
     Add,
     Subtract,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Equal,
+    NotEqual,
+    LogicalAnd,
+    LogicalOr,
 }

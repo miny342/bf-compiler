@@ -257,52 +257,154 @@ impl Lowerer {
                 UnaryOperator::Not => {
                     let value = self.allocate_cell();
                     self.evaluate(operand, value, output)?;
-                    output.push(Instruction::Set {
-                        dst: destination,
-                        value: 0,
-                    });
-                    output.push(Instruction::Branch {
-                        condition: value,
-                        then_body: Vec::new(),
-                        else_body: vec![Instruction::Set {
-                            dst: destination,
-                            value: 1,
-                        }],
-                    });
+                    self.boolean_from(value, destination, 0, 1, output);
                 }
             },
             ExpressionKind::Binary {
                 operator,
                 left,
                 right,
-            } => {
-                self.evaluate(left, destination, output)?;
-                let right_value = self.allocate_cell();
-                self.evaluate(right, right_value, output)?;
-                let factor = match operator {
-                    BinaryOperator::Add => 1,
-                    BinaryOperator::Subtract => 255,
-                };
-                self.transfer(right_value, destination, factor, output);
-            }
-            ExpressionKind::IsNonZero(operand) => {
-                let value = self.allocate_cell();
-                self.evaluate(operand, value, output)?;
-                output.push(Instruction::Set {
-                    dst: destination,
-                    value: 0,
-                });
-                output.push(Instruction::Branch {
-                    condition: value,
-                    then_body: vec![Instruction::Set {
-                        dst: destination,
-                        value: 1,
-                    }],
-                    else_body: Vec::new(),
-                });
-            }
+            } => match operator {
+                BinaryOperator::Add | BinaryOperator::Subtract => {
+                    self.evaluate(left, destination, output)?;
+                    let right_value = self.allocate_cell();
+                    self.evaluate(right, right_value, output)?;
+                    let factor = if *operator == BinaryOperator::Add {
+                        1
+                    } else {
+                        255
+                    };
+                    self.transfer(right_value, destination, factor, output);
+                }
+                BinaryOperator::Equal | BinaryOperator::NotEqual => {
+                    let left_value = self.allocate_cell();
+                    self.evaluate(left, left_value, output)?;
+                    let right_value = self.allocate_cell();
+                    self.evaluate(right, right_value, output)?;
+                    self.transfer(right_value, left_value, 255, output);
+                    let (nonzero, zero) = if *operator == BinaryOperator::Equal {
+                        (0, 1)
+                    } else {
+                        (1, 0)
+                    };
+                    self.boolean_from(left_value, destination, nonzero, zero, output);
+                }
+                BinaryOperator::Less
+                | BinaryOperator::LessEqual
+                | BinaryOperator::Greater
+                | BinaryOperator::GreaterEqual => {
+                    let left_value = self.allocate_cell();
+                    self.evaluate(left, left_value, output)?;
+                    let right_value = self.allocate_cell();
+                    self.evaluate(right, right_value, output)?;
+                    match operator {
+                        BinaryOperator::Less => {
+                            self.less_than(left_value, right_value, destination, 1, 0, output)
+                        }
+                        BinaryOperator::LessEqual => {
+                            self.less_than(right_value, left_value, destination, 0, 1, output)
+                        }
+                        BinaryOperator::Greater => {
+                            self.less_than(right_value, left_value, destination, 1, 0, output)
+                        }
+                        BinaryOperator::GreaterEqual => {
+                            self.less_than(left_value, right_value, destination, 0, 1, output)
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
+                    let left_value = self.allocate_cell();
+                    self.evaluate(left, left_value, output)?;
+
+                    let right_value = self.allocate_cell();
+                    let mut evaluate_right = Vec::new();
+                    self.evaluate(right, right_value, &mut evaluate_right)?;
+                    self.boolean_from(right_value, destination, 1, 0, &mut evaluate_right);
+
+                    let (then_body, else_body) = if *operator == BinaryOperator::LogicalAnd {
+                        (
+                            evaluate_right,
+                            vec![Instruction::Set {
+                                dst: destination,
+                                value: 0,
+                            }],
+                        )
+                    } else {
+                        (
+                            vec![Instruction::Set {
+                                dst: destination,
+                                value: 1,
+                            }],
+                            evaluate_right,
+                        )
+                    };
+                    output.push(Instruction::Branch {
+                        condition: left_value,
+                        then_body,
+                        else_body,
+                    });
+                }
+            },
         }
         Ok(())
+    }
+
+    fn boolean_from(
+        &self,
+        value: CellId,
+        destination: CellId,
+        nonzero: u8,
+        zero: u8,
+        output: &mut Vec<Instruction>,
+    ) {
+        output.push(Instruction::Branch {
+            condition: value,
+            then_body: vec![Instruction::Set {
+                dst: destination,
+                value: nonzero,
+            }],
+            else_body: vec![Instruction::Set {
+                dst: destination,
+                value: zero,
+            }],
+        });
+    }
+
+    fn less_than(
+        &mut self,
+        left: CellId,
+        right: CellId,
+        destination: CellId,
+        true_value: u8,
+        false_value: u8,
+        output: &mut Vec<Instruction>,
+    ) {
+        let right_test = self.allocate_cell();
+        let mut body = Vec::new();
+        self.copy_value(right, right_test, &mut body);
+        body.push(Instruction::Branch {
+            condition: right_test,
+            then_body: vec![
+                Instruction::AddConst {
+                    dst: left,
+                    value: 255,
+                },
+                Instruction::AddConst {
+                    dst: right,
+                    value: 255,
+                },
+            ],
+            else_body: vec![Instruction::Transfer {
+                src: left,
+                targets: Vec::new(),
+            }],
+        });
+        output.push(Instruction::Loop {
+            condition: left,
+            body,
+        });
+        self.boolean_from(right, destination, true_value, false_value, output);
     }
 
     fn copy_value(&mut self, source: CellId, destination: CellId, output: &mut Vec<Instruction>) {
@@ -430,6 +532,81 @@ mod tests {
     }
 
     #[test]
+    fn all_unsigned_comparisons_handle_boundaries_and_preserve_operands() {
+        let source = r#"
+            cell left = input();
+            cell right = input();
+            output(left == right);
+            output(left != right);
+            output(left < right);
+            output(left <= right);
+            output(left > right);
+            output(left >= right);
+            output(left);
+            output(right);
+        "#;
+        let brainfuck = compile_source(source).unwrap();
+        let cases = [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (2, 1),
+            (0, 255),
+            (255, 0),
+            (254, 255),
+            (255, 255),
+        ];
+
+        for (left, right) in cases {
+            let output = run(brainfuck.as_bytes(), &[left, right]).unwrap();
+            assert_eq!(
+                output,
+                vec![
+                    u8::from(left == right),
+                    u8::from(left != right),
+                    u8::from(left < right),
+                    u8::from(left <= right),
+                    u8::from(left > right),
+                    u8::from(left >= right),
+                    left,
+                    right,
+                ],
+                "comparison results for {left} and {right}",
+            );
+        }
+    }
+
+    #[test]
+    fn logical_operators_short_circuit_and_return_booleans() {
+        let source = r#"
+            cell zero = 0;
+            cell one = 1;
+            output(zero && input());
+            output(input());
+            output(one || input());
+            output(input());
+            output(one && input());
+            output(zero || input());
+        "#;
+        assert_eq!(
+            execute(source, &[b'A', b'B', 2, 0]),
+            vec![0, b'A', 1, b'B', 1, 0]
+        );
+    }
+
+    #[test]
+    fn stage_four_operator_precedence_matches_the_specification() {
+        let source = r#"
+            output(1 || 0 && 0);
+            output(2 == 1 < 2);
+            output(1 + 2 < 4 == 1);
+        "#;
+        assert_eq!(execute(source, b""), vec![1, 0, 1]);
+    }
+
+    #[test]
     fn blocks_shadow_outer_variables() {
         let source = r#"
             // 外側の値は内側のブロックを抜けても残る。
@@ -450,9 +627,6 @@ mod tests {
         let undefined = lower_source("output(missing);").unwrap_err();
         assert_eq!(undefined.offset(), Some(7));
         assert!(undefined.message().contains("undefined variable"));
-
-        let comparison = lower_source("cell x; if (x != 1) ;").unwrap_err();
-        assert!(comparison.message().contains("only comparison with zero"));
 
         let future_feature = lower_source("push(1);").unwrap_err();
         assert!(future_feature.message().contains("not implemented"));
