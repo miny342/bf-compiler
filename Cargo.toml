@@ -1,3 +1,7 @@
 [workspace]
-members = ["crates/bf-compiler", "crates/bf-interpreter"]
+members = [
+    "crates/bf-compiler",
+    "crates/bf-frame-experiment",
+    "crates/bf-interpreter",
+]
 resolver = "2"

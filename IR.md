@@ -20,6 +20,11 @@ BF IR
 Brainfuckソース
 ```
 
+関数、再帰、frame-relativeなローカル変数を追加する次段階backendでは、ASTとセルIRの
+間またはセルIR内部にContinuation IRを導入する。実験中のchunked frame stack、
+call/return、pointer位置の規約は[ABI.md](ABI.md)に定義する。現在の実装はまだこの
+ABIを使用せず、すべての`CellId`を静的セルとして割り当てる。
+
 二段に分ける目的は、ソース言語の意味と、Brainfuckのデータポインタや
 相対移動を分離することである。
 
@@ -234,6 +239,8 @@ BF IR上では有効であるが、文字列化した結果は空文字列にな
 ### 将来BF IRで行える最適化
 
 以下は将来の候補であり、現在は実装しない。
+BF固有の分岐、比較、divmod、moving-indexなどのlowering候補とcost modelは
+[BF_OPTIMIZATION_NOTES.md](BF_OPTIMIZATION_NOTES.md)にまとめる。
 
 ```text
 Move(3), Move(-1) → Move(2)
@@ -247,73 +254,10 @@ Add(0)            → 削除
 転送ループを認識しているため、BF IRの当面の責務はBrainfuckの構造を保持した
 中間表現と最終的な文字列化である。
 
-## 組み込みスタック
-
-BFCの`push(expression)`と`pop()`は、一般の動的配列とは別の専用操作として
-loweringする。スタックはプログラム全体で一つであり、静的配置されたセルと
-コンパイラ用一時セルより後ろのテープ領域を使用する。
-
-セルIRへは次の破壊的命令を追加する予定である。
-
-```rust
-StackPush {
-    src: CellId,
-}
-
-StackPop {
-    dst: CellId,
-}
-```
-
-暫定的な意味は次のとおりである。
-
-```text
-StackPush:
-    stack.push(src)
-    src = 0
-
-StackPop:
-    dst = stack.pop()
-```
-
-ソース言語上の`push(variable)`は変数を変更しない。式を一時セルへ非破壊で評価し、
-その一時セルを`StackPush`が消費する。`pop()`も一時セルへの`StackPop`として
-式のloweringへ組み込む。
-
-スタック領域は、概ね次のように要素ごとの`flag`と`data`を交互に配置する案を
-基準とする。
-
-```text
-static cells | codegen work cells | dummy | flag data | flag data | ...
-                                           occupied    first empty
-```
-
-flagをfrontierとして走査すれば、実行時の添字を保存・復元する必要がない。
-pushとpopはスタック深さに対してO(n)で実装できる見込みである。セル値は8 bitに
-固定されるため、値を走査先との間で移送する反復回数も深さに対する定数係数として
-扱える。
-
-この操作はセルIRから通常の`Move`、`Add`、`Loop`へ展開する。BF IRへ
-`Push`や`Pop`を追加せず、BF IRをBrainfuckと同型に保つ。
-
-実装前に次をテストで確定する。
-
-- 空スタックと1要素以上のスタックに対するポインタ位置
-- 値0、1、255のpush/pop
-- 複数回のLIFO順序
-- push元セルを保存するための一時セル
-- pop先セルの上書き
-- ネストした式中の`pop()`の評価順序
-- 静的領域、一時領域、スタック領域が重ならないこと
-- 最大容量付近でテープ右端を越えないこと
-
-空スタックからのpopと容量超過pushはソース言語上の未定義動作とし、codegenは
-通常経路に実行時検査を挿入しない。デバッグ用検査は将来別モードとして追加できる。
-
 ## 配列
 
-配列命令は、テープ上の表現を実験してから確定する。動的添字によるアクセスは、
-通常の`CellId`参照として扱えない。
+動的添字によるアクセスは通常の`CellId`参照として扱えない。物理表現とcontrol flowは
+[ABI.md](ABI.md)の16-cell array portalへloweringする。
 
 ### 定数添字
 
@@ -349,7 +293,7 @@ BFでは実行時に選択したセルを、後続命令から通常の`CellId`�
 できない。そのため、単なる`Array(array_top, index)`ではなく、選択した要素に
 対する操作まで命令に含める必要がある。
 
-初期候補は次のとおりである。
+セルIRには次を追加する。
 
 ```rust
 ArrayLoad {
@@ -390,18 +334,18 @@ ArrayTake:
     index = 0
 ```
 
-`ArrayTake`は破壊的であるため、非破壊の`ArrayLoad`より短いBFへ変換できる
-可能性がある。添字や格納元を保存したい場合は、上位の変換処理が明示的に
-複製する。
+`ArrayTake`は破壊的な最適化用命令であり、frontendが通常の配列readへ直接使用しない。
+添字や格納元をsource上で保存する場合は、上位の変換処理がcompiler temporaryへ複製
+してから破壊的なABI helperへ渡す。
 
-以下を検証してから配列仕様を固定する。
+global/localとも、16 logical protocol cellsの後ろに配列要素を置く。動的load/storeは
+共有array continuationへ入り、call-site固有resume continuationが値を回収してframeへ
+戻る。初期backendはindexをchunk/withinへ分けた二段静的dispatchを生成する。
 
-- 配列要素と移動用マーカー・作業セルのレイアウト
-- 動的アクセス後にデータポインタを既知位置へ戻す方法
-- 添字セルを破壊することで実際にどれだけ簡略化できるか
-- load、store、input、outputなどを同じアクセス中に融合する価値
-- 配列の範囲外アクセスを実行時に検出するか
-- 配列長として現実的に扱える上限
+- 配列長の上限は`cell`添字が全要素を表現できる256とする。
+- 実行時範囲外添字は検査せず未定義動作とする。
+- 定数添字はportalを呼ばず、layoutから直接offsetを解決する。
+- load/storeと直後の演算を融合する最適化は後から追加してよい。
 
 ## セル配置
 
@@ -440,8 +384,8 @@ struct Layout {
 
 1. 現在のセルIR、BF IR、BF文字列化を基準実装として安定させる。
 2. 論理セルと物理セルを分離する`Layout`を導入する。
-3. `StackPush`と`StackPop`のレイアウトとBF列を実験し、セルIRへ追加する。
-4. 複数の配列レイアウトを、生成サイズと実行ステップ数で比較する。
-5. 動的配列命令の破壊規則を確定してセルIRへ追加する。
-6. セルIRを出力するBFCフロントエンドを実装する。
+3. Continuation IRとABI frame layoutを導入する。
+4. 定数添字配列を論理layoutへ接続する。
+5. array portalと動的配列命令を追加する。
+6. function call、return、aggregate valueをfrontendへ追加する。
 7. 必要性を測定してから、BF IRの最適化を別パスとして追加する。

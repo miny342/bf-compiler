@@ -14,8 +14,6 @@ pub(crate) enum TokenKind {
     While,
     Input,
     Output,
-    Push,
-    Pop,
     Identifier(String),
     Number(u8),
     LeftBrace,
@@ -83,8 +81,6 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                     "while" => TokenKind::While,
                     "input" => TokenKind::Input,
                     "output" => TokenKind::Output,
-                    "push" => TokenKind::Push,
-                    "pop" => TokenKind::Pop,
                     _ => TokenKind::Identifier(text.to_owned()),
                 };
                 tokens.push(Token {

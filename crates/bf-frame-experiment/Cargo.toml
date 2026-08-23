@@ -1,0 +1,16 @@
+[package]
+name = "bf-frame-experiment"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "bf_frame_experiment"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bf-frame-experiment"
+path = "src/main.rs"
+
+[dependencies]
+bf-interpreter = { path = "../bf-interpreter" }

@@ -46,9 +46,6 @@ impl Parser {
             TokenKind::Output => self.parse_output(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
-            TokenKind::Push | TokenKind::Pop => Err(self.error_here(
-                "push and pop are specified but not implemented in this compiler stage",
-            )),
             TokenKind::Identifier(_) => self.parse_assignment(),
             TokenKind::RightBrace => Err(self.error_here("unexpected '}'")),
             TokenKind::Else => Err(self.error_here("'else' without a matching 'if'")),
@@ -71,9 +68,12 @@ impl Parser {
 
     fn parse_declaration(&mut self) -> Result<Statement, FrontendError> {
         self.advance();
-        let name = self.parse_name("expected a variable name after 'cell'")?;
         if self.at(&TokenKind::LeftBracket) {
             return Err(self.error_here("arrays are not implemented in this compiler stage"));
+        }
+        let name = self.parse_name("expected a variable name after 'cell'")?;
+        if self.at(&TokenKind::LeftParen) {
+            return Err(self.error_here("functions are not implemented in this compiler stage"));
         }
         let initializer = if self.at(&TokenKind::Assign) {
             self.advance();
@@ -87,6 +87,11 @@ impl Parser {
 
     fn parse_assignment(&mut self) -> Result<Statement, FrontendError> {
         let name = self.parse_name("expected assignment target")?;
+        if self.at(&TokenKind::LeftParen) {
+            return Err(
+                self.error_here("function calls are not implemented in this compiler stage")
+            );
+        }
         if self.at(&TokenKind::LeftBracket) {
             return Err(self.error_here("arrays are not implemented in this compiler stage"));
         }
@@ -250,6 +255,10 @@ impl Parser {
             }
             TokenKind::Identifier(text) => {
                 self.advance();
+                if self.at(&TokenKind::LeftParen) {
+                    return Err(self
+                        .error_here("function calls are not implemented in this compiler stage"));
+                }
                 if self.at(&TokenKind::LeftBracket) {
                     return Err(
                         self.error_here("arrays are not implemented in this compiler stage")
@@ -273,10 +282,6 @@ impl Parser {
                     offset: token.offset,
                 })
             }
-            TokenKind::Pop => Err(FrontendError::at(
-                token.offset,
-                "pop is specified but not implemented in this compiler stage",
-            )),
             TokenKind::LeftParen => {
                 self.advance();
                 let expression = self.parse_expression()?;

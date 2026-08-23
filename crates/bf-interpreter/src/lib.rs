@@ -7,6 +7,22 @@ use std::fmt;
 /// Number of cells in the standard tape.
 pub const TAPE_LEN: usize = 30_000;
 
+/// Execution measurements useful for comparing generated Brainfuck programs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunStats {
+    /// Number of parsed Brainfuck instructions executed, including jumps.
+    pub executed_instructions: u64,
+    /// Largest tape index reached by the data pointer.
+    pub max_pointer: usize,
+}
+
+/// Binary output and measurements from one interpreter run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunResult {
+    pub output: Vec<u8>,
+    pub stats: RunStats,
+}
+
 /// An error encountered while parsing or running a program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -64,6 +80,11 @@ struct Instruction {
 /// Non-instruction bytes in `source` are ignored. See the workspace's
 /// `SPEC.md` for the exact dialect.
 pub fn run(source: &[u8], input: &[u8]) -> Result<Vec<u8>, Error> {
+    Ok(run_with_stats(source, input)?.output)
+}
+
+/// Runs a Brainfuck program and returns its output and execution measurements.
+pub fn run_with_stats(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
     let instructions = parse(source)?;
     execute(&instructions, input)
 }
@@ -117,14 +138,17 @@ fn parse(source: &[u8]) -> Result<Vec<Instruction>, Error> {
     Ok(instructions)
 }
 
-fn execute(instructions: &[Instruction], input: &[u8]) -> Result<Vec<u8>, Error> {
+fn execute(instructions: &[Instruction], input: &[u8]) -> Result<RunResult, Error> {
     let mut tape = vec![0_u8; TAPE_LEN];
     let mut pointer = 0_usize;
+    let mut max_pointer = 0_usize;
     let mut program_counter = 0_usize;
     let mut input_position = 0_usize;
     let mut output = Vec::new();
+    let mut executed_instructions = 0_u64;
 
     while let Some(instruction) = instructions.get(program_counter) {
+        executed_instructions += 1;
         match instruction.op {
             Op::Right => {
                 if pointer + 1 == TAPE_LEN {
@@ -133,6 +157,7 @@ fn execute(instructions: &[Instruction], input: &[u8]) -> Result<Vec<u8>, Error>
                     });
                 }
                 pointer += 1;
+                max_pointer = max_pointer.max(pointer);
                 program_counter += 1;
             }
             Op::Left => {
@@ -178,7 +203,13 @@ fn execute(instructions: &[Instruction], input: &[u8]) -> Result<Vec<u8>, Error>
         }
     }
 
-    Ok(output)
+    Ok(RunResult {
+        output,
+        stats: RunStats {
+            executed_instructions,
+            max_pointer,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -199,6 +230,14 @@ mod tests {
     #[test]
     fn input_and_output_are_binary() {
         assert_eq!(run(b",.,.,.", &[0, 128, 255]), Ok(vec![0, 128, 255]));
+    }
+
+    #[test]
+    fn reports_execution_measurements() {
+        let result = run_with_stats(b"++[>++<-]>.", b"").unwrap();
+        assert_eq!(result.output, vec![4]);
+        assert_eq!(result.stats.executed_instructions, 17);
+        assert_eq!(result.stats.max_pointer, 1);
     }
 
     #[test]

@@ -628,8 +628,15 @@ mod tests {
         assert_eq!(undefined.offset(), Some(7));
         assert!(undefined.message().contains("undefined variable"));
 
-        let future_feature = lower_source("push(1);").unwrap_err();
-        assert!(future_feature.message().contains("not implemented"));
+        let future_feature = lower_source("future_function(1);").unwrap_err();
+        assert!(future_feature.message().contains("function calls"));
+
+        let future_array = lower_source("cell[16] values;").unwrap_err();
+        assert!(future_array.message().contains("arrays"));
+
+        let future_definition =
+            lower_source("cell identity(cell value) { return value; }").unwrap_err();
+        assert!(future_definition.message().contains("functions"));
 
         let unbraced_declaration = lower_source("cell x; if (x) cell y;").unwrap_err();
         assert!(unbraced_declaration.message().contains("inside a block"));

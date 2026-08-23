@@ -5,19 +5,21 @@
 
 BFCはBrainfuckを直接記述するためのアセンブリではなく、人が普通に読み書き
 でき、最終的にはBFC自身でコンパイラを実装できる言語を目指す。一方で、実装を
-小さく保つため、Cのプリプロセッサ、ポインタ、構造体、可変長整数などは持たない。
+小さく保つため、Cのプリプロセッサ、ポインタ、参照、構造体、可変長整数などは
+初期仕様に含めない。
 
 ## 設計方針
 
 - 構文と演算子は可能な範囲でCに合わせる。
-- 実行時の基本値はBrainfuckの1セルに対応する`cell`だけとする。
+- 実行時のscalar値はBrainfuckの1セルに対応する`cell`とする。
+- 固定長`cell`配列はcopy semanticsを持つaggregate valueとする。
 - 言語上の代入、式、条件判定は非破壊である。
 - Cell IRへの変換時に必要な一時セルと破壊的操作をコンパイラが挿入する。
-- 動的メモリ確保、ポインタ演算、ユーザー定義関数は持たない。
+- 動的メモリ確保、ポインタ、参照、address-of、pointer演算は持たない。
+- ユーザー定義関数、直接再帰、相互再帰を認める。
 - マクロおよびプリプロセッサは持たない。
 - 暗黙の入出力は行わない。
 - トップレベルの文を先頭から実行し、特別な`main`関数は持たない。
-- テープの静的に割り当てなかった領域を使う、単一の組み込みスタックを持つ。
 
 ## 最小例
 
@@ -31,8 +33,8 @@ while (ch != 0) {
 }
 ```
 
-`input()`、`output()`、`push()`、`pop()`だけが呼び出し形式を持つ組み込み操作
-である。ユーザー定義関数は存在しない。
+トップレベル文は暗黙のroot functionとして実行する。ユーザー定義関数は同じfileの
+トップレベルへ定義し、rootまたは別の関数から呼び出せる。
 
 ## ソースファイル
 
@@ -79,13 +81,15 @@ cell initialized = 42;
 固定長の`cell`配列を宣言できる。
 
 ```c
-cell buffer[256];
-cell small[16];
+cell[256] buffer;
+cell[16] small;
 ```
 
 - 長さは1から256までのコンパイル時定数とする。
 - 全要素を0で初期化する。
-- 配列全体の代入、比較、戻り値としての返却はできない。
+- 同じ長さの配列同士で全体代入できる。
+- 配列を関数へ値渡しし、戻り値として値返しできる。
+- 配列全体の比較はできない。
 - 配列初期化子は初期仕様では持たない。
 - 定数添字の範囲外アクセスはコンパイルエラーとする。
 - 実行時添字の範囲外アクセスは未定義動作とする。
@@ -99,6 +103,9 @@ value = buffer[index];
 
 配列長を256にすれば、任意の`cell`値を有効な添字として利用できる。より小さい
 配列へ動的にアクセスする場合、プログラム側で範囲内であることを保証する。
+
+配列代入と引数・戻り値は意味上copyである。compilerは結果が同じならmove、caller
+outboxへの直接構築、その他のcopy elisionを行ってよい。
 
 ## リテラル
 
@@ -145,26 +152,28 @@ value = buffer[index];
 
 ```c
 cell counter;
-cell buffer[256];
+cell[256] buffer;
 
 {
     cell nested;
 }
 ```
 
-- トップレベルは暗黙の最外ブロックを形成する。
+- トップレベルの文は暗黙のroot scopeを形成する。
+- function parameterとfunction bodyはactivationごとのlocal scopeを形成する。
 - ローカル変数の有効範囲は宣言位置から、そのブロックの終端までとする。
 - 同じスコープで同名の識別子を複数宣言できない。
 - 内側のブロックから外側の変数をshadowできる。
-- `cell`、`if`、`while`などの予約語は識別子に使用できない。
-- `input`、`output`、`push`、`pop`は予約され、変数名として使用できない。
+- `cell`、`void`、`return`、`if`、`while`などの予約語は識別子に使用できない。
+- `input`、`output`は予約され、変数名またはfunction名として使用できない。
 
-ローカル変数も実装上は静的にセルを割り当てる。ブロックを抜けた後、そのセルを
-別のローカル変数や一時値へ再利用してよい。
+root scopeの変数はstatic領域、function parameterとlocalはactivation frameへ置く。
+ブロックを抜けた後、その領域を別のlocalまたはtemporaryへ再利用してよい。
 
 ## 式
 
-式の評価結果は`cell`である。オペランドの評価順序は左から右とし、式の評価は
+算術・比較・論理式の評価結果は`cell`である。function callは宣言された`cell`または
+固定長配列型を返せる。オペランドと関数引数の評価順序は左から右とし、式の評価は
 変数や配列要素の値を暗黙には破壊しない。
 
 ### 一次式
@@ -175,11 +184,12 @@ array[index]
 42
 'A'
 input()
-pop()
+function(arguments)
 (expression)
 ```
 
-配列名だけを通常の値として使用することはできない。
+配列名は同じ配列型への代入、関数引数、returnでaggregate valueとして使用できる。
+scalar演算のoperandにはできない。
 
 ### 単項演算子
 
@@ -234,7 +244,7 @@ left || right
 
 | 優先順位 | 演算子 | 結合方向 |
 | --- | --- | --- |
-| 1 | `()`、`[]`、`input()`、`pop()` | 左から右 |
+| 1 | `()`、`[]`、function call、`input()` | 左から右 |
 | 2 | 単項`+`、単項`-`、`!` | 右から左 |
 | 3 | 二項`+`、二項`-` | 左から右 |
 | 4 | `<`、`<=`、`>`、`>=` | 左から右 |
@@ -242,7 +252,7 @@ left || right
 | 6 | `&&` | 左から右 |
 | 7 | `||` | 左から右 |
 
-代入、`output`、`push`は式ではなく文である。このため、次のような記述は
+代入と`output`は式ではなく文である。このため、次のような記述は
 できない。
 
 ```c
@@ -259,18 +269,18 @@ while ((ch = input()) != 0) {
 ```c
 ;
 output(expression);
-push(expression);
+void_function(arguments);
 ```
 
-値を計算して捨てるだけの式文は認めない。`output`と`push`は式ではなく専用の
-文として扱う。
+値を計算して捨てるだけの式文は認めない。`output`は専用文として扱い、function callを
+文として使えるのはreturn型が`void`の場合だけとする。
 
 ### 変数宣言
 
 ```c
 cell value;
 cell value = expression;
-cell buffer[256];
+cell[256] buffer;
 ```
 
 配列宣言に初期化式は指定できない。
@@ -287,7 +297,7 @@ buffer[index] += expression;
 buffer[index] -= expression;
 ```
 
-- 左辺は`cell`変数または配列要素でなければならない。
+- 左辺は`cell`変数、同じ型の配列変数、または配列要素でなければならない。
 - 右辺を評価してから左辺の場所を決定する。
 - 配列添字は左辺の更新直前に評価する。
 - 右辺や添字に現れた変数の値は保存される。
@@ -330,21 +340,61 @@ while (condition) {
 }
 ```
 
-各反復の開始前に条件式を再評価する。条件式が参照した変数は、式自身に`input()`
-または`pop()`が含まれる場合を除いて変更しない。
+各反復の開始前に条件式を再評価する。条件式が参照した変数は、式自身に`input()`または
+副作用を持つfunction callが含まれる場合を除いて変更しない。
 
 初期仕様では`for`、`do`、`break`、`continue`、`switch`、`goto`を持たない。
 
+## 関数
+
+関数はfileのトップレベルに定義する。nested function、overload、可変長引数は持たない。
+
+```c
+cell increment(cell value) {
+    return value + 1;
+}
+
+cell[100] transform(cell[100] source) {
+    // 配列は値渡し
+    return source;
+}
+
+void emit(cell value) {
+    output(value);
+    return;
+}
+```
+
+- return型は`cell`、`cell[N]`、`void`のいずれかとする。
+- parameter型は`cell`または`cell[N]`とし、常に値渡しとする。
+- `cell`および配列を値としてreturnできる。
+- `void`以外の全実行経路は対応する型の値をreturnしなければならない。
+- `void`関数末尾には暗黙の`return;`がある。
+- 直接再帰と相互再帰を認める。
+- function名はfile scopeで解決し、定義より前から呼び出せる。
+- functionからglobal変数を参照できるが、callerのlocalを直接参照できない。
+- `&`、pointer、reference、参照渡しは持たない。
+
+配列を書き換えてcallerへ返す場合は、変更後の配列を明示的にreturnして代入する。
+
+```c
+buffer = transform(buffer);
+```
+
+実装ABI、再帰frame、aggregate return outboxは[ABI.md](ABI.md)に定義する。
+
 ## VMの記述
 
-BFCには一般的な関数やcall命令を設けないが、組み込みスタックと動的配列を使って
-VMのデータスタック、call、returnなどをBFCプログラム自身で実装できる。
+BFC自身の関数とは別に、動的配列を使って対象VMのデータstack、call、returnなどを
+BFCプログラム内に実装できる。
 
 VMの基本的なdispatch loopは次のように記述できる。
 
 ```c
-cell code[256];
+cell[256] code;
+cell[256] data_stack;
 cell pc;
+cell sp;
 cell opcode;
 cell running = 1;
 
@@ -355,10 +405,12 @@ while (running) {
     if (opcode == 0) {
         running = 0;
     } else if (opcode == 1) {
-        push(code[pc]);
+        data_stack[sp] = code[pc];
+        sp += 1;
         pc += 1;
     } else if (opcode == 2) {
-        opcode = pop();
+        sp -= 1;
+        opcode = data_stack[sp];
     }
 }
 ```
@@ -391,47 +443,8 @@ output(cell value)
 - 改行や文字コードの変換は行わない。
 - 引数は左から右の通常規則に従って1回評価する。
 
-### `push`
-
-```text
-push(cell value)
-```
-
-- `value`を組み込みスタックの先頭へ積む。
-- `value`の式は1回だけ評価する。
-- 変数からpushしても、その変数の値は変更しない。
-- 文としてのみ使用でき、値を返さない。
-
-### `pop`
-
-```text
-pop() -> cell
-```
-
-- 組み込みスタックの最後の値を取り除いて返す。
-- 式の中で使用できる。
-
-スタックはプログラム全体で一つだけ存在し、実行開始時は空である。静的セル、
-配列、コンパイラ用一時セルより後ろの未使用テープ領域を使用する。ソース上で
-容量を宣言する必要はなく、実際の容量はコード生成後の空き領域から決まる。
-
-空のスタックからの`pop()`と、利用可能なテープ領域を超える`push()`は未定義動作
-とする。必要ならBFCプログラム自身が別の`cell`で深さを管理して検査する。
-
-初期実装では、各要素を概ね`flag`と`data`の2セルで管理し、終端flagを走査する
-レイアウトを想定する。
-
-```text
-codegen作業セル | dummy | flag data | flag data | ... | 0 data
-                              使用中                 終端
-```
-
-pushとpopはスタック深さに対してO(n)の走査で実装する。これは、任意の添字を
-保存しながらセルを選択する一般的な動的配列アクセスとは別の専用loweringとする。
-正確な作業セル数とBF列は、複数の実装をテストしてから固定する。
-
-`input`、`output`、`push`、`pop`以外に呼び出し形式の組み込み操作は定義しない。
-clear、copy、文字列出力などは通常の代入、配列、ループで表現する。
+`input`、`output`以外に呼び出し形式の組み込み操作は定義しない。stack、clear、copy、
+文字列出力などは通常の関数、代入、配列、ループで表現する。
 
 ## プログラムの実行
 
@@ -445,7 +458,8 @@ if (value != 0) {
 }
 ```
 
-- トップレベルでも変数宣言、ブロック、代入、条件分岐、ループを使用できる。
+- トップレベルでも変数宣言、関数定義、ブロック、代入、条件分岐、ループを使用できる。
+- 関数定義は登録されるだけで、その定義位置に到達しても実行しない。
 - ソース末尾へ到達するとプログラムを正常終了する。
 - 終了コードの概念は持たない。
 
@@ -454,7 +468,9 @@ if (value != 0) {
 以下は字句の詳細を省略したEBNFである。
 
 ```ebnf
-program          = { block-item } ;
+program          = { top-level-item } ;
+
+top-level-item   = function-definition | block-item ;
 
 block-item       = declaration | statement ;
 
@@ -464,17 +480,26 @@ statement        = ";"
                  | block
                  | assignment
                  | output-statement
-                 | push-statement
+                 | call-statement
+                 | return-statement
                  | if-statement
                  | while-statement ;
 
-declaration      = "cell" identifier [ "[" integer "]" ]
-                   [ "=" expression ] ";" ;
+value-type       = "cell" [ "[" integer "]" ] ;
+return-type      = value-type | "void" ;
+
+declaration      = value-type identifier [ "=" expression ] ";" ;
+
+function-definition
+                 = return-type identifier "(" [ parameters ] ")" block ;
+parameters       = parameter { "," parameter } ;
+parameter        = value-type identifier ;
 
 assignment       = place ( "=" | "+=" | "-=" ) expression ";" ;
 
 output-statement = "output" "(" expression ")" ";" ;
-push-statement   = "push" "(" expression ")" ";" ;
+call-statement   = function-call ";" ;
+return-statement = "return" [ expression ] ";" ;
 
 place            = identifier [ "[" expression "]" ] ;
 
@@ -495,9 +520,12 @@ primary          = integer
                  | character
                  | identifier
                  | identifier "[" expression "]"
+                 | function-call
                  | "input" "(" ")"
-                 | "pop" "(" ")"
                  | "(" expression ")" ;
+
+function-call    = identifier "(" [ arguments ] ")" ;
+arguments        = expression { "," expression } ;
 ```
 
 配列には初期化式を指定できない。
@@ -509,18 +537,21 @@ primary          = integer
 - 字句または構文が不正である。
 - 未定義の識別子を参照する。
 - 同じスコープで識別子を再定義する。
-- 配列を通常の`cell`値として使用する。
+- 配列を算術、比較、論理、`output`など`cell`を要求する位置で使用する。
 - 定数添字が配列の範囲外である。
 - 整数リテラルが`0..=255`の範囲外である。
-- `input`、`output`、`push`、`pop`を仕様と異なる形で使用する。
-- ユーザー定義関数または`return`を記述する。
+- `input`、`output`を仕様と異なる形で使用する。
+- function callの引数型・個数、代入先、return型が宣言と一致しない。
+- `void`関数の値を使用する。
+- `void`以外の関数に値を返さない実行経路がある。
+- nested functionを定義する。
 - 静的セル、一時セル、配列用作業セル、スタック管理セルがBFテープの30,000セルを
   超える。
 
 ## 未定義動作
 
-初期仕様における未定義動作は、実行時の値による配列範囲外アクセス、空スタック
-からの`pop()`、利用可能なスタック容量を超える`push()`とする。
+初期仕様における未定義動作は、実行時の値による配列範囲外アクセスと、再帰または
+call深度によるBFテープ右端超過とする。
 未定義動作を含むプログラムについて、コンパイラは診断する義務を持たず、生成BFの
 動作も保証しない。
 
@@ -534,10 +565,11 @@ primary          = integer
 2. `input`、`output`、代入、`+`、`-`
 3. `if`、`while`、`expression != 0`、`!`
 4. その他の比較、`&&`、`||`
-5. 定数添字の配列
-6. 動的添字の配列
-7. `push`、`pop`と専用スタックcodegen
-8. BFCで記述するVMまたはセルフホスト用コンパイラ
+5. Continuation IR、scalar関数、call、return、再帰
+6. 定数添字の配列
+7. array portalと動的添字の配列
+8. 配列の値渡し、全体代入、aggregate return
+9. BFCで記述するVMまたはセルフホスト用コンパイラ
 
 未実装の構文を受理して誤ったBFを生成するのではなく、実装済みになるまで明示的な
 コンパイルエラーとして拒否する。
@@ -545,5 +577,5 @@ primary          = integer
 ### 現在の実装状況
 
 第4段階まで実装している。すべての比較演算と、短絡評価する論理`&&`および`||`を
-使用できる。配列、`push`と`pop`は仕様だけが存在し、現在のコンパイラは明示的な
-未実装エラーとして拒否する。
+使用できる。関数と配列は仕様だけが存在し、現在のコンパイラは明示的な未実装エラー
+として拒否する。関数・配列ABIは独立experimentで検証済みである。
