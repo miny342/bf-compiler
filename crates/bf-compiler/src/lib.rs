@@ -25,9 +25,10 @@ pub use abi_codegen::{
 pub use bf_ir::{BfInstruction, BfProgram};
 pub use codegen::{CodegenError, compile, lower};
 pub use continuation_ir::{
-    Address, Continuation, ContinuationId, ContinuationIrError, ContinuationProgram,
-    FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId, Terminator,
-    ValueType,
+    Address, ArrayRegion, Continuation, ContinuationId, ContinuationIrError, ContinuationProgram,
+    FrameArrayDescriptor, FrameArrayId, FrameInstruction, FrameSlot, FrameTransferTarget,
+    FunctionDescriptor, FunctionId, GlobalDescriptor, GlobalId, ParameterLocation, Terminator,
+    ValueOperand, ValueType,
 };
 pub use frame_layout::{
     AbiConfig, AbiField, DEFAULT_CHUNK_CELLS, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,

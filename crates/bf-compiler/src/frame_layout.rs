@@ -5,7 +5,7 @@
 //! frame, an optional aggregate-return outbox is immediately below the ABI
 //! context, and the 16 protocol cells occupy the highest-address chunks.
 
-use crate::continuation_ir::FrameSlot;
+use crate::continuation_ir::{FrameArrayDescriptor, FrameArrayId, FrameSlot};
 use std::error::Error;
 use std::fmt;
 
@@ -126,9 +126,18 @@ pub struct FrameLayout {
     value_cells: usize,
     outbox_cells: usize,
     value_chunks: usize,
+    frame_arrays: Vec<FrameArrayLayout>,
+    array_chunks: usize,
     outbox_chunks: usize,
     context_chunks: usize,
     frame_chunks: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameArrayLayout {
+    descriptor: FrameArrayDescriptor,
+    base_chunk: usize,
+    chunks: usize,
 }
 
 impl FrameLayout {
@@ -139,11 +148,58 @@ impl FrameLayout {
         value_cells: usize,
         outbox_cells: usize,
     ) -> Result<Self, FrameLayoutError> {
+        Self::with_arrays(config, value_cells, &[], outbox_cells)
+    }
+
+    /// Lay out scalar slots, aligned array regions, an aggregate outbox, and
+    /// the common dispatch context in that order.
+    pub fn with_arrays(
+        config: AbiConfig,
+        value_cells: usize,
+        frame_arrays: &[FrameArrayDescriptor],
+        outbox_cells: usize,
+    ) -> Result<Self, FrameLayoutError> {
         let value_chunks = checked_chunks(value_cells, config)?;
+        let mut array_chunks = 0usize;
+        let mut array_layouts = Vec::with_capacity(frame_arrays.len());
+        for descriptor in frame_arrays {
+            if !(1..=256).contains(&descriptor.cells()) {
+                return Err(FrameLayoutError::InvalidArrayLength {
+                    array: descriptor.id(),
+                    cells: descriptor.cells(),
+                });
+            }
+            if array_layouts
+                .iter()
+                .any(|layout: &FrameArrayLayout| layout.descriptor.id() == descriptor.id())
+            {
+                return Err(FrameLayoutError::DuplicateFrameArray {
+                    array: descriptor.id(),
+                });
+            }
+            let chunks = checked_chunks(
+                PROTOCOL_CELLS
+                    .checked_add(descriptor.cells())
+                    .ok_or(FrameLayoutError::SizeOverflow)?,
+                config,
+            )?;
+            let base_chunk = value_chunks
+                .checked_add(array_chunks)
+                .ok_or(FrameLayoutError::SizeOverflow)?;
+            array_layouts.push(FrameArrayLayout {
+                descriptor: *descriptor,
+                base_chunk,
+                chunks,
+            });
+            array_chunks = array_chunks
+                .checked_add(chunks)
+                .ok_or(FrameLayoutError::SizeOverflow)?;
+        }
         let outbox_chunks = checked_chunks(outbox_cells, config)?;
         let context_chunks = config.portal_chunks();
         let frame_chunks = value_chunks
-            .checked_add(outbox_chunks)
+            .checked_add(array_chunks)
+            .and_then(|chunks| chunks.checked_add(outbox_chunks))
             .and_then(|chunks| chunks.checked_add(context_chunks))
             .ok_or(FrameLayoutError::SizeOverflow)?;
 
@@ -152,6 +208,8 @@ impl FrameLayout {
             value_cells,
             outbox_cells,
             value_chunks,
+            frame_arrays: array_layouts,
+            array_chunks,
             outbox_chunks,
             context_chunks,
             frame_chunks,
@@ -190,6 +248,10 @@ impl FrameLayout {
 
     pub const fn outbox_chunks(&self) -> usize {
         self.outbox_chunks
+    }
+
+    pub const fn array_chunks(&self) -> usize {
+        self.array_chunks
     }
 
     pub const fn context_chunks(&self) -> usize {
@@ -234,11 +296,74 @@ impl FrameLayout {
             });
         }
 
-        let chunks_below_context = self.value_chunks + self.outbox_chunks;
+        let chunks_below_context = self.value_chunks + self.array_chunks + self.outbox_chunks;
         Ok(
             -(chunks_below_context as isize * self.config.stride() as isize)
                 + self.config.try_logical_offset_from_head(index)? as isize,
         )
+    }
+
+    /// Offset of an aligned array's base head from the dispatch-context base.
+    pub fn array_base_offset(&self, array: FrameArrayId) -> Result<isize, FrameLayoutError> {
+        let layout = self.array_layout(array)?;
+        let chunks_below_context = self.value_chunks + self.array_chunks + self.outbox_chunks;
+        Ok(-((chunks_below_context - layout.base_chunk) as isize * self.config.stride() as isize))
+    }
+
+    pub fn array_chunk_count(&self, array: FrameArrayId) -> Result<usize, FrameLayoutError> {
+        Ok(self.array_layout(array)?.chunks)
+    }
+
+    /// Offset of one payload element from the dispatch-context base.
+    pub fn array_element_offset(
+        &self,
+        array: FrameArrayId,
+        index: usize,
+    ) -> Result<isize, FrameLayoutError> {
+        let layout = self.array_layout(array)?;
+        if index >= layout.descriptor.cells() {
+            return Err(FrameLayoutError::ArrayElementOutOfBounds {
+                array,
+                index,
+                cells: layout.descriptor.cells(),
+            });
+        }
+        Ok(self.array_base_offset(array)?
+            + self
+                .config
+                .try_logical_offset_from_head(PROTOCOL_CELLS + index)? as isize)
+    }
+
+    /// Offset of a protocol field in an aligned array portal.
+    pub fn array_portal_offset(
+        &self,
+        array: FrameArrayId,
+        field: AbiField,
+    ) -> Result<isize, FrameLayoutError> {
+        Ok(self.array_base_offset(array)?
+            + self.config.try_logical_offset_from_head(field.index())? as isize)
+    }
+
+    pub fn array_base_offset_from_frontier(
+        &self,
+        array: FrameArrayId,
+    ) -> Result<isize, FrameLayoutError> {
+        Ok(self.context_offset_from_frontier() + self.array_base_offset(array)?)
+    }
+
+    pub fn array_element_offset_from_frontier(
+        &self,
+        array: FrameArrayId,
+        index: usize,
+    ) -> Result<isize, FrameLayoutError> {
+        Ok(self.context_offset_from_frontier() + self.array_element_offset(array, index)?)
+    }
+
+    fn array_layout(&self, array: FrameArrayId) -> Result<&FrameArrayLayout, FrameLayoutError> {
+        self.frame_arrays
+            .iter()
+            .find(|layout| layout.descriptor.id() == array)
+            .ok_or(FrameLayoutError::UnknownFrameArray { array })
     }
 
     /// Offset of an outbox cell from the dispatch-context base head.
@@ -323,12 +448,13 @@ impl FrameLayout {
     }
 
     fn regions_do_not_overlap(&self) -> bool {
-        let context_start = (self.value_chunks + self.outbox_chunks) * self.config.stride();
+        let context_start =
+            (self.value_chunks + self.array_chunks + self.outbox_chunks) * self.config.stride();
         let frame_end = self.frame_chunks * self.config.stride();
         context_start < frame_end
-            && self.value_chunks * self.config.stride() <= context_start
+            && (self.value_chunks + self.array_chunks) * self.config.stride() <= context_start
             && self.outbox_chunks * self.config.stride()
-                <= context_start - self.value_chunks * self.config.stride()
+                <= context_start - (self.value_chunks + self.array_chunks) * self.config.stride()
     }
 }
 
@@ -345,6 +471,21 @@ pub enum FrameLayoutError {
         chunk_cells: usize,
     },
     SizeOverflow,
+    InvalidArrayLength {
+        array: FrameArrayId,
+        cells: usize,
+    },
+    DuplicateFrameArray {
+        array: FrameArrayId,
+    },
+    UnknownFrameArray {
+        array: FrameArrayId,
+    },
+    ArrayElementOutOfBounds {
+        array: FrameArrayId,
+        index: usize,
+        cells: usize,
+    },
     FrameTooLarge {
         frame_chunks: usize,
         minimum_tape_cells: usize,
@@ -374,6 +515,26 @@ impl fmt::Display for FrameLayoutError {
                 "ABI chunk size must be 8 or 16 data cells, got {chunk_cells}"
             ),
             Self::SizeOverflow => write!(f, "frame layout size exceeds the host address space"),
+            Self::InvalidArrayLength { array, cells } => write!(
+                f,
+                "frame array {} must contain between 1 and 256 cells, got {cells}",
+                array.index()
+            ),
+            Self::DuplicateFrameArray { array } => {
+                write!(f, "frame array {} occurs more than once", array.index())
+            }
+            Self::UnknownFrameArray { array } => {
+                write!(f, "frame array {} does not exist", array.index())
+            }
+            Self::ArrayElementOutOfBounds {
+                array,
+                index,
+                cells,
+            } => write!(
+                f,
+                "element {index} is outside frame array {} with {cells} cells",
+                array.index()
+            ),
             Self::FrameTooLarge {
                 frame_chunks,
                 minimum_tape_cells,
@@ -493,6 +654,98 @@ mod tests {
         assert_eq!(layout.outbox_offset(9), Ok(-16));
         assert!(layout.frame_offset(FrameSlot::new(8)) < layout.outbox_offset(9).unwrap());
         assert!(layout.outbox_offset(0).unwrap() < layout.abi_offset(AbiField::Value));
+    }
+
+    #[test]
+    fn aligned_arrays_fit_between_scalar_slots_and_outbox_for_d16() {
+        let first = FrameArrayId::new(0);
+        let second = FrameArrayId::new(1);
+        let layout = FrameLayout::with_arrays(
+            AbiConfig::new(16).unwrap(),
+            3,
+            &[
+                FrameArrayDescriptor::new(first, 17),
+                FrameArrayDescriptor::new(second, 8),
+            ],
+            18,
+        )
+        .unwrap();
+
+        assert_eq!(layout.value_chunks(), 1);
+        assert_eq!(layout.array_chunk_count(first), Ok(3));
+        assert_eq!(layout.array_chunk_count(second), Ok(2));
+        assert_eq!(layout.array_chunks(), 5);
+        assert_eq!(layout.outbox_chunks(), 2);
+        assert_eq!(layout.context_chunks(), 1);
+        assert_eq!(layout.frame_chunks(), 9);
+        assert_eq!(layout.frame_offset(FrameSlot::new(0)), -135);
+        assert_eq!(layout.array_base_offset(first), Ok(-119));
+        assert_eq!(layout.array_portal_offset(first, AbiField::Value), Ok(-118));
+        assert_eq!(layout.array_element_offset(first, 0), Ok(-101));
+        assert_eq!(layout.array_element_offset(first, 16), Ok(-84));
+        assert_eq!(layout.array_base_offset(second), Ok(-68));
+        assert_eq!(layout.outbox_offset(0), Ok(-16));
+    }
+
+    #[test]
+    fn aligned_array_offsets_skip_heads_for_d8() {
+        let array = FrameArrayId::new(7);
+        let layout = FrameLayout::with_arrays(
+            AbiConfig::new(8).unwrap(),
+            1,
+            &[FrameArrayDescriptor::new(array, 9)],
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(layout.array_chunk_count(array), Ok(4));
+        assert_eq!(layout.frame_chunks(), 9);
+        assert_eq!(layout.frame_offset(FrameSlot::new(0)), -62);
+        assert_eq!(layout.array_base_offset(array), Ok(-54));
+        assert_eq!(layout.array_portal_offset(array, AbiField::Branch), Ok(-44));
+        assert_eq!(layout.array_element_offset(array, 0), Ok(-35));
+        assert_eq!(layout.array_element_offset(array, 8), Ok(-26));
+        assert_eq!(layout.array_base_offset_from_frontier(array), Ok(-72));
+        assert_eq!(layout.array_element_offset_from_frontier(array, 8), Ok(-44));
+    }
+
+    #[test]
+    fn checked_array_layout_rejects_invalid_descriptors_and_indices() {
+        let config = AbiConfig::default();
+        let array = FrameArrayId::new(0);
+        assert_eq!(
+            FrameLayout::with_arrays(config, 0, &[FrameArrayDescriptor::new(array, 0)], 0,),
+            Err(FrameLayoutError::InvalidArrayLength { array, cells: 0 })
+        );
+        assert_eq!(
+            FrameLayout::with_arrays(
+                config,
+                0,
+                &[
+                    FrameArrayDescriptor::new(array, 1),
+                    FrameArrayDescriptor::new(array, 2),
+                ],
+                0,
+            ),
+            Err(FrameLayoutError::DuplicateFrameArray { array })
+        );
+
+        let layout =
+            FrameLayout::with_arrays(config, 0, &[FrameArrayDescriptor::new(array, 1)], 0).unwrap();
+        assert_eq!(
+            layout.array_element_offset(array, 1),
+            Err(FrameLayoutError::ArrayElementOutOfBounds {
+                array,
+                index: 1,
+                cells: 1,
+            })
+        );
+        assert_eq!(
+            layout.array_base_offset(FrameArrayId::new(1)),
+            Err(FrameLayoutError::UnknownFrameArray {
+                array: FrameArrayId::new(1),
+            })
+        );
     }
 
     #[test]

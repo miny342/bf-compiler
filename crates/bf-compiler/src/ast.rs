@@ -1,13 +1,27 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AstProgram {
-    pub(crate) functions: Vec<Function>,
+    pub(crate) items: Vec<TopLevelItem>,
     pub(crate) eof_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Type {
     Cell,
+    Array(usize),
     Void,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TopLevelItem {
+    Global(Global),
+    Function(Function),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Global {
+    pub(crate) ty: Type,
+    pub(crate) name: Name,
+    pub(crate) initializer: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +34,7 @@ pub(crate) struct Function {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Parameter {
+    pub(crate) ty: Type,
     pub(crate) name: Name,
 }
 
@@ -43,8 +58,8 @@ pub(crate) enum StatementKind {
         closing_offset: usize,
     },
     Declaration {
+        ty: Type,
         name: Name,
-        array_length: Option<usize>,
         initializer: Option<Expression>,
     },
     Assignment {

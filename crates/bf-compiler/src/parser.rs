@@ -1,6 +1,6 @@
 use crate::ast::{
-    AssignmentOperator, AstProgram, BinaryOperator, Expression, ExpressionKind, Function, Name,
-    Parameter, Place, Statement, StatementKind, Type, UnaryOperator,
+    AssignmentOperator, AstProgram, BinaryOperator, Expression, ExpressionKind, Function, Global,
+    Name, Parameter, Place, Statement, StatementKind, TopLevelItem, Type, UnaryOperator,
 };
 use crate::frontend::FrontendError;
 use crate::lexer::{Token, TokenKind};
@@ -20,72 +20,71 @@ struct Parser {
 
 impl Parser {
     fn parse_program(mut self) -> Result<AstProgram, FrontendError> {
-        let mut functions = Vec::new();
+        let mut items = Vec::new();
         while !self.at(&TokenKind::Eof) {
-            functions.push(self.parse_function()?);
+            items.push(self.parse_top_level_item()?);
         }
         Ok(AstProgram {
-            functions,
+            items,
             eof_offset: self.current().offset,
         })
     }
 
-    fn parse_function(&mut self) -> Result<Function, FrontendError> {
-        let (return_type, array_length) = match self.current().kind {
-            TokenKind::Cell => {
-                self.advance();
-                (Type::Cell, self.parse_optional_array_length()?)
-            }
-            TokenKind::Void => {
-                self.advance();
-                (Type::Void, None)
-            }
-            _ => {
-                return Err(self.error_here(
-                    "top-level items must be function definitions; global variables are not implemented",
-                ));
-            }
-        };
-
-        let name = self.parse_name("expected a function name")?;
+    fn parse_top_level_item(&mut self) -> Result<TopLevelItem, FrontendError> {
+        let ty = self.parse_type(true)?;
+        let name = self.parse_name("expected a global variable or function name")?;
         if self.at(&TokenKind::LeftBracket) {
             return Err(
                 self.error_here("array length must appear after 'cell' and before the name")
             );
         }
-        if !self.at(&TokenKind::LeftParen) {
-            return Err(
-                self.error_here("global variables are not implemented in this compiler stage")
-            );
+        if self.at(&TokenKind::LeftParen) {
+            return self
+                .parse_function_after_name(ty, name)
+                .map(TopLevelItem::Function);
         }
-        if array_length.is_some() {
-            return Err(
-                self.error_here("array return types are not implemented in this compiler stage")
-            );
+
+        if ty == Type::Void {
+            return Err(FrontendError::at(
+                name.offset,
+                "global variables cannot have type 'void'",
+            ));
         }
+        let initializer = self.parse_optional_initializer(ty)?;
+        self.expect(
+            TokenKind::Semicolon,
+            "expected ';' after global declaration",
+        )?;
+        Ok(TopLevelItem::Global(Global {
+            ty,
+            name,
+            initializer,
+        }))
+    }
+
+    fn parse_function_after_name(
+        &mut self,
+        return_type: Type,
+        name: Name,
+    ) -> Result<Function, FrontendError> {
         self.advance();
 
         let mut parameters = Vec::new();
         if !self.at(&TokenKind::RightParen) {
             loop {
                 if self.at(&TokenKind::Void) {
-                    return Err(self.error_here("function parameters must have type 'cell'"));
+                    return Err(
+                        self.error_here("function parameters must have type 'cell' or 'cell[N]'")
+                    );
                 }
-                self.expect(TokenKind::Cell, "expected parameter type 'cell'")?;
-                let array_length = self.parse_optional_array_length()?;
+                let ty = self.parse_type(false)?;
                 let name = self.parse_name("expected a parameter name")?;
                 if self.at(&TokenKind::LeftBracket) {
                     return Err(self.error_here(
                         "array length must appear after 'cell' and before the parameter name",
                     ));
                 }
-                if array_length.is_some() {
-                    return Err(FrontendError::at(
-                        name.offset,
-                        "array parameters are not implemented in this compiler stage",
-                    ));
-                }
-                parameters.push(Parameter { name });
+                parameters.push(Parameter { ty, name });
                 if !self.at(&TokenKind::Comma) {
                     break;
                 }
@@ -163,8 +162,7 @@ impl Parser {
 
     fn parse_declaration(&mut self) -> Result<Statement, FrontendError> {
         let offset = self.current().offset;
-        self.advance();
-        let array_length = self.parse_optional_array_length()?;
+        let ty = self.parse_type(false)?;
         let name = self.parse_name("expected a variable name after 'cell'")?;
         if self.at(&TokenKind::LeftParen) {
             return Err(self.error_here("nested functions are not allowed"));
@@ -174,20 +172,12 @@ impl Parser {
                 self.error_here("array length must appear after 'cell' and before the name")
             );
         }
-        let initializer = if self.at(&TokenKind::Assign) {
-            if array_length.is_some() {
-                return Err(self.error_here("array declarations cannot have initializers"));
-            }
-            self.advance();
-            Some(self.parse_expression()?)
-        } else {
-            None
-        };
+        let initializer = self.parse_optional_initializer(ty)?;
         self.expect(TokenKind::Semicolon, "expected ';' after declaration")?;
         Ok(Statement {
             kind: StatementKind::Declaration {
+                ty,
                 name,
-                array_length,
                 initializer,
             },
             offset,
@@ -499,6 +489,41 @@ impl Parser {
         Ok(Some(usize::from(length)))
     }
 
+    fn parse_type(&mut self, allow_void: bool) -> Result<Type, FrontendError> {
+        match self.current().kind {
+            TokenKind::Cell => {
+                self.advance();
+                Ok(match self.parse_optional_array_length()? {
+                    Some(length) => Type::Array(length),
+                    None => Type::Cell,
+                })
+            }
+            TokenKind::Void if allow_void => {
+                self.advance();
+                Ok(Type::Void)
+            }
+            TokenKind::Void => {
+                Err(self.error_here("variables and parameters cannot have type 'void'"))
+            }
+            _ if allow_void => Err(self.error_here("expected 'cell' or 'void'")),
+            _ => Err(self.error_here("expected type 'cell'")),
+        }
+    }
+
+    fn parse_optional_initializer(
+        &mut self,
+        ty: Type,
+    ) -> Result<Option<Expression>, FrontendError> {
+        if !self.at(&TokenKind::Assign) {
+            return Ok(None);
+        }
+        if matches!(ty, Type::Array(_)) {
+            return Err(self.error_here("array declarations cannot have initializers"));
+        }
+        self.advance();
+        self.parse_expression().map(Some)
+    }
+
     fn cell_starts_function(&self) -> bool {
         matches!(
             (
@@ -564,20 +589,26 @@ mod tests {
              void main() { output(add(1, 2)); return; }",
         )
         .unwrap();
-        assert_eq!(program.functions.len(), 2);
-        assert_eq!(program.functions[0].parameters.len(), 2);
+        assert_eq!(program.items.len(), 2);
+        let TopLevelItem::Function(function) = &program.items[0] else {
+            panic!("expected function")
+        };
+        assert_eq!(function.parameters.len(), 2);
     }
 
     #[test]
     fn parses_local_arrays_and_rejects_unsupported_array_positions() {
         let program = parse_source("void main() { cell[256] values; values[1 + 2] = 4; }").unwrap();
-        let StatementKind::Block { statements, .. } = &program.functions[0].body.kind else {
+        let TopLevelItem::Function(function) = &program.items[0] else {
+            panic!("expected function")
+        };
+        let StatementKind::Block { statements, .. } = &function.body.kind else {
             panic!("expected function block")
         };
         assert!(matches!(
             statements[0].kind,
             StatementKind::Declaration {
-                array_length: Some(256),
+                ty: Type::Array(256),
                 ..
             }
         ));
@@ -588,31 +619,16 @@ mod tests {
                 ..
             }
         ));
-
-        assert!(
-            parse_source("cell global;")
-                .unwrap_err()
-                .message()
-                .contains("global")
-        );
-        assert!(
-            parse_source("cell[4] values;")
-                .unwrap_err()
-                .message()
-                .contains("global")
-        );
-        assert!(
-            parse_source("cell[4] make() { return 0; } void main() {}")
-                .unwrap_err()
-                .message()
-                .contains("return")
-        );
-        assert!(
-            parse_source("void take(cell[4] values) {} void main() {}")
-                .unwrap_err()
-                .message()
-                .contains("parameters")
-        );
+        let globals = parse_source("cell first = 1; cell[4] values; void main() {}").unwrap();
+        assert!(matches!(globals.items[0], TopLevelItem::Global(_)));
+        assert!(matches!(globals.items[1], TopLevelItem::Global(_)));
+        let array_function =
+            parse_source("cell[4] make(cell[4] values) { return values; } void main() {}").unwrap();
+        let TopLevelItem::Function(function) = &array_function.items[0] else {
+            panic!("expected function")
+        };
+        assert_eq!(function.return_type, Type::Array(4));
+        assert_eq!(function.parameters[0].ty, Type::Array(4));
         assert!(
             parse_source("void main() { cell[4] values = 0; }")
                 .unwrap_err()
@@ -625,6 +641,17 @@ mod tests {
                 .message()
                 .contains("nested")
         );
+    }
+
+    #[test]
+    fn preserves_interleaved_top_level_source_order() {
+        let program =
+            parse_source("cell before = input(); void helper() {} cell[2] after; void main() {}")
+                .unwrap();
+        assert!(matches!(program.items[0], TopLevelItem::Global(_)));
+        assert!(matches!(program.items[1], TopLevelItem::Function(_)));
+        assert!(matches!(program.items[2], TopLevelItem::Global(_)));
+        assert!(matches!(program.items[3], TopLevelItem::Function(_)));
     }
 
     #[test]
