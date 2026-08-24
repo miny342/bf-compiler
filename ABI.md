@@ -3,8 +3,10 @@
 この文書は、BFCからBrainfuckへ関数、再帰、ローカル変数、配列をloweringするための
 実験的な実行時ABIを定義する。
 
-現時点ではABI version 0の設計仕様であり、現在の`bf-compiler`が生成するBFにはまだ
-適用していない。実装前の検証コードは`bf-frame-experiment` crateに置く。
+ABI version 0の設計仕様である。現在の`bf-compiler`はscalar関数のframe、continuation
+dispatch、call/return、直接・相互再帰にこのABIを適用している。global、配列、array
+portal、aggregate argument/returnはまだcompiler本体へ接続しておらず、それらを含む
+検証コードは`bf-frame-experiment` crateに置く。
 
 ## 目的
 
@@ -855,47 +857,59 @@ global aligned regionではheadを`aux`として利用できるため、padding�
 
 debug loweringはguard flagやframe patternを検査して停止してよい。
 
-## 実装に必要なIR
+## Continuation IR
 
-現在の`CellId`は静的絶対位置だけを表すため、このABIを直接表現できない。少なくとも
-次のaddress spaceを区別する。
+現在のscalar compilerは、静的絶対位置を表す`CellId`とは別に、frame-relativeな
+Continuation IRを実装している。命令から参照できるaddressは次の2種類である。
 
 ```rust
 enum Address {
-    Global(GlobalId),
-    Frame(FrameOffset),
-    AbiScratch(usize),
+    Frame(FrameSlot),
+    AbiValue,
 }
 ```
 
-関数loweringには、概ね次の情報を持つContinuation IRが必要である。
+`Frame`は現在のactivationに属するparameter、local、一時値を指す。`AbiValue`は
+call結果の受け渡しに使用するcontextのscalar value cellを指す。Continuationのbodyは
+frame-relativeな`FrameInstruction`列であり、末尾に必ず1個のterminatorを持つ。
 
 ```rust
 struct Continuation {
     id: ContinuationId,
     function: FunctionId,
-    body: Vec<Instruction>,
+    body: Vec<FrameInstruction>,
     terminator: Terminator,
 }
 
 enum Terminator {
-    Goto(ContinuationId),
+    Goto {
+        target: ContinuationId,
+    },
     Branch {
         condition: Address,
-        then_to: ContinuationId,
-        else_to: ContinuationId,
+        then_target: ContinuationId,
+        else_target: ContinuationId,
     },
     Call {
-        function: FunctionId,
+        callee: FunctionId,
+        arguments: Vec<Address>,
         return_to: ContinuationId,
     },
-    Return,
+    Return {
+        value: Option<Address>,
+    },
     Halt,
 }
 ```
 
-frame layout、continuation ID割当、物理BF pointer移動はCell IRより後段のABI loweringが
-担当する。
+typed HIRからのloweringがframe slotとcontinuation IDを割り当て、ABI backendが
+`FunctionDescriptor`に基づくframe layout、call/return、dispatcher、物理BF pointer移動を
+生成する。validatorは`void main()`、mainのcall禁止、frame slot範囲、call arity、
+continuation ownership、return型などを検査する。
+
+globalと配列をcompiler本体へ接続する段階では、global address space、array portal、
+aggregate return outboxをこのIRへ追加する。これらは将来拡張であり、現在の公開scalar IRの
+一部ではない。
 
 ## 実験結果とversion 0の決定
 

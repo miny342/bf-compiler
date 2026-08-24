@@ -5,29 +5,30 @@
 
 ## 全体構成
 
-コンパイラは、構文木から直接 Brainfuck の文字列を生成せず、二段階の IR を
-経由する。
+コンパイラは、構文木から直接 Brainfuck の文字列を生成しない。source frontendと
+低水準APIは、それぞれ用途に応じたIR pipelineを持つ。
 
 ```text
-ソース言語
-    ↓ 字句解析・構文解析
-構文木（AST）
-    ↓ 名前解決・型検査・変数割り当て
-セルIR（Cell IR）
-    ↓ 配列展開・一時セル割り当て・低水準化
-BF IR
-    ↓ BF固有最適化・文字列化
-Brainfuckソース
+source frontend:
+  BFC source → AST → typed HIR → Continuation IR → ABI backend → BF IR → Brainfuck
+
+low-level API:
+  Cell IR → static-cell backend → BF IR → Brainfuck
 ```
 
-関数、再帰、frame-relativeなローカル変数を追加する次段階backendでは、ASTとセルIRの
-間またはセルIR内部にContinuation IRを導入する。実験中のchunked frame stack、
-call/return、pointer位置の規約は[ABI.md](ABI.md)に定義する。現在の実装はまだこの
-ABIを使用せず、`void main()`の本体を直接セルIRへloweringし、すべての`CellId`を静的
-セルとして割り当てる。`input`と`output`以外のcallはfrontendで拒否する。
+scalar関数、再帰、frame-relativeなローカル変数には、typed HIRとContinuation IRを
+使用する。chunked frame stack、call/return、pointer位置の規約は[ABI.md](ABI.md)に
+定義する。現在のsource frontendは、名前解決・型検査済みHIRから関数ごとのframe slotと
+Continuationを生成し、ABI backendへ渡す。低水準APIとして、静的`CellId`を使用する従来の
+セルIRとbackendも独立して残す。
 
-二段に分ける目的は、ソース言語の意味と、Brainfuckのデータポインタや
-相対移動を分離することである。
+公開APIでは`lower_source`が`ContinuationProgram`を返し、`compile_source`のbackend errorは
+`SourceCompileError::AbiCodegen`として報告する。以前の`Program`を返すsource lowering APIと
+`SourceCompileError::Codegen`からは互換性のない変更である。手動で構築した静的Cell IRには、
+引き続き`compile(&Program)`または`lower(&Program)`を使用する。
+
+IRを分ける目的は、ソース言語の意味、関数の制御フローとframe配置、Brainfuckの
+データポインタや相対移動を分離することである。
 
 ## セルIR
 
@@ -383,10 +384,11 @@ struct Layout {
 
 ## 当面の実装順序
 
-1. 現在のセルIR、BF IR、BF文字列化を基準実装として安定させる。
-2. 論理セルと物理セルを分離する`Layout`を導入する。
-3. `main`をroot activationとするContinuation IRとABI frame layoutを導入する。
-4. 定数添字配列を論理layoutへ接続する。
-5. array portalと動的配列命令を追加する。
-6. function call、return、aggregate valueをfrontendへ追加する。
-7. 必要性を測定してから、BF IRの最適化を別パスとして追加する。
+1. 現在のセルIR、BF IR、BF文字列化を基準実装として安定させる。（完了）
+2. `main`をroot activationとするContinuation IRとABI frame layoutを導入する。（完了）
+3. scalar function call、return、直接・相互再帰をfrontendとbackendへ接続する。（完了）
+4. global scalarとstatic領域の初期化を接続する。
+5. 定数添字配列を論理layoutへ接続する。
+6. array portalと動的配列命令を追加する。
+7. 配列の値渡し、aggregate return outboxを接続する。
+8. 必要性を測定してから、BF IRの最適化を別パスとして追加する。

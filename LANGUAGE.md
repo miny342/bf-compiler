@@ -600,9 +600,12 @@ call深度によるBFテープ右端超過とする。
 
 ### 現在の実装状況
 
-第4段階まで実装している。現在のコンパイラは、トップレベルにparameterなしの
-`void main()`をちょうど1つ持つprogramを受理し、その本体を実行する。すべての比較演算と、
-短絡評価する論理`&&`および`||`を使用できる。`input()`と`output(...)`以外のfunction
-call、`main`以外のfunction定義、global変数、明示的な`return`、配列は、実装済みになる
-まで明示的なコンパイルエラーとして拒否する。関数・配列ABIは独立experimentで検証済み
-である。
+第5段階まで実装している。parameterなしの`void main()`をentry pointとし、scalarの
+`cell`/`void`関数、parameter、call、return、forward call、直接再帰、相互再帰を使用
+できる。callの引数は左から右に評価し、callerのlocalはcalleeの実行中も保存する。
+すべての比較演算と、callを含む場合にも短絡評価する論理`&&`および`||`を使用できる。
+
+global変数と配列は、実装済みになるまで明示的なコンパイルエラーとして拒否する。
+scalar関数には[ABI.md](ABI.md)のframe stackとContinuation dispatcherを使用する。配列、
+array portal、aggregate argument/returnは独立experimentで検証済みだが、compiler本体には
+まだ接続していない。

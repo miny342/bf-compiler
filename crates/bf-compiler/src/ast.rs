@@ -1,18 +1,47 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AstProgram {
-    pub main_body: Vec<Statement>,
+    pub(crate) functions: Vec<Function>,
+    pub(crate) eof_offset: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Type {
+    Cell,
+    Void,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Function {
+    pub(crate) return_type: Type,
+    pub(crate) name: Name,
+    pub(crate) parameters: Vec<Parameter>,
+    pub(crate) body: Statement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Parameter {
+    pub(crate) name: Name,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Name {
-    pub text: String,
-    pub offset: usize,
+    pub(crate) text: String,
+    pub(crate) offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Statement {
+pub(crate) struct Statement {
+    pub(crate) kind: StatementKind,
+    pub(crate) offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StatementKind {
     Empty,
-    Block(Vec<Statement>),
+    Block {
+        statements: Vec<Statement>,
+        closing_offset: usize,
+    },
     Declaration {
         name: Name,
         initializer: Option<Expression>,
@@ -23,6 +52,11 @@ pub(crate) enum Statement {
         value: Expression,
     },
     Output(Expression),
+    Call {
+        name: Name,
+        arguments: Vec<Expression>,
+    },
+    Return(Option<Expression>),
     If {
         condition: Expression,
         then_branch: Box<Statement>,
@@ -43,8 +77,8 @@ pub(crate) enum AssignmentOperator {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Expression {
-    pub kind: ExpressionKind,
-    pub offset: usize,
+    pub(crate) kind: ExpressionKind,
+    pub(crate) offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +86,10 @@ pub(crate) enum ExpressionKind {
     Literal(u8),
     Variable(Name),
     Input,
+    Call {
+        name: Name,
+        arguments: Vec<Expression>,
+    },
     Unary {
         operator: UnaryOperator,
         operand: Box<Expression>,

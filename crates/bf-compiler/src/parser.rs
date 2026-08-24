@@ -1,6 +1,6 @@
 use crate::ast::{
-    AssignmentOperator, AstProgram, BinaryOperator, Expression, ExpressionKind, Name, Statement,
-    UnaryOperator,
+    AssignmentOperator, AstProgram, BinaryOperator, Expression, ExpressionKind, Function, Name,
+    Parameter, Statement, StatementKind, Type, UnaryOperator,
 };
 use crate::frontend::FrontendError;
 use crate::lexer::{Token, TokenKind};
@@ -20,39 +20,82 @@ struct Parser {
 
 impl Parser {
     fn parse_program(mut self) -> Result<AstProgram, FrontendError> {
-        if self.at(&TokenKind::Eof) {
-            return Err(self.error_here("program must define 'void main()'"));
+        let mut functions = Vec::new();
+        while !self.at(&TokenKind::Eof) {
+            functions.push(self.parse_function()?);
         }
+        Ok(AstProgram {
+            functions,
+            eof_offset: self.current().offset,
+        })
+    }
 
-        if !self.at(&TokenKind::Void) {
-            return Err(self.error_here("program must start with 'void main()'"));
-        }
-        self.advance();
-
-        let name = self.parse_name("expected 'main' after 'void'")?;
-        if name.text != "main" {
-            return Err(FrontendError::at(
-                name.offset,
-                "only the 'main' function is implemented in this compiler stage",
-            ));
-        }
-
-        self.expect(TokenKind::LeftParen, "expected '(' after 'main'")?;
-        if !self.at(&TokenKind::RightParen) {
-            return Err(self.error_here("main must not have parameters"));
-        }
-        self.advance();
-
-        let Statement::Block(main_body) = self.parse_block()? else {
-            unreachable!();
+    fn parse_function(&mut self) -> Result<Function, FrontendError> {
+        let return_type = match self.current().kind {
+            TokenKind::Cell => {
+                self.advance();
+                if self.at(&TokenKind::LeftBracket) {
+                    return Err(
+                        self.error_here("arrays are not implemented in this compiler stage")
+                    );
+                }
+                Type::Cell
+            }
+            TokenKind::Void => {
+                self.advance();
+                Type::Void
+            }
+            _ => {
+                return Err(self.error_here(
+                    "top-level items must be function definitions; global variables are not implemented",
+                ));
+            }
         };
-        if !self.at(&TokenKind::Eof) {
-            return Err(self.error_here(
-                "only one top-level 'void main()' function is implemented in this compiler stage",
-            ));
-        }
 
-        Ok(AstProgram { main_body })
+        let name = self.parse_name("expected a function name")?;
+        if self.at(&TokenKind::LeftBracket) {
+            return Err(self.error_here("arrays are not implemented in this compiler stage"));
+        }
+        if !self.at(&TokenKind::LeftParen) {
+            return Err(
+                self.error_here("global variables are not implemented in this compiler stage")
+            );
+        }
+        self.advance();
+
+        let mut parameters = Vec::new();
+        if !self.at(&TokenKind::RightParen) {
+            loop {
+                if self.at(&TokenKind::Void) {
+                    return Err(self.error_here("function parameters must have type 'cell'"));
+                }
+                self.expect(TokenKind::Cell, "expected parameter type 'cell'")?;
+                if self.at(&TokenKind::LeftBracket) {
+                    return Err(
+                        self.error_here("arrays are not implemented in this compiler stage")
+                    );
+                }
+                let name = self.parse_name("expected a parameter name")?;
+                if self.at(&TokenKind::LeftBracket) {
+                    return Err(
+                        self.error_here("arrays are not implemented in this compiler stage")
+                    );
+                }
+                parameters.push(Parameter { name });
+                if !self.at(&TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RightParen, "expected ')' after parameters")?;
+        let body = self.parse_block()?;
+        Ok(Function {
+            return_type,
+            name,
+            parameters,
+            body,
+        })
     }
 
     fn parse_block_item(&mut self) -> Result<Statement, FrontendError> {
@@ -64,21 +107,29 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, FrontendError> {
+        let offset = self.current().offset;
         match self.current().kind.clone() {
             TokenKind::Semicolon => {
                 self.advance();
-                Ok(Statement::Empty)
+                Ok(Statement {
+                    kind: StatementKind::Empty,
+                    offset,
+                })
             }
             TokenKind::LeftBrace => self.parse_block(),
-            TokenKind::Cell => Err(self.error_here("a declaration here must be inside a block")),
-            TokenKind::Void => Err(self.error_here("nested functions are not allowed")),
-            TokenKind::Return => {
-                Err(self.error_here("return is not implemented in this compiler stage"))
+            TokenKind::Cell => {
+                if self.cell_starts_function() {
+                    Err(self.error_here("nested functions are not allowed"))
+                } else {
+                    Err(self.error_here("a declaration here must be inside a block"))
+                }
             }
+            TokenKind::Void => Err(self.error_here("nested functions are not allowed")),
+            TokenKind::Return => self.parse_return(),
             TokenKind::Output => self.parse_output(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),
-            TokenKind::Identifier(_) => self.parse_assignment(),
+            TokenKind::Identifier(_) => self.parse_assignment_or_call(),
             TokenKind::RightBrace => Err(self.error_here("unexpected '}'")),
             TokenKind::Else => Err(self.error_here("'else' without a matching 'if'")),
             _ => Err(self.error_here("expected a statement")),
@@ -86,6 +137,7 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Result<Statement, FrontendError> {
+        let offset = self.current().offset;
         self.expect(TokenKind::LeftBrace, "expected '{'")?;
         let mut statements = Vec::new();
         while !self.at(&TokenKind::RightBrace) {
@@ -94,18 +146,29 @@ impl Parser {
             }
             statements.push(self.parse_block_item()?);
         }
+        let closing_offset = self.current().offset;
         self.advance();
-        Ok(Statement::Block(statements))
+        Ok(Statement {
+            kind: StatementKind::Block {
+                statements,
+                closing_offset,
+            },
+            offset,
+        })
     }
 
     fn parse_declaration(&mut self) -> Result<Statement, FrontendError> {
+        let offset = self.current().offset;
         self.advance();
         if self.at(&TokenKind::LeftBracket) {
             return Err(self.error_here("arrays are not implemented in this compiler stage"));
         }
         let name = self.parse_name("expected a variable name after 'cell'")?;
         if self.at(&TokenKind::LeftParen) {
-            return Err(self.error_here("functions are not implemented in this compiler stage"));
+            return Err(self.error_here("nested functions are not allowed"));
+        }
+        if self.at(&TokenKind::LeftBracket) {
+            return Err(self.error_here("arrays are not implemented in this compiler stage"));
         }
         let initializer = if self.at(&TokenKind::Assign) {
             self.advance();
@@ -114,15 +177,22 @@ impl Parser {
             None
         };
         self.expect(TokenKind::Semicolon, "expected ';' after declaration")?;
-        Ok(Statement::Declaration { name, initializer })
+        Ok(Statement {
+            kind: StatementKind::Declaration { name, initializer },
+            offset,
+        })
     }
 
-    fn parse_assignment(&mut self) -> Result<Statement, FrontendError> {
-        let name = self.parse_name("expected assignment target")?;
+    fn parse_assignment_or_call(&mut self) -> Result<Statement, FrontendError> {
+        let name = self.parse_name("expected assignment target or function name")?;
+        let offset = name.offset;
         if self.at(&TokenKind::LeftParen) {
-            return Err(
-                self.error_here("function calls are not implemented in this compiler stage")
-            );
+            let arguments = self.parse_call_arguments()?;
+            self.expect(TokenKind::Semicolon, "expected ';' after function call")?;
+            return Ok(Statement {
+                kind: StatementKind::Call { name, arguments },
+                offset,
+            });
         }
         if self.at(&TokenKind::LeftBracket) {
             return Err(self.error_here("arrays are not implemented in this compiler stage"));
@@ -131,28 +201,51 @@ impl Parser {
             TokenKind::Assign => AssignmentOperator::Set,
             TokenKind::PlusAssign => AssignmentOperator::Add,
             TokenKind::MinusAssign => AssignmentOperator::Subtract,
-            _ => return Err(self.error_here("expected '=', '+=' or '-=' after variable")),
+            _ => return Err(self.error_here("expected '=', '+=', '-=' or '(' after identifier")),
         };
         self.advance();
         let value = self.parse_expression()?;
         self.expect(TokenKind::Semicolon, "expected ';' after assignment")?;
-        Ok(Statement::Assignment {
-            name,
-            operator,
-            value,
+        Ok(Statement {
+            kind: StatementKind::Assignment {
+                name,
+                operator,
+                value,
+            },
+            offset,
+        })
+    }
+
+    fn parse_return(&mut self) -> Result<Statement, FrontendError> {
+        let offset = self.current().offset;
+        self.advance();
+        let value = if self.at(&TokenKind::Semicolon) {
+            None
+        } else {
+            Some(self.parse_expression()?)
+        };
+        self.expect(TokenKind::Semicolon, "expected ';' after return")?;
+        Ok(Statement {
+            kind: StatementKind::Return(value),
+            offset,
         })
     }
 
     fn parse_output(&mut self) -> Result<Statement, FrontendError> {
+        let offset = self.current().offset;
         self.advance();
         self.expect(TokenKind::LeftParen, "expected '(' after 'output'")?;
         let value = self.parse_expression()?;
         self.expect(TokenKind::RightParen, "expected ')' after output value")?;
         self.expect(TokenKind::Semicolon, "expected ';' after output")?;
-        Ok(Statement::Output(value))
+        Ok(Statement {
+            kind: StatementKind::Output(value),
+            offset,
+        })
     }
 
     fn parse_if(&mut self) -> Result<Statement, FrontendError> {
+        let offset = self.current().offset;
         self.advance();
         self.expect(TokenKind::LeftParen, "expected '(' after 'if'")?;
         let condition = self.parse_expression()?;
@@ -164,20 +257,27 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::If {
-            condition,
-            then_branch,
-            else_branch,
+        Ok(Statement {
+            kind: StatementKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            },
+            offset,
         })
     }
 
     fn parse_while(&mut self) -> Result<Statement, FrontendError> {
+        let offset = self.current().offset;
         self.advance();
         self.expect(TokenKind::LeftParen, "expected '(' after 'while'")?;
         let condition = self.parse_expression()?;
         self.expect(TokenKind::RightParen, "expected ')' after while condition")?;
         let body = Box::new(self.parse_statement()?);
-        Ok(Statement::While { condition, body })
+        Ok(Statement {
+            kind: StatementKind::While { condition, body },
+            offset,
+        })
     }
 
     fn parse_expression(&mut self) -> Result<Expression, FrontendError> {
@@ -287,19 +387,22 @@ impl Parser {
             }
             TokenKind::Identifier(text) => {
                 self.advance();
+                let name = Name {
+                    text,
+                    offset: token.offset,
+                };
                 if self.at(&TokenKind::LeftParen) {
-                    return Err(self
-                        .error_here("function calls are not implemented in this compiler stage"));
+                    let arguments = self.parse_call_arguments()?;
+                    return Ok(Expression {
+                        kind: ExpressionKind::Call { name, arguments },
+                        offset: token.offset,
+                    });
                 }
                 if self.at(&TokenKind::LeftBracket) {
                     return Err(
                         self.error_here("arrays are not implemented in this compiler stage")
                     );
                 }
-                let name = Name {
-                    text,
-                    offset: token.offset,
-                };
                 Ok(Expression {
                     kind: ExpressionKind::Variable(name),
                     offset: token.offset,
@@ -322,6 +425,32 @@ impl Parser {
             }
             _ => Err(FrontendError::at(token.offset, "expected an expression")),
         }
+    }
+
+    fn parse_call_arguments(&mut self) -> Result<Vec<Expression>, FrontendError> {
+        self.expect(TokenKind::LeftParen, "expected '('")?;
+        let mut arguments = Vec::new();
+        if !self.at(&TokenKind::RightParen) {
+            loop {
+                arguments.push(self.parse_expression()?);
+                if !self.at(&TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RightParen, "expected ')' after arguments")?;
+        Ok(arguments)
+    }
+
+    fn cell_starts_function(&self) -> bool {
+        matches!(
+            (
+                self.tokens.get(self.position + 1).map(|token| &token.kind),
+                self.tokens.get(self.position + 2).map(|token| &token.kind),
+            ),
+            (Some(TokenKind::Identifier(_)), Some(TokenKind::LeftParen))
+        )
     }
 
     fn parse_name(&mut self, message: &str) -> Result<Name, FrontendError> {
@@ -360,5 +489,48 @@ impl Parser {
 
     fn error_here(&self, message: impl Into<String>) -> FrontendError {
         FrontendError::at(self.current().offset, message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer;
+
+    fn parse_source(source: &str) -> Result<AstProgram, FrontendError> {
+        parse(lexer::lex(source)?)
+    }
+
+    #[test]
+    fn parses_multiple_functions_calls_and_returns() {
+        let program = parse_source(
+            "cell add(cell left, cell right) { return left + right; }\n\
+             void main() { output(add(1, 2)); return; }",
+        )
+        .unwrap();
+        assert_eq!(program.functions.len(), 2);
+        assert_eq!(program.functions[0].parameters.len(), 2);
+    }
+
+    #[test]
+    fn rejects_globals_arrays_and_nested_functions_explicitly() {
+        assert!(
+            parse_source("cell global;")
+                .unwrap_err()
+                .message()
+                .contains("global")
+        );
+        assert!(
+            parse_source("cell[4] values;")
+                .unwrap_err()
+                .message()
+                .contains("arrays")
+        );
+        assert!(
+            parse_source("void main() { cell nested() {} }")
+                .unwrap_err()
+                .message()
+                .contains("nested")
+        );
     }
 }
