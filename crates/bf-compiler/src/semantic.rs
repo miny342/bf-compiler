@@ -1,65 +1,28 @@
-//! Source-level name resolution and type checking.
+//! Source-level declaration collection, layout, name resolution, and type checking.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
+use crate::ast::NameContext;
 use crate::frontend::FrontendError;
 use crate::hir::{
-    self, ArrayIndex, FunctionId, FunctionSignature, GlobalId, HirExpression, HirExpressionKind,
-    HirFunction, HirGlobal, HirLocal, HirParameter, HirPlace, HirProgram, HirStatement,
-    HirStatementKind, LocalId, VariableRef,
+    self, ArrayIndex, Field, FunctionId, FunctionSignature, GlobalId, HirExpression,
+    HirExpressionKind, HirFunction, HirGlobal, HirLocal, HirParameter, HirPlace, HirProgram,
+    HirStatement, HirStatementKind, LocalId, Projection, TypeDefinition, TypeId, TypeKind,
+    TypeTable, VariableRef,
 };
 
 pub(crate) fn analyze(program: &ast::AstProgram) -> Result<HirProgram, FrontendError> {
-    let file_scope = collect_file_scope(program)?;
-    let entry = validate_main(program, &file_scope)?;
+    SemanticBuilder::new(program)?.build()
+}
 
-    let mut globals = Vec::new();
-    for item in &program.items {
-        let ast::TopLevelItem::Global(global) = item else {
-            continue;
-        };
-        let FileSymbol::Global(registered) = file_scope[&global.name.text] else {
-            unreachable!()
-        };
-        let initializer = global
-            .initializer
-            .as_ref()
-            .map(|value| {
-                let mut analyzer = FunctionAnalyzer::new(&file_scope, hir::Type::Void);
-                let value = analyzer.analyze_expression(value)?;
-                require_type(&value, hir::Type::Cell, "global initializer")?;
-                Ok(value)
-            })
-            .transpose()?;
-        globals.push(HirGlobal {
-            id: registered.id,
-            name: global.name.text.clone(),
-            offset: global.name.offset,
-            ty: registered.ty,
-            initializer,
-        });
-    }
-
-    let mut functions = Vec::new();
-    for item in &program.items {
-        let ast::TopLevelItem::Function(function) = item else {
-            continue;
-        };
-        let FileSymbol::Function(registered) = &file_scope[&function.name.text] else {
-            unreachable!()
-        };
-        functions.push(
-            FunctionAnalyzer::new(&file_scope, registered.signature.return_type)
-                .analyze(registered.id, function)?,
-        );
-    }
-
-    Ok(HirProgram {
-        entry,
-        globals,
-        functions,
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopSymbol {
+    Type(TypeId),
+    Constant(usize),
+    Macro,
+    Function(FunctionId),
+    Global(GlobalId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,105 +34,900 @@ struct RegisteredFunction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RegisteredGlobal {
     id: GlobalId,
-    ty: hir::Type,
+    ty: TypeId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FileSymbol {
-    Function(RegisteredFunction),
-    Global(RegisteredGlobal),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolutionState {
+    Unvisited,
+    Visiting,
+    Done,
 }
 
-fn collect_file_scope(
-    program: &ast::AstProgram,
-) -> Result<HashMap<String, FileSymbol>, FrontendError> {
-    let mut scope = HashMap::new();
-    let mut next_function = 0;
-    let mut next_global = 0;
-    for item in &program.items {
-        let (name, symbol) = match item {
-            ast::TopLevelItem::Function(function) => {
-                let symbol = FileSymbol::Function(RegisteredFunction {
-                    id: FunctionId::new(next_function),
-                    signature: FunctionSignature {
-                        return_type: hir_type(function.return_type),
-                        parameter_types: function
-                            .parameters
-                            .iter()
-                            .map(|parameter| hir_type(parameter.ty))
-                            .collect(),
-                    },
-                });
-                next_function += 1;
-                (&function.name, symbol)
-            }
-            ast::TopLevelItem::Global(global) => {
-                let symbol = FileSymbol::Global(RegisteredGlobal {
-                    id: GlobalId::new(next_global),
-                    ty: hir_type(global.ty),
-                });
-                next_global += 1;
-                (&global.name, symbol)
-            }
+struct SemanticBuilder<'a> {
+    program: &'a ast::AstProgram,
+    names: HashMap<String, TopSymbol>,
+    types: TypeTable,
+    nominal_states: Vec<ResolutionState>,
+    constants: Vec<Option<u8>>,
+    constant_states: Vec<ResolutionState>,
+    functions: Vec<Option<RegisteredFunction>>,
+    globals: Vec<Option<RegisteredGlobal>>,
+    array_types: HashMap<(TypeId, usize), TypeId>,
+}
+
+impl<'a> SemanticBuilder<'a> {
+    fn new(program: &'a ast::AstProgram) -> Result<Self, FrontendError> {
+        let mut builder = Self {
+            program,
+            names: HashMap::new(),
+            types: TypeTable::new(),
+            nominal_states: vec![ResolutionState::Done, ResolutionState::Done],
+            constants: Vec::new(),
+            constant_states: Vec::new(),
+            functions: Vec::new(),
+            globals: Vec::new(),
+            array_types: HashMap::new(),
         };
-        if scope.insert(name.text.clone(), symbol).is_some() {
-            return Err(FrontendError::at(
-                name.offset,
-                format!("file-scope name {:?} is already defined", name.text),
-            ));
+
+        for item in &program.items {
+            let (name, symbol) = match item {
+                ast::TopLevelItem::Enum(definition) => {
+                    let id = builder.types.push(TypeDefinition {
+                        name: definition.name.text.clone(),
+                        kind: TypeKind::Enum { variants: vec![] },
+                        cells: 1,
+                    });
+                    builder.nominal_states.push(ResolutionState::Unvisited);
+                    (&definition.name, TopSymbol::Type(id))
+                }
+                ast::TopLevelItem::Struct(definition) => {
+                    let id = builder.types.push(TypeDefinition {
+                        name: definition.name.text.clone(),
+                        kind: TypeKind::Struct { fields: vec![] },
+                        cells: 0,
+                    });
+                    builder.nominal_states.push(ResolutionState::Unvisited);
+                    (&definition.name, TopSymbol::Type(id))
+                }
+                ast::TopLevelItem::Constant(definition) => {
+                    let index = builder.constants.len();
+                    builder.constants.push(None);
+                    builder.constant_states.push(ResolutionState::Unvisited);
+                    (&definition.name, TopSymbol::Constant(index))
+                }
+                ast::TopLevelItem::Macro(definition) => (&definition.name, TopSymbol::Macro),
+                ast::TopLevelItem::Function(function) => {
+                    let id = FunctionId::new(builder.functions.len());
+                    builder.functions.push(None);
+                    (&function.name, TopSymbol::Function(id))
+                }
+                ast::TopLevelItem::Global(global) => {
+                    let id = GlobalId::new(builder.globals.len());
+                    builder.globals.push(None);
+                    (&global.name, TopSymbol::Global(id))
+                }
+            };
+            if builder.names.insert(name.text.clone(), symbol).is_some() {
+                return Err(FrontendError::at(
+                    name.offset,
+                    format!("file-scope name {:?} is already defined", name.text),
+                ));
+            }
+        }
+        Ok(builder)
+    }
+
+    fn build(mut self) -> Result<HirProgram, FrontendError> {
+        for index in 0..self.constants.len() {
+            self.resolve_constant(index)?;
+        }
+        for index in 2..self.nominal_states.len() {
+            self.resolve_nominal(TypeId::new(index))?;
+        }
+        // String literal types are always available without mutating the type
+        // table during expression analysis.
+        for length in 0..=256 {
+            self.intern_array(TypeId::CELL, length, 0)?;
+        }
+        self.resolve_runtime_declarations()?;
+        let items = self.program.items.clone();
+        for item in &items {
+            if let ast::TopLevelItem::Function(function) = item {
+                self.resolve_statement_types(&function.body)?;
+            }
+        }
+
+        let functions = self
+            .functions
+            .iter()
+            .map(|function| function.clone().expect("all signatures resolved"))
+            .collect::<Vec<_>>();
+        let globals = self
+            .globals
+            .iter()
+            .map(|global| global.expect("all global types resolved"))
+            .collect::<Vec<_>>();
+        let entry = self.validate_main(&functions)?;
+
+        let context = FileContext {
+            names: &self.names,
+            types: &self.types,
+            constants: &self.constants,
+            functions: &functions,
+            globals: &globals,
+            array_types: &self.array_types,
+        };
+
+        let mut hir_globals = Vec::new();
+        for item in &self.program.items {
+            let ast::TopLevelItem::Global(global) = item else {
+                continue;
+            };
+            let TopSymbol::Global(id) = context.symbol(&global.name.text) else {
+                unreachable!()
+            };
+            let registered = globals[id.index()];
+            let initializer = global
+                .initializer
+                .as_ref()
+                .map(|value| {
+                    let mut analyzer = FunctionAnalyzer::new(&context, TypeId::VOID);
+                    let value = analyzer.analyze_expression(value)?;
+                    require_type(&context, &value, registered.ty, "global initializer")?;
+                    Ok(value)
+                })
+                .transpose()?;
+            if matches!(global.ty, ast::Type::InferredCellArray) && initializer.is_none() {
+                return Err(FrontendError::at(
+                    global.name.offset,
+                    "cell[] requires a direct string literal initializer",
+                ));
+            }
+            hir_globals.push(HirGlobal {
+                id,
+                name: global.name.text.clone(),
+                offset: global.name.offset,
+                ty: registered.ty,
+                initializer,
+            });
+        }
+
+        let mut hir_functions = Vec::new();
+        for item in &self.program.items {
+            let ast::TopLevelItem::Function(function) = item else {
+                continue;
+            };
+            let TopSymbol::Function(id) = context.symbol(&function.name.text) else {
+                unreachable!()
+            };
+            let registered = &functions[id.index()];
+            hir_functions.push(
+                FunctionAnalyzer::new(&context, registered.signature.return_type)
+                    .analyze(id, function)?,
+            );
+        }
+
+        Ok(HirProgram {
+            entry,
+            types: self.types,
+            globals: hir_globals,
+            functions: hir_functions,
+        })
+    }
+
+    fn resolve_constant(&mut self, index: usize) -> Result<u8, FrontendError> {
+        match self.constant_states[index] {
+            ResolutionState::Done => return Ok(self.constants[index].unwrap()),
+            ResolutionState::Visiting => {
+                let definition = self.constant_definition(index);
+                return Err(FrontendError::at(
+                    definition.name.offset,
+                    "compile-time constant definitions form a cycle",
+                ));
+            }
+            ResolutionState::Unvisited => {}
+        }
+        self.constant_states[index] = ResolutionState::Visiting;
+        let definition = self.constant_definition(index).clone();
+        let value = self.evaluate_constant_expression(&definition.initializer)?;
+        self.constants[index] = Some(value);
+        self.constant_states[index] = ResolutionState::Done;
+        Ok(value)
+    }
+
+    fn constant_definition(&self, target: usize) -> &ast::ConstantDefinition {
+        self.program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ast::TopLevelItem::Constant(definition) => Some(definition),
+                _ => None,
+            })
+            .nth(target)
+            .unwrap()
+    }
+
+    fn evaluate_constant_expression(
+        &mut self,
+        expression: &ast::Expression,
+    ) -> Result<u8, FrontendError> {
+        match &expression.kind {
+            ast::ExpressionKind::Literal(value) => Ok(*value),
+            ast::ExpressionKind::Name(name) => match self.names.get(&name.text).copied() {
+                Some(TopSymbol::Constant(index)) => self.resolve_constant(index),
+                _ => Err(FrontendError::at(
+                    name.offset,
+                    format!("{:?} is not a const cell", name.text),
+                )),
+            },
+            ast::ExpressionKind::Unary { operator, operand } => {
+                let operand = self.evaluate_constant_expression(operand)?;
+                Ok(match operator {
+                    ast::UnaryOperator::Plus => operand,
+                    ast::UnaryOperator::Negate => 0_u8.wrapping_sub(operand),
+                    ast::UnaryOperator::Not => u8::from(operand == 0),
+                })
+            }
+            ast::ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let left = self.evaluate_constant_expression(left)?;
+                match operator {
+                    ast::BinaryOperator::LogicalAnd if left == 0 => Ok(0),
+                    ast::BinaryOperator::LogicalOr if left != 0 => Ok(1),
+                    _ => {
+                        let right = self.evaluate_constant_expression(right)?;
+                        Ok(evaluate_binary(*operator, left, right))
+                    }
+                }
+            }
+            ast::ExpressionKind::Len(operand) => {
+                let ty = self.constant_operand_type(operand)?;
+                let TypeKind::Array { length, .. } = self.types.kind(ty) else {
+                    return Err(FrontendError::at(
+                        expression.offset,
+                        "len operand must have an array type",
+                    ));
+                };
+                u8::try_from(*length).map_err(|_| {
+                    FrontendError::at(
+                        expression.offset,
+                        "len result 256 cannot be represented as a runtime cell",
+                    )
+                })
+            }
+            _ => Err(FrontendError::at(
+                expression.offset,
+                "expected a compile-time cell constant expression",
+            )),
         }
     }
-    Ok(scope)
+
+    fn constant_operand_type(
+        &mut self,
+        expression: &ast::Expression,
+    ) -> Result<TypeId, FrontendError> {
+        match &expression.kind {
+            ast::ExpressionKind::Literal(_) | ast::ExpressionKind::Input => Ok(TypeId::CELL),
+            ast::ExpressionKind::Unary { operand, .. } => {
+                if self.constant_operand_type(operand)? != TypeId::CELL {
+                    return Err(FrontendError::at(
+                        operand.offset,
+                        "unary operator operand must have type cell",
+                    ));
+                }
+                Ok(TypeId::CELL)
+            }
+            ast::ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let left_ty = self.constant_operand_type(left)?;
+                let right_ty = self.constant_operand_type(right)?;
+                let valid = match operator {
+                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual => {
+                        left_ty == right_ty
+                            && (left_ty == TypeId::CELL
+                                || matches!(self.types.kind(left_ty), TypeKind::Enum { .. }))
+                    }
+                    ast::BinaryOperator::Add
+                    | ast::BinaryOperator::Subtract
+                    | ast::BinaryOperator::Less
+                    | ast::BinaryOperator::LessEqual
+                    | ast::BinaryOperator::Greater
+                    | ast::BinaryOperator::GreaterEqual
+                    | ast::BinaryOperator::LogicalAnd
+                    | ast::BinaryOperator::LogicalOr => {
+                        left_ty == TypeId::CELL && right_ty == TypeId::CELL
+                    }
+                };
+                if !valid {
+                    return Err(FrontendError::at(
+                        expression.offset,
+                        "binary operator operands have incompatible types",
+                    ));
+                }
+                Ok(TypeId::CELL)
+            }
+            ast::ExpressionKind::Len(operand) => {
+                let ty = self.constant_operand_type(operand)?;
+                let TypeKind::Array { length, .. } = self.types.kind(ty) else {
+                    return Err(FrontendError::at(
+                        expression.offset,
+                        "len operand must have an array type",
+                    ));
+                };
+                if *length == 256 {
+                    return Err(FrontendError::at(
+                        expression.offset,
+                        "len result 256 cannot be represented as a runtime cell",
+                    ));
+                }
+                Ok(TypeId::CELL)
+            }
+            ast::ExpressionKind::StringLiteral(bytes) => {
+                self.intern_array(TypeId::CELL, bytes.len(), expression.offset)
+            }
+            ast::ExpressionKind::Name(name) => match self.names.get(&name.text).copied() {
+                Some(TopSymbol::Constant(_)) => Ok(TypeId::CELL),
+                Some(TopSymbol::Global(id)) => {
+                    let global = self
+                        .program
+                        .items
+                        .iter()
+                        .filter_map(|item| match item {
+                            ast::TopLevelItem::Global(global) => Some(global),
+                            _ => None,
+                        })
+                        .nth(id.index())
+                        .unwrap()
+                        .clone();
+                    self.resolve_declaration_type(
+                        &global.ty,
+                        global.initializer.as_ref(),
+                        global.name.offset,
+                    )
+                }
+                _ => Err(FrontendError::at(
+                    name.offset,
+                    format!("{:?} is not a value", name.text),
+                )),
+            },
+            ast::ExpressionKind::EnumVariant { enum_name, variant } => {
+                let Some(TopSymbol::Type(ty)) = self.names.get(&enum_name.text).copied() else {
+                    return Err(FrontendError::at(enum_name.offset, "unknown enum type"));
+                };
+                self.resolve_nominal(ty)?;
+                let TypeKind::Enum { variants } = self.types.kind(ty) else {
+                    return Err(FrontendError::at(enum_name.offset, "expected enum type"));
+                };
+                if !variants
+                    .iter()
+                    .any(|candidate| candidate.name == variant.text)
+                {
+                    return Err(FrontendError::at(variant.offset, "unknown enum variant"));
+                }
+                Ok(ty)
+            }
+            ast::ExpressionKind::Call { name, arguments } => {
+                self.constant_call_type(name, arguments, None)
+            }
+            ast::ExpressionKind::MethodCall {
+                receiver,
+                name,
+                arguments,
+            } => self.constant_call_type(name, arguments, Some(receiver)),
+            ast::ExpressionKind::Field { base, field } => {
+                let base = self.constant_operand_type(base)?;
+                let TypeKind::Struct { fields } = self.types.kind(base) else {
+                    return Err(FrontendError::at(
+                        field.offset,
+                        "field base is not a struct",
+                    ));
+                };
+                fields
+                    .iter()
+                    .find(|candidate| candidate.name == field.text)
+                    .map(|candidate| candidate.ty)
+                    .ok_or_else(|| FrontendError::at(field.offset, "unknown struct field"))
+            }
+            ast::ExpressionKind::Index { base, index } => {
+                let base = self.constant_operand_type(base)?;
+                if self.constant_operand_type(index)? != TypeId::CELL {
+                    return Err(FrontendError::at(
+                        index.offset,
+                        "array index must have type cell",
+                    ));
+                }
+                let TypeKind::Array { element, length } = *self.types.kind(base) else {
+                    return Err(FrontendError::at(
+                        expression.offset,
+                        "indexed value is not an array",
+                    ));
+                };
+                if let Some(value) = self.try_evaluate_constant_cell(index)?
+                    && usize::from(value) >= length
+                {
+                    return Err(FrontendError::at(
+                        index.offset,
+                        format!(
+                            "constant array index {value} is out of bounds for length {length}"
+                        ),
+                    ));
+                }
+                Ok(element)
+            }
+        }
+    }
+
+    /// Evaluate the compile-time subset of a cell expression when possible.
+    ///
+    /// `len` is intentionally type-only, so an index occurring below it may
+    /// be a runtime expression.  We still diagnose an index that is provably
+    /// constant and out of bounds, just as ordinary expression analysis does.
+    fn try_evaluate_constant_cell(
+        &mut self,
+        expression: &ast::Expression,
+    ) -> Result<Option<u8>, FrontendError> {
+        match &expression.kind {
+            ast::ExpressionKind::Literal(value) => Ok(Some(*value)),
+            ast::ExpressionKind::Name(name) => match self.names.get(&name.text).copied() {
+                Some(TopSymbol::Constant(index)) => self.resolve_constant(index).map(Some),
+                _ => Ok(None),
+            },
+            ast::ExpressionKind::Unary { operator, operand } => {
+                let Some(operand) = self.try_evaluate_constant_cell(operand)? else {
+                    return Ok(None);
+                };
+                Ok(Some(match operator {
+                    ast::UnaryOperator::Plus => operand,
+                    ast::UnaryOperator::Negate => 0_u8.wrapping_sub(operand),
+                    ast::UnaryOperator::Not => u8::from(operand == 0),
+                }))
+            }
+            ast::ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let Some(left) = self.try_evaluate_constant_cell(left)? else {
+                    return Ok(None);
+                };
+                match operator {
+                    ast::BinaryOperator::LogicalAnd if left == 0 => Ok(Some(0)),
+                    ast::BinaryOperator::LogicalOr if left != 0 => Ok(Some(1)),
+                    _ => Ok(self
+                        .try_evaluate_constant_cell(right)?
+                        .map(|right| evaluate_binary(*operator, left, right))),
+                }
+            }
+            ast::ExpressionKind::Len(_) => self.evaluate_constant_expression(expression).map(Some),
+            ast::ExpressionKind::StringLiteral(_)
+            | ast::ExpressionKind::EnumVariant { .. }
+            | ast::ExpressionKind::Input
+            | ast::ExpressionKind::Call { .. }
+            | ast::ExpressionKind::MethodCall { .. }
+            | ast::ExpressionKind::Field { .. }
+            | ast::ExpressionKind::Index { .. } => Ok(None),
+        }
+    }
+
+    fn constant_call_type(
+        &mut self,
+        name: &ast::Name,
+        arguments: &[ast::Expression],
+        receiver: Option<&ast::Expression>,
+    ) -> Result<TypeId, FrontendError> {
+        let Some(TopSymbol::Function(id)) = self.names.get(&name.text).copied() else {
+            return Err(FrontendError::at(name.offset, "unknown function"));
+        };
+        let function = self
+            .program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ast::TopLevelItem::Function(function) => Some(function),
+                _ => None,
+            })
+            .nth(id.index())
+            .unwrap()
+            .clone();
+        let actual = arguments.len() + usize::from(receiver.is_some());
+        if actual != function.parameters.len() {
+            return Err(FrontendError::at(
+                name.offset,
+                "function argument count mismatch",
+            ));
+        }
+        let mut actual_types = Vec::with_capacity(actual);
+        if let Some(receiver) = receiver {
+            actual_types.push(self.constant_operand_type(receiver)?);
+        }
+        for argument in arguments {
+            actual_types.push(self.constant_operand_type(argument)?);
+        }
+        for (actual, parameter) in actual_types.iter().zip(&function.parameters) {
+            let expected = self.resolve_type(&parameter.ty)?;
+            if *actual != expected {
+                return Err(FrontendError::at(
+                    parameter.name.offset,
+                    "function argument type mismatch",
+                ));
+            }
+        }
+        self.resolve_type(&function.return_type)
+    }
+
+    fn resolve_nominal(&mut self, ty: TypeId) -> Result<(), FrontendError> {
+        match self.nominal_states[ty.index()] {
+            ResolutionState::Done => return Ok(()),
+            ResolutionState::Visiting => {
+                return Err(FrontendError::at(
+                    self.nominal_offset(ty),
+                    format!("type {:?} recursively contains itself", self.types.name(ty)),
+                ));
+            }
+            ResolutionState::Unvisited => {}
+        }
+        self.nominal_states[ty.index()] = ResolutionState::Visiting;
+        let item = match self.nominal_item(ty) {
+            NominalItem::Enum(definition) => NominalOwned::Enum(definition.clone()),
+            NominalItem::Struct(definition) => NominalOwned::Struct(definition.clone()),
+        };
+        match item {
+            NominalOwned::Enum(definition) => {
+                let mut variants = Vec::new();
+                let mut used_names = HashSet::new();
+                let mut used_values = HashSet::new();
+                let mut previous: Option<u8> = None;
+                for variant in definition.variants {
+                    if !used_names.insert(variant.name.text.clone()) {
+                        return Err(FrontendError::at(
+                            variant.name.offset,
+                            format!("enum variant {:?} is already defined", variant.name.text),
+                        ));
+                    }
+                    let value = if let Some(expression) = variant.discriminant {
+                        self.evaluate_constant_expression(&expression)?
+                    } else if let Some(previous) = previous {
+                        previous.checked_add(1).ok_or_else(|| {
+                            FrontendError::at(
+                                variant.name.offset,
+                                "implicit enum discriminant exceeds 255",
+                            )
+                        })?
+                    } else {
+                        0
+                    };
+                    if !used_values.insert(value) {
+                        return Err(FrontendError::at(
+                            variant.name.offset,
+                            format!("enum discriminant {value} is duplicated"),
+                        ));
+                    }
+                    previous = Some(value);
+                    variants.push(hir::EnumVariant {
+                        name: variant.name.text,
+                        value,
+                    });
+                }
+                if variants.is_empty() {
+                    return Err(FrontendError::at(
+                        definition.name.offset,
+                        "enum must contain at least one variant",
+                    ));
+                }
+                if variants.iter().filter(|variant| variant.value == 0).count() != 1 {
+                    return Err(FrontendError::at(
+                        definition.name.offset,
+                        "enum must contain exactly one variant with discriminant 0",
+                    ));
+                }
+                self.types.get_mut(ty).kind = TypeKind::Enum { variants };
+                self.types.get_mut(ty).cells = 1;
+            }
+            NominalOwned::Struct(definition) => {
+                if definition.fields.is_empty() {
+                    return Err(FrontendError::at(
+                        definition.name.offset,
+                        "struct must contain at least one field",
+                    ));
+                }
+                let mut fields = Vec::new();
+                let mut names = HashSet::new();
+                let mut cells = 0usize;
+                for field in definition.fields {
+                    if !names.insert(field.name.text.clone()) {
+                        return Err(FrontendError::at(
+                            field.name.offset,
+                            format!("struct field {:?} is already defined", field.name.text),
+                        ));
+                    }
+                    let field_ty = self.resolve_type(&field.ty)?;
+                    let offset = cells;
+                    cells = cells
+                        .checked_add(self.types.cells(field_ty))
+                        .ok_or_else(|| {
+                            FrontendError::at(field.name.offset, "struct layout size overflows")
+                        })?;
+                    fields.push(Field {
+                        name: field.name.text,
+                        ty: field_ty,
+                        cell_offset: offset,
+                    });
+                }
+                self.types.get_mut(ty).kind = TypeKind::Struct { fields };
+                self.types.get_mut(ty).cells = cells;
+            }
+        }
+        self.nominal_states[ty.index()] = ResolutionState::Done;
+        Ok(())
+    }
+
+    fn nominal_offset(&self, ty: TypeId) -> usize {
+        match self.nominal_item(ty) {
+            NominalItem::Enum(definition) => definition.name.offset,
+            NominalItem::Struct(definition) => definition.name.offset,
+        }
+    }
+
+    fn nominal_item(&self, ty: TypeId) -> NominalItem<'_> {
+        let mut index = 2;
+        for item in &self.program.items {
+            match item {
+                ast::TopLevelItem::Enum(definition) => {
+                    if index == ty.index() {
+                        return NominalItem::Enum(definition);
+                    }
+                    index += 1;
+                }
+                ast::TopLevelItem::Struct(definition) => {
+                    if index == ty.index() {
+                        return NominalItem::Struct(definition);
+                    }
+                    index += 1;
+                }
+                _ => {}
+            }
+        }
+        unreachable!()
+    }
+
+    fn resolve_type(&mut self, ty: &ast::Type) -> Result<TypeId, FrontendError> {
+        match ty {
+            ast::Type::Cell => Ok(TypeId::CELL),
+            ast::Type::Void => Ok(TypeId::VOID),
+            ast::Type::InferredCellArray => Err(FrontendError::at(
+                0,
+                "cell[] is only valid on a directly string-initialized declaration",
+            )),
+            ast::Type::Named(name) => match self.names.get(&name.text).copied() {
+                Some(TopSymbol::Type(id)) => {
+                    self.resolve_nominal(id)?;
+                    Ok(id)
+                }
+                _ => Err(FrontendError::at(
+                    name.offset,
+                    format!("unknown type {:?}", name.text),
+                )),
+            },
+            ast::Type::Array { element, length } => {
+                let element = self.resolve_type(element)?;
+                let (length, offset) = match length {
+                    ast::ArrayLength::Literal { value, offset } => (*value, *offset),
+                    ast::ArrayLength::Constant(name) => {
+                        let Some(TopSymbol::Constant(index)) = self.names.get(&name.text).copied()
+                        else {
+                            return Err(FrontendError::at(
+                                name.offset,
+                                "array length name must refer to a const cell",
+                            ));
+                        };
+                        (usize::from(self.resolve_constant(index)?), name.offset)
+                    }
+                };
+                self.intern_array(element, length, offset)
+            }
+        }
+    }
+
+    fn intern_array(
+        &mut self,
+        element: TypeId,
+        length: usize,
+        offset: usize,
+    ) -> Result<TypeId, FrontendError> {
+        if let Some(id) = self.array_types.get(&(element, length)) {
+            return Ok(*id);
+        }
+        let cells = self
+            .types
+            .cells(element)
+            .checked_mul(length)
+            .ok_or_else(|| FrontendError::at(offset, "array layout size overflows"))?;
+        let name = format!("{}[{length}]", self.types.name(element));
+        let id = self.types.push(TypeDefinition {
+            name,
+            kind: TypeKind::Array { element, length },
+            cells,
+        });
+        self.nominal_states.push(ResolutionState::Done);
+        self.array_types.insert((element, length), id);
+        Ok(id)
+    }
+
+    fn resolve_runtime_declarations(&mut self) -> Result<(), FrontendError> {
+        let items = self.program.items.clone();
+        for item in items {
+            match item {
+                ast::TopLevelItem::Function(function) => {
+                    let TopSymbol::Function(id) = self.names[&function.name.text] else {
+                        unreachable!()
+                    };
+                    let return_type = self.resolve_type(&function.return_type)?;
+                    let parameter_types = function
+                        .parameters
+                        .iter()
+                        .map(|parameter| self.resolve_type(&parameter.ty))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.functions[id.index()] = Some(RegisteredFunction {
+                        id,
+                        signature: FunctionSignature {
+                            return_type,
+                            parameter_types,
+                        },
+                    });
+                }
+                ast::TopLevelItem::Global(global) => {
+                    let TopSymbol::Global(id) = self.names[&global.name.text] else {
+                        unreachable!()
+                    };
+                    let ty = self.resolve_declaration_type(
+                        &global.ty,
+                        global.initializer.as_ref(),
+                        global.name.offset,
+                    )?;
+                    self.globals[id.index()] = Some(RegisteredGlobal { id, ty });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_statement_types(&mut self, statement: &ast::Statement) -> Result<(), FrontendError> {
+        match &statement.kind {
+            ast::StatementKind::Block { statements, .. } => {
+                for statement in statements {
+                    self.resolve_statement_types(statement)?;
+                }
+            }
+            ast::StatementKind::Declaration {
+                ty,
+                name,
+                initializer,
+            } => {
+                self.resolve_declaration_type(ty, initializer.as_ref(), name.offset)?;
+            }
+            ast::StatementKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.resolve_statement_types(then_branch)?;
+                if let Some(else_branch) = else_branch {
+                    self.resolve_statement_types(else_branch)?;
+                }
+            }
+            ast::StatementKind::While { body, .. } => self.resolve_statement_types(body)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn resolve_declaration_type(
+        &mut self,
+        ty: &ast::Type,
+        initializer: Option<&ast::Expression>,
+        offset: usize,
+    ) -> Result<TypeId, FrontendError> {
+        if !matches!(ty, ast::Type::InferredCellArray) {
+            return self.resolve_type(ty);
+        }
+        let Some(ast::Expression {
+            kind: ast::ExpressionKind::StringLiteral(bytes),
+            ..
+        }) = initializer
+        else {
+            return Err(FrontendError::at(
+                offset,
+                "cell[] requires a direct string literal initializer",
+            ));
+        };
+        self.intern_array(TypeId::CELL, bytes.len(), offset)
+    }
+
+    fn validate_main(&self, functions: &[RegisteredFunction]) -> Result<FunctionId, FrontendError> {
+        let Some(TopSymbol::Function(id)) = self.names.get("main").copied() else {
+            return Err(FrontendError::at(
+                self.program.eof_offset,
+                "program must define exactly one 'void main()' function",
+            ));
+        };
+        let main = &functions[id.index()];
+        if main.signature.return_type != TypeId::VOID {
+            return Err(FrontendError::at(
+                self.function_offset(id),
+                "main must have return type 'void'",
+            ));
+        }
+        if !main.signature.parameter_types.is_empty() {
+            return Err(FrontendError::at(
+                self.function_offset(id),
+                "main must not have parameters",
+            ));
+        }
+        Ok(id)
+    }
+
+    fn function_offset(&self, id: FunctionId) -> usize {
+        self.program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ast::TopLevelItem::Function(function) => Some(function.name.offset),
+                _ => None,
+            })
+            .nth(id.index())
+            .unwrap()
+    }
 }
 
-fn validate_main(
-    program: &ast::AstProgram,
-    scope: &HashMap<String, FileSymbol>,
-) -> Result<FunctionId, FrontendError> {
-    let Some(FileSymbol::Function(main)) = scope.get("main") else {
-        return Err(FrontendError::at(
-            program.eof_offset,
-            "program must define exactly one 'void main()' function",
-        ));
-    };
-    if main.signature.return_type != hir::Type::Void {
-        return Err(FrontendError::at(
-            function_offset(program, main.id),
-            "main must have return type 'void'",
-        ));
-    }
-    if !main.signature.parameter_types.is_empty() {
-        return Err(FrontendError::at(
-            function_offset(program, main.id),
-            "main must not have parameters",
-        ));
-    }
-    Ok(main.id)
+#[derive(Clone)]
+enum NominalItem<'a> {
+    Enum(&'a ast::EnumDefinition),
+    Struct(&'a ast::StructDefinition),
 }
 
-fn function_offset(program: &ast::AstProgram, id: FunctionId) -> usize {
-    program
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            ast::TopLevelItem::Function(function) => Some(function.name.offset),
-            ast::TopLevelItem::Global(_) => None,
-        })
-        .nth(id.index())
-        .unwrap()
+enum NominalOwned {
+    Enum(ast::EnumDefinition),
+    Struct(ast::StructDefinition),
+}
+
+struct FileContext<'a> {
+    names: &'a HashMap<String, TopSymbol>,
+    types: &'a TypeTable,
+    constants: &'a [Option<u8>],
+    functions: &'a [RegisteredFunction],
+    globals: &'a [RegisteredGlobal],
+    array_types: &'a HashMap<(TypeId, usize), TypeId>,
+}
+
+impl FileContext<'_> {
+    fn symbol(&self, name: &str) -> TopSymbol {
+        self.names[name]
+    }
+
+    fn cell_array(&self, length: usize) -> TypeId {
+        self.array_types[&(TypeId::CELL, length)]
+    }
 }
 
 struct FunctionAnalyzer<'a> {
-    file_scope: &'a HashMap<String, FileSymbol>,
-    return_type: hir::Type,
-    scopes: Vec<HashMap<String, LocalId>>,
+    context: &'a FileContext<'a>,
+    return_type: TypeId,
+    scopes: Vec<HashMap<(String, NameContext), LocalId>>,
     locals: Vec<HirLocal>,
 }
 
 impl<'a> FunctionAnalyzer<'a> {
-    fn new(file_scope: &'a HashMap<String, FileSymbol>, return_type: hir::Type) -> Self {
+    fn new(context: &'a FileContext<'a>, return_type: TypeId) -> Self {
         Self {
-            file_scope,
+            context,
             return_type,
             scopes: vec![HashMap::new()],
             locals: Vec::new(),
@@ -181,42 +939,39 @@ impl<'a> FunctionAnalyzer<'a> {
         id: FunctionId,
         function: &ast::Function,
     ) -> Result<HirFunction, FrontendError> {
+        let registered = &self.context.functions[id.index()];
         let mut parameters = Vec::with_capacity(function.parameters.len());
-        for parameter in &function.parameters {
-            let local = self.declare_local(&parameter.name, hir_type(parameter.ty))?;
+        for (parameter, ty) in function
+            .parameters
+            .iter()
+            .zip(&registered.signature.parameter_types)
+        {
+            let local = self.declare_local(&parameter.name, *ty)?;
             parameters.push(HirParameter {
                 local,
                 offset: parameter.name.offset,
             });
         }
-
         let (mut body, flow, closing_offset) = self.analyze_function_body(&function.body)?;
-        match (self.return_type, flow) {
-            (hir::Type::Cell | hir::Type::Array(_), Flow::FallsThrough) => {
-                return Err(FrontendError::at(
-                    closing_offset,
-                    format!(
-                        "{} function {:?} does not return a value on every path",
-                        type_name(self.return_type),
-                        function.name.text
-                    ),
-                ));
-            }
-            (hir::Type::Void, Flow::FallsThrough) => {
-                let HirStatementKind::Block(statements) = &mut body.kind else {
-                    unreachable!()
-                };
-                statements.push(HirStatement {
-                    kind: HirStatementKind::Return(None),
-                    offset: closing_offset,
-                });
-            }
-            _ => {}
+        if self.return_type != TypeId::VOID && flow == Flow::FallsThrough {
+            return Err(FrontendError::at(
+                closing_offset,
+                format!(
+                    "{} function {:?} does not return a value on every path",
+                    self.context.types.name(self.return_type),
+                    function.name.text
+                ),
+            ));
         }
-
-        let FileSymbol::Function(registered) = &self.file_scope[&function.name.text] else {
-            unreachable!()
-        };
+        if self.return_type == TypeId::VOID && flow == Flow::FallsThrough {
+            let HirStatementKind::Block(statements) = &mut body.kind else {
+                unreachable!()
+            };
+            statements.push(HirStatement {
+                kind: HirStatementKind::Return(None),
+                offset: closing_offset,
+            });
+        }
         Ok(HirFunction {
             id,
             name: function.name.text.clone(),
@@ -284,19 +1039,24 @@ impl<'a> FunctionAnalyzer<'a> {
                 name,
                 initializer,
             } => {
-                if self.scopes.last().unwrap().contains_key(&name.text) {
+                if self
+                    .scopes
+                    .last()
+                    .unwrap()
+                    .contains_key(&(name.text.clone(), name.context))
+                {
                     return Err(already_declared(name));
                 }
-                // A local is not visible in its own initializer.
+                let declared_ty = self.resolve_local_type(ty, initializer.as_ref(), name.offset)?;
                 let initializer = initializer
                     .as_ref()
                     .map(|value| {
                         let value = self.analyze_expression(value)?;
-                        require_type(&value, hir_type(*ty), "variable initializer")?;
+                        require_type(self.context, &value, declared_ty, "variable initializer")?;
                         Ok(value)
                     })
                     .transpose()?;
-                let local = self.declare_local(name, hir_type(*ty))?;
+                let local = self.declare_local(name, declared_ty)?;
                 (
                     HirStatementKind::Declaration { local, initializer },
                     Flow::FallsThrough,
@@ -307,50 +1067,55 @@ impl<'a> FunctionAnalyzer<'a> {
                 operator,
                 value,
             } => {
-                // LANGUAGE.md specifies RHS evaluation before resolving/evaluating
-                // the target index; HIR preserves that ordering explicitly.
                 let value = self.analyze_expression(value)?;
-                let target = self.resolve_place(target)?;
-                match operator {
-                    ast::AssignmentOperator::Set => {
-                        require_type(&value, target.ty(), "assignment")?;
-                    }
-                    ast::AssignmentOperator::Add | ast::AssignmentOperator::Subtract => {
-                        require_place_type(
-                            &target,
-                            hir::Type::Cell,
-                            statement.offset,
-                            "compound assignment target",
-                        )?;
-                        require_type(&value, hir::Type::Cell, "compound assignment value")?;
-                    }
+                let target_expression = self.analyze_expression(target)?;
+                let HirExpressionKind::Place(target) = target_expression.kind else {
+                    return Err(FrontendError::at(
+                        target.offset,
+                        "assignment target must be a variable, field, or array element",
+                    ));
+                };
+                require_type(self.context, &value, target.ty, "assignment")?;
+                let operator = match operator {
+                    ast::AssignmentOperator::Set => hir::AssignmentOperator::Set,
+                    ast::AssignmentOperator::Add => hir::AssignmentOperator::Add,
+                    ast::AssignmentOperator::Subtract => hir::AssignmentOperator::Subtract,
+                };
+                if operator != hir::AssignmentOperator::Set && target.ty != TypeId::CELL {
+                    return Err(FrontendError::at(
+                        statement.offset,
+                        "compound assignment target and value must have type cell",
+                    ));
                 }
                 (
                     HirStatementKind::Assignment {
                         value,
                         target,
-                        operator: assignment_operator(*operator),
+                        operator,
                     },
                     Flow::FallsThrough,
                 )
             }
             ast::StatementKind::Output(value) => {
                 let value = self.analyze_expression(value)?;
-                require_type(&value, hir::Type::Cell, "output argument")?;
+                require_type(self.context, &value, TypeId::CELL, "output argument")?;
                 (HirStatementKind::Output(value), Flow::FallsThrough)
             }
-            ast::StatementKind::Call { name, arguments } => {
-                let (function, return_type, arguments) = self.analyze_call(name, arguments)?;
-                if return_type != hir::Type::Void {
+            ast::StatementKind::Call(expression) => {
+                let expression = self.analyze_expression(expression)?;
+                if expression.ty != TypeId::VOID {
                     return Err(FrontendError::at(
-                        name.offset,
-                        format!(
-                            "{}-returning function {:?} cannot be used as a statement",
-                            type_name(return_type),
-                            name.text
-                        ),
+                        expression.offset,
+                        "a value-returning function cannot be used as a statement",
                     ));
                 }
+                let HirExpressionKind::Call {
+                    function,
+                    arguments,
+                } = expression.kind
+                else {
+                    unreachable!()
+                };
                 (
                     HirStatementKind::Call {
                         function,
@@ -359,28 +1124,37 @@ impl<'a> FunctionAnalyzer<'a> {
                     Flow::FallsThrough,
                 )
             }
+            ast::StatementKind::MacroInvocation { name, .. } => {
+                return Err(FrontendError::at(
+                    name.offset,
+                    "macro invocation was not expanded before type checking",
+                ));
+            }
+            ast::StatementKind::Abort => (HirStatementKind::Abort, Flow::Stops),
             ast::StatementKind::Return(value) => {
-                let value = match (self.return_type, value) {
-                    (hir::Type::Void, None) => None,
-                    (hir::Type::Void, Some(value)) => {
-                        return Err(FrontendError::at(
-                            value.offset,
-                            "void function must not return a value",
-                        ));
-                    }
-                    (expected, Some(value)) => {
-                        let value = self.analyze_expression(value)?;
-                        require_type(&value, expected, "return value")?;
-                        Some(value)
-                    }
-                    (expected, None) => {
+                let value = value
+                    .as_ref()
+                    .map(|value| self.analyze_expression(value))
+                    .transpose()?;
+                match (&value, self.return_type) {
+                    (None, TypeId::VOID) => {}
+                    (None, _) => {
                         return Err(FrontendError::at(
                             statement.offset,
-                            format!("{} function must return a value", type_name(expected)),
+                            "non-void function must return a value",
                         ));
                     }
-                };
-                (HirStatementKind::Return(value), Flow::Returns)
+                    (Some(_), TypeId::VOID) => {
+                        return Err(FrontendError::at(
+                            statement.offset,
+                            "void function cannot return a value",
+                        ));
+                    }
+                    (Some(value), expected) => {
+                        require_type(self.context, value, expected, "return value")?;
+                    }
+                }
+                (HirStatementKind::Return(value), Flow::Stops)
             }
             ast::StatementKind::If {
                 condition,
@@ -388,21 +1162,19 @@ impl<'a> FunctionAnalyzer<'a> {
                 else_branch,
             } => {
                 let condition = self.analyze_expression(condition)?;
-                require_type(&condition, hir::Type::Cell, "if condition")?;
-                let constant = hir::constant_cell_value(&condition).map(|value| value != 0);
+                require_type(self.context, &condition, TypeId::CELL, "if condition")?;
                 let (then_branch, then_flow) = self.analyze_statement(then_branch)?;
-                let (else_branch, else_flow) = if let Some(branch) = else_branch {
-                    let (branch, flow) = self.analyze_statement(branch)?;
-                    (Some(Box::new(branch)), flow)
-                } else {
-                    (None, Flow::FallsThrough)
-                };
-                let flow = match constant {
-                    Some(true) => then_flow,
-                    Some(false) => else_flow,
-                    None if then_flow == Flow::Returns && else_flow == Flow::Returns => {
-                        Flow::Returns
-                    }
+                let (else_branch, else_flow) = else_branch
+                    .as_ref()
+                    .map(|branch| self.analyze_statement(branch))
+                    .transpose()?
+                    .map_or((None, Flow::FallsThrough), |(branch, flow)| {
+                        (Some(Box::new(branch)), flow)
+                    });
+                let flow = match hir::constant_cell_value(&condition) {
+                    Some(0) => else_flow,
+                    Some(_) => then_flow,
+                    None if then_flow == Flow::Stops && else_flow == Flow::Stops => Flow::Stops,
                     None => Flow::FallsThrough,
                 };
                 (
@@ -416,11 +1188,10 @@ impl<'a> FunctionAnalyzer<'a> {
             }
             ast::StatementKind::While { condition, body } => {
                 let condition = self.analyze_expression(condition)?;
-                require_type(&condition, hir::Type::Cell, "while condition")?;
-                let constant = hir::constant_cell_value(&condition).map(|value| value != 0);
-                let (body, body_flow) = self.analyze_statement(body)?;
-                let flow = if constant == Some(true) && body_flow == Flow::Returns {
-                    Flow::Returns
+                require_type(self.context, &condition, TypeId::CELL, "while condition")?;
+                let (body, _) = self.analyze_statement(body)?;
+                let flow = if hir::constant_cell_value(&condition).is_some_and(|value| value != 0) {
+                    Flow::Stops
                 } else {
                     Flow::FallsThrough
                 };
@@ -442,55 +1213,215 @@ impl<'a> FunctionAnalyzer<'a> {
         ))
     }
 
+    fn resolve_local_type(
+        &self,
+        ty: &ast::Type,
+        initializer: Option<&ast::Expression>,
+        offset: usize,
+    ) -> Result<TypeId, FrontendError> {
+        if matches!(ty, ast::Type::InferredCellArray) {
+            let Some(ast::Expression {
+                kind: ast::ExpressionKind::StringLiteral(bytes),
+                ..
+            }) = initializer
+            else {
+                return Err(FrontendError::at(
+                    offset,
+                    "cell[] requires a direct string literal initializer",
+                ));
+            };
+            return Ok(self.context.cell_array(bytes.len()));
+        }
+        self.resolve_ast_type(ty)
+    }
+
+    fn resolve_ast_type(&self, ty: &ast::Type) -> Result<TypeId, FrontendError> {
+        match ty {
+            ast::Type::Cell => Ok(TypeId::CELL),
+            ast::Type::Named(name) => match self.context.names.get(&name.text) {
+                Some(TopSymbol::Type(id)) => Ok(*id),
+                _ => Err(FrontendError::at(
+                    name.offset,
+                    format!("unknown type {:?}", name.text),
+                )),
+            },
+            ast::Type::Array { element, length } => {
+                let element = self.resolve_ast_type(element)?;
+                let length = match length {
+                    ast::ArrayLength::Literal { value, .. } => *value,
+                    ast::ArrayLength::Constant(name) => {
+                        let Some(TopSymbol::Constant(index)) =
+                            self.context.names.get(&name.text).copied()
+                        else {
+                            return Err(FrontendError::at(
+                                name.offset,
+                                "array length name must refer to a const cell",
+                            ));
+                        };
+                        usize::from(self.context.constants[index].unwrap())
+                    }
+                };
+                self.context
+                    .array_types
+                    .get(&(element, length))
+                    .copied()
+                    .ok_or_else(|| FrontendError::at(0, "unresolved array type"))
+            }
+            ast::Type::InferredCellArray => Err(FrontendError::at(
+                0,
+                "cell[] requires a direct string literal initializer",
+            )),
+            ast::Type::Void => Ok(TypeId::VOID),
+        }
+    }
+
     fn analyze_expression(
         &mut self,
         expression: &ast::Expression,
     ) -> Result<HirExpression, FrontendError> {
         let (kind, ty) = match &expression.kind {
             ast::ExpressionKind::Literal(value) => {
-                (HirExpressionKind::Literal(*value), hir::Type::Cell)
+                (HirExpressionKind::Literal(*value), TypeId::CELL)
             }
-            ast::ExpressionKind::Variable(name) => {
-                let (variable, ty) = self.resolve_variable(name)?;
-                (HirExpressionKind::Variable(variable), ty)
-            }
-            ast::ExpressionKind::ArrayElement { array, index } => {
-                let (array, length, index) = self.resolve_indexed(array, index)?;
-                (
-                    HirExpressionKind::ArrayElement {
-                        array,
-                        length,
-                        index,
-                    },
-                    hir::Type::Cell,
-                )
-            }
-            ast::ExpressionKind::Input => (HirExpressionKind::Input, hir::Type::Cell),
-            ast::ExpressionKind::Call { name, arguments } => {
-                let (function, return_type, arguments) = self.analyze_call(name, arguments)?;
-                if return_type == hir::Type::Void {
+            ast::ExpressionKind::StringLiteral(bytes) => (
+                HirExpressionKind::StringLiteral(bytes.clone()),
+                self.context.cell_array(bytes.len()),
+            ),
+            ast::ExpressionKind::Name(name) => return self.resolve_name_expression(name),
+            ast::ExpressionKind::EnumVariant { enum_name, variant } => {
+                let Some(TopSymbol::Type(ty)) = self.context.names.get(&enum_name.text).copied()
+                else {
                     return Err(FrontendError::at(
-                        name.offset,
-                        format!("void function {:?} cannot be used as a value", name.text),
+                        enum_name.offset,
+                        format!("unknown enum type {:?}", enum_name.text),
                     ));
-                }
-                (
-                    HirExpressionKind::Call {
-                        function,
-                        arguments,
+                };
+                let TypeKind::Enum { variants } = self.context.types.kind(ty) else {
+                    return Err(FrontendError::at(
+                        enum_name.offset,
+                        format!("{:?} is not an enum type", enum_name.text),
+                    ));
+                };
+                let Some(value) = variants
+                    .iter()
+                    .find(|candidate| candidate.name == variant.text)
+                    .map(|candidate| candidate.value)
+                else {
+                    return Err(FrontendError::at(
+                        variant.offset,
+                        format!(
+                            "enum {:?} has no variant {:?}",
+                            enum_name.text, variant.text
+                        ),
+                    ));
+                };
+                (HirExpressionKind::EnumVariant(value), ty)
+            }
+            ast::ExpressionKind::Input => (HirExpressionKind::Input, TypeId::CELL),
+            ast::ExpressionKind::Call { name, arguments } => {
+                return self.analyze_call(name, arguments, None, expression.offset);
+            }
+            ast::ExpressionKind::MethodCall {
+                receiver,
+                name,
+                arguments,
+            } => {
+                return self.analyze_call(name, arguments, Some(receiver), expression.offset);
+            }
+            ast::ExpressionKind::Field { base, field } => {
+                let base = self.analyze_expression(base)?;
+                let TypeKind::Struct { fields } = self.context.types.kind(base.ty) else {
+                    return Err(FrontendError::at(
+                        field.offset,
+                        format!("type {} has no fields", self.context.types.name(base.ty)),
+                    ));
+                };
+                let Some(field_definition) = fields.iter().find(|item| item.name == field.text)
+                else {
+                    return Err(FrontendError::at(
+                        field.offset,
+                        format!(
+                            "struct {} has no field {:?}",
+                            self.context.types.name(base.ty),
+                            field.text
+                        ),
+                    ));
+                };
+                return Ok(project_expression(
+                    base,
+                    Projection::Field {
+                        cell_offset: field_definition.cell_offset,
                     },
-                    return_type,
-                )
+                    field_definition.ty,
+                    expression.offset,
+                ));
+            }
+            ast::ExpressionKind::Index { base, index } => {
+                let base = self.analyze_expression(base)?;
+                let TypeKind::Array { element, length } = *self.context.types.kind(base.ty) else {
+                    return Err(FrontendError::at(
+                        expression.offset,
+                        format!(
+                            "type {} cannot be indexed",
+                            self.context.types.name(base.ty)
+                        ),
+                    ));
+                };
+                let index = self.analyze_expression(index)?;
+                require_type(self.context, &index, TypeId::CELL, "array index")?;
+                let index = if let Some(value) = hir::constant_cell_value(&index) {
+                    if usize::from(value) >= length {
+                        return Err(FrontendError::at(
+                            index.offset,
+                            format!(
+                                "constant array index {value} is out of bounds for length {length}"
+                            ),
+                        ));
+                    }
+                    ArrayIndex::Constant(value)
+                } else {
+                    ArrayIndex::Dynamic(Box::new(index))
+                };
+                return Ok(project_expression(
+                    base,
+                    Projection::Index {
+                        index,
+                        length,
+                        element_cells: self.context.types.cells(element),
+                    },
+                    element,
+                    expression.offset,
+                ));
+            }
+            ast::ExpressionKind::Len(operand) => {
+                let operand = self.analyze_expression(operand)?;
+                let TypeKind::Array { length, .. } = self.context.types.kind(operand.ty) else {
+                    return Err(FrontendError::at(
+                        expression.offset,
+                        "len operand must have an array type",
+                    ));
+                };
+                let value = u8::try_from(*length).map_err(|_| {
+                    FrontendError::at(
+                        expression.offset,
+                        "len result 256 cannot be represented as a runtime cell",
+                    )
+                })?;
+                (HirExpressionKind::Literal(value), TypeId::CELL)
             }
             ast::ExpressionKind::Unary { operator, operand } => {
                 let operand = self.analyze_expression(operand)?;
-                require_type(&operand, hir::Type::Cell, "unary operand")?;
+                require_type(self.context, &operand, TypeId::CELL, "unary operand")?;
                 (
                     HirExpressionKind::Unary {
-                        operator: unary_operator(*operator),
+                        operator: match operator {
+                            ast::UnaryOperator::Plus => hir::UnaryOperator::Plus,
+                            ast::UnaryOperator::Negate => hir::UnaryOperator::Negate,
+                            ast::UnaryOperator::Not => hir::UnaryOperator::Not,
+                        },
                         operand: Box::new(operand),
                     },
-                    hir::Type::Cell,
+                    TypeId::CELL,
                 )
             }
             ast::ExpressionKind::Binary {
@@ -499,16 +1430,45 @@ impl<'a> FunctionAnalyzer<'a> {
                 right,
             } => {
                 let left = self.analyze_expression(left)?;
-                require_type(&left, hir::Type::Cell, "left binary operand")?;
                 let right = self.analyze_expression(right)?;
-                require_type(&right, hir::Type::Cell, "right binary operand")?;
+                let operator = match operator {
+                    ast::BinaryOperator::Add => hir::BinaryOperator::Add,
+                    ast::BinaryOperator::Subtract => hir::BinaryOperator::Subtract,
+                    ast::BinaryOperator::Less => hir::BinaryOperator::Less,
+                    ast::BinaryOperator::LessEqual => hir::BinaryOperator::LessEqual,
+                    ast::BinaryOperator::Greater => hir::BinaryOperator::Greater,
+                    ast::BinaryOperator::GreaterEqual => hir::BinaryOperator::GreaterEqual,
+                    ast::BinaryOperator::Equal => hir::BinaryOperator::Equal,
+                    ast::BinaryOperator::NotEqual => hir::BinaryOperator::NotEqual,
+                    ast::BinaryOperator::LogicalAnd => hir::BinaryOperator::LogicalAnd,
+                    ast::BinaryOperator::LogicalOr => hir::BinaryOperator::LogicalOr,
+                };
+                match operator {
+                    hir::BinaryOperator::Equal | hir::BinaryOperator::NotEqual
+                        if left.ty == right.ty
+                            && (left.ty == TypeId::CELL
+                                || matches!(
+                                    self.context.types.kind(left.ty),
+                                    TypeKind::Enum { .. }
+                                )) => {}
+                    hir::BinaryOperator::Equal | hir::BinaryOperator::NotEqual => {
+                        return Err(FrontendError::at(
+                            expression.offset,
+                            "equality operands must both be cell or the same enum type",
+                        ));
+                    }
+                    _ => {
+                        require_type(self.context, &left, TypeId::CELL, "binary left operand")?;
+                        require_type(self.context, &right, TypeId::CELL, "binary right operand")?;
+                    }
+                }
                 (
                     HirExpressionKind::Binary {
-                        operator: binary_operator(*operator),
+                        operator,
                         left: Box::new(left),
                         right: Box::new(right),
                     },
-                    hir::Type::Cell,
+                    TypeId::CELL,
                 )
             }
         };
@@ -519,93 +1479,44 @@ impl<'a> FunctionAnalyzer<'a> {
         })
     }
 
-    fn analyze_call(
-        &mut self,
-        name: &ast::Name,
-        arguments: &[ast::Expression],
-    ) -> Result<(FunctionId, hir::Type, Vec<HirExpression>), FrontendError> {
-        let Some(FileSymbol::Function(function)) = self.file_scope.get(&name.text) else {
-            let message = if self.file_scope.contains_key(&name.text) {
-                format!("global variable {:?} cannot be called", name.text)
-            } else {
-                format!("undefined function {:?}", name.text)
-            };
-            return Err(FrontendError::at(name.offset, message));
-        };
-        if name.text == "main" {
-            return Err(FrontendError::at(name.offset, "main cannot be called"));
-        }
-        if arguments.len() != function.signature.parameter_types.len() {
-            return Err(FrontendError::at(
-                name.offset,
-                format!(
-                    "function {:?} expects {} argument(s), but {} were provided",
-                    name.text,
-                    function.signature.parameter_types.len(),
-                    arguments.len()
-                ),
-            ));
-        }
-        let mut analyzed = Vec::with_capacity(arguments.len());
-        for (index, (argument, expected)) in arguments
-            .iter()
-            .zip(&function.signature.parameter_types)
-            .enumerate()
-        {
-            let argument = self.analyze_expression(argument)?;
-            if argument.ty != *expected {
-                return Err(FrontendError::at(
-                    argument.offset,
-                    format!(
-                        "argument {} to {:?} has type {}, expected {}",
-                        index + 1,
-                        name.text,
-                        type_name(argument.ty),
-                        type_name(*expected)
-                    ),
-                ));
+    fn resolve_name_expression(&self, name: &ast::Name) -> Result<HirExpression, FrontendError> {
+        if name.context != NameContext::DefinitionSite {
+            for scope in self.scopes.iter().rev() {
+                if let Some(local) = scope.get(&(name.text.clone(), name.context)) {
+                    let local_definition = &self.locals[local.index()];
+                    return Ok(HirExpression {
+                        kind: HirExpressionKind::Place(HirPlace {
+                            root: VariableRef::Local(*local),
+                            projections: vec![],
+                            ty: local_definition.ty,
+                        }),
+                        ty: local_definition.ty,
+                        offset: name.offset,
+                    });
+                }
             }
-            analyzed.push(argument);
         }
-        Ok((function.id, function.signature.return_type, analyzed))
-    }
-
-    fn declare_local(&mut self, name: &ast::Name, ty: hir::Type) -> Result<LocalId, FrontendError> {
-        if self.scopes.last().unwrap().contains_key(&name.text) {
-            return Err(already_declared(name));
-        }
-        debug_assert!(ty.is_value());
-        let id = LocalId::new(self.locals.len());
-        self.locals.push(HirLocal {
-            id,
-            name: name.text.clone(),
-            offset: name.offset,
-            ty,
-        });
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(name.text.clone(), id);
-        Ok(id)
-    }
-
-    fn resolve_variable(
-        &self,
-        name: &ast::Name,
-    ) -> Result<(VariableRef, hir::Type), FrontendError> {
-        if let Some(local) = self
-            .scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(&name.text).copied())
-        {
-            return Ok((VariableRef::Local(local), self.locals[local.index()].ty));
-        }
-        match self.file_scope.get(&name.text) {
-            Some(FileSymbol::Global(global)) => Ok((VariableRef::Global(global.id), global.ty)),
-            Some(FileSymbol::Function(_)) => Err(FrontendError::at(
+        match self.context.names.get(&name.text).copied() {
+            Some(TopSymbol::Global(id)) => {
+                let global = self.context.globals[id.index()];
+                Ok(HirExpression {
+                    kind: HirExpressionKind::Place(HirPlace {
+                        root: VariableRef::Global(id),
+                        projections: vec![],
+                        ty: global.ty,
+                    }),
+                    ty: global.ty,
+                    offset: name.offset,
+                })
+            }
+            Some(TopSymbol::Constant(index)) => Ok(HirExpression {
+                kind: HirExpressionKind::Literal(self.context.constants[index].unwrap()),
+                ty: TypeId::CELL,
+                offset: name.offset,
+            }),
+            Some(_) => Err(FrontendError::at(
                 name.offset,
-                format!("function {:?} cannot be used as a variable", name.text),
+                format!("{:?} is not a value", name.text),
             )),
             None => Err(FrontendError::at(
                 name.offset,
@@ -614,161 +1525,159 @@ impl<'a> FunctionAnalyzer<'a> {
         }
     }
 
-    fn resolve_place(&mut self, place: &ast::Place) -> Result<HirPlace, FrontendError> {
-        let (variable, ty) = self.resolve_variable(&place.name)?;
-        match (&place.index, ty) {
-            (None, ty) => Ok(HirPlace::Variable { variable, ty }),
-            (Some(index), hir::Type::Array(length)) => {
-                let index = self.analyze_array_index(&place.name, length, index)?;
-                Ok(HirPlace::ArrayElement {
-                    array: variable,
-                    length,
-                    index,
-                })
-            }
-            (Some(_), hir::Type::Cell) => Err(FrontendError::at(
-                place.name.offset,
-                format!("cell variable {:?} cannot be indexed", place.name.text),
-            )),
-            (_, hir::Type::Void) => unreachable!(),
-        }
-    }
-
-    fn resolve_indexed(
+    fn analyze_call(
         &mut self,
         name: &ast::Name,
-        index: &ast::Expression,
-    ) -> Result<(VariableRef, usize, ArrayIndex), FrontendError> {
-        let (variable, ty) = self.resolve_variable(name)?;
-        let hir::Type::Array(length) = ty else {
+        arguments: &[ast::Expression],
+        receiver: Option<&ast::Expression>,
+        offset: usize,
+    ) -> Result<HirExpression, FrontendError> {
+        let Some(TopSymbol::Function(id)) = self.context.names.get(&name.text).copied() else {
             return Err(FrontendError::at(
                 name.offset,
-                format!("cell variable {:?} cannot be indexed", name.text),
+                format!("undefined function {:?}", name.text),
             ));
         };
-        let index = self.analyze_array_index(name, length, index)?;
-        Ok((variable, length, index))
+        if name.text == "main" {
+            return Err(FrontendError::at(
+                name.offset,
+                "main cannot be called explicitly",
+            ));
+        }
+        let function = &self.context.functions[id.index()];
+        let actual_count = arguments.len() + usize::from(receiver.is_some());
+        if actual_count != function.signature.parameter_types.len() {
+            return Err(FrontendError::at(
+                name.offset,
+                format!(
+                    "function {:?} expects {} argument(s), but {actual_count} were provided",
+                    name.text,
+                    function.signature.parameter_types.len()
+                ),
+            ));
+        }
+        let mut hir_arguments = Vec::with_capacity(actual_count);
+        if let Some(receiver) = receiver {
+            hir_arguments.push(self.analyze_expression(receiver)?);
+        }
+        for argument in arguments {
+            hir_arguments.push(self.analyze_expression(argument)?);
+        }
+        for (argument, expected) in hir_arguments
+            .iter()
+            .zip(&function.signature.parameter_types)
+        {
+            require_type(self.context, argument, *expected, "function argument")?;
+        }
+        Ok(HirExpression {
+            kind: HirExpressionKind::Call {
+                function: id,
+                arguments: hir_arguments,
+            },
+            ty: function.signature.return_type,
+            offset,
+        })
     }
 
-    fn analyze_array_index(
-        &mut self,
-        name: &ast::Name,
-        length: usize,
-        index: &ast::Expression,
-    ) -> Result<ArrayIndex, FrontendError> {
-        let index_expression = self.analyze_expression(index)?;
-        require_type(&index_expression, hir::Type::Cell, "array index")?;
-        if let Some(value) = hir::constant_cell_value(&index_expression) {
-            if usize::from(value) >= length {
-                return Err(FrontendError::at(
-                    index.offset,
-                    format!(
-                        "array index {value} is out of bounds for {:?} with length {length}",
-                        name.text
-                    ),
-                ));
-            }
-            Ok(ArrayIndex::Constant(value))
-        } else {
-            Ok(ArrayIndex::Dynamic(Box::new(index_expression)))
+    fn declare_local(&mut self, name: &ast::Name, ty: TypeId) -> Result<LocalId, FrontendError> {
+        let scope = self.scopes.last_mut().unwrap();
+        let key = (name.text.clone(), name.context);
+        if scope.contains_key(&key) {
+            return Err(already_declared(name));
         }
+        let id = LocalId::new(self.locals.len());
+        scope.insert(key, id);
+        self.locals.push(HirLocal {
+            id,
+            name: name.text.clone(),
+            offset: name.offset,
+            ty,
+        });
+        Ok(id)
     }
+}
+
+fn project_expression(
+    base: HirExpression,
+    projection: Projection,
+    ty: TypeId,
+    offset: usize,
+) -> HirExpression {
+    let kind = match base.kind {
+        HirExpressionKind::Place(mut place) => {
+            place.projections.push(projection);
+            place.ty = ty;
+            HirExpressionKind::Place(place)
+        }
+        HirExpressionKind::Project {
+            base,
+            mut projections,
+        } => {
+            projections.push(projection);
+            HirExpressionKind::Project { base, projections }
+        }
+        kind => HirExpressionKind::Project {
+            base: Box::new(HirExpression {
+                kind,
+                ty: base.ty,
+                offset: base.offset,
+            }),
+            projections: vec![projection],
+        },
+    };
+    HirExpression { kind, ty, offset }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
     FallsThrough,
-    Returns,
+    Stops,
 }
 
 fn require_type(
+    context: &FileContext<'_>,
     expression: &HirExpression,
-    expected: hir::Type,
-    context: &str,
+    expected: TypeId,
+    context_name: &str,
 ) -> Result<(), FrontendError> {
     if expression.ty == expected {
-        return Ok(());
-    }
-    Err(FrontendError::at(
-        expression.offset,
-        format!(
-            "{context} has type {}, expected {}",
-            type_name(expression.ty),
-            type_name(expected)
-        ),
-    ))
-}
-
-fn require_place_type(
-    place: &HirPlace,
-    expected: hir::Type,
-    offset: usize,
-    context: &str,
-) -> Result<(), FrontendError> {
-    if place.ty() == expected {
-        return Ok(());
-    }
-    Err(FrontendError::at(
-        offset,
-        format!(
-            "{context} has type {}, expected {}",
-            type_name(place.ty()),
-            type_name(expected)
-        ),
-    ))
-}
-
-fn type_name(ty: hir::Type) -> String {
-    match ty {
-        hir::Type::Cell => "cell".to_owned(),
-        hir::Type::Array(length) => format!("cell[{length}]"),
-        hir::Type::Void => "void".to_owned(),
+        Ok(())
+    } else if expression.ty == TypeId::VOID {
+        Err(FrontendError::at(
+            expression.offset,
+            format!("void function call cannot be used as a value for {context_name}"),
+        ))
+    } else {
+        Err(FrontendError::at(
+            expression.offset,
+            format!(
+                "{context_name} expected {}, found {}",
+                context.types.name(expected),
+                context.types.name(expression.ty)
+            ),
+        ))
     }
 }
 
 fn already_declared(name: &ast::Name) -> FrontendError {
     FrontendError::at(
         name.offset,
-        format!("variable {:?} is already declared in this scope", name.text),
+        format!("name {:?} is already declared in this scope", name.text),
     )
 }
 
-const fn hir_type(ty: ast::Type) -> hir::Type {
-    match ty {
-        ast::Type::Cell => hir::Type::Cell,
-        ast::Type::Array(length) => hir::Type::Array(length),
-        ast::Type::Void => hir::Type::Void,
-    }
-}
-
-const fn assignment_operator(operator: ast::AssignmentOperator) -> hir::AssignmentOperator {
+fn evaluate_binary(operator: ast::BinaryOperator, left: u8, right: u8) -> u8 {
     match operator {
-        ast::AssignmentOperator::Set => hir::AssignmentOperator::Set,
-        ast::AssignmentOperator::Add => hir::AssignmentOperator::Add,
-        ast::AssignmentOperator::Subtract => hir::AssignmentOperator::Subtract,
-    }
-}
-
-const fn unary_operator(operator: ast::UnaryOperator) -> hir::UnaryOperator {
-    match operator {
-        ast::UnaryOperator::Plus => hir::UnaryOperator::Plus,
-        ast::UnaryOperator::Negate => hir::UnaryOperator::Negate,
-        ast::UnaryOperator::Not => hir::UnaryOperator::Not,
-    }
-}
-
-const fn binary_operator(operator: ast::BinaryOperator) -> hir::BinaryOperator {
-    match operator {
-        ast::BinaryOperator::Add => hir::BinaryOperator::Add,
-        ast::BinaryOperator::Subtract => hir::BinaryOperator::Subtract,
-        ast::BinaryOperator::Less => hir::BinaryOperator::Less,
-        ast::BinaryOperator::LessEqual => hir::BinaryOperator::LessEqual,
-        ast::BinaryOperator::Greater => hir::BinaryOperator::Greater,
-        ast::BinaryOperator::GreaterEqual => hir::BinaryOperator::GreaterEqual,
-        ast::BinaryOperator::Equal => hir::BinaryOperator::Equal,
-        ast::BinaryOperator::NotEqual => hir::BinaryOperator::NotEqual,
-        ast::BinaryOperator::LogicalAnd => hir::BinaryOperator::LogicalAnd,
-        ast::BinaryOperator::LogicalOr => hir::BinaryOperator::LogicalOr,
+        ast::BinaryOperator::Add => left.wrapping_add(right),
+        ast::BinaryOperator::Subtract => left.wrapping_sub(right),
+        ast::BinaryOperator::Less => u8::from(left < right),
+        ast::BinaryOperator::LessEqual => u8::from(left <= right),
+        ast::BinaryOperator::Greater => u8::from(left > right),
+        ast::BinaryOperator::GreaterEqual => u8::from(left >= right),
+        ast::BinaryOperator::Equal => u8::from(left == right),
+        ast::BinaryOperator::NotEqual => u8::from(left != right),
+        ast::BinaryOperator::LogicalAnd => u8::from(left != 0 && right != 0),
+        ast::BinaryOperator::LogicalOr => u8::from(left != 0 || right != 0),
     }
 }
 
@@ -778,255 +1687,101 @@ mod tests {
     use crate::{lexer, parser};
 
     fn analyze_source(source: &str) -> Result<HirProgram, FrontendError> {
-        analyze(&parser::parse(lexer::lex(source)?)?)
+        let tokens = lexer::lex(source)?;
+        let ast = parser::parse(tokens)?;
+        analyze(&ast)
     }
 
     #[test]
-    fn resolves_file_scope_globals_functions_and_shadowing() {
+    fn lays_out_nominal_types_and_multidimensional_arrays() {
         let program = analyze_source(
-            "cell count = 1; cell[4] data; cell read() { return count; } \
-             void main() { cell count = 2; data[count] = read(); output(data[2]); }",
+            "enum K { Zero, One } struct Pair { K kind; cell[2] bytes; } \
+             Pair[3][4] values; void main() { values[1][2].bytes[0] = 9; }",
         )
         .unwrap();
-        assert_eq!(program.globals.len(), 2);
-        assert_eq!(program.functions.len(), 2);
-        assert_eq!(program.functions[1].locals.len(), 1);
-
-        for source in [
-            "cell same; void same() {} void main() {}",
-            "cell same; cell same; void main() {}",
-            "void same() {} void same() {} void main() {}",
-        ] {
-            assert!(
-                analyze_source(source)
-                    .unwrap_err()
-                    .message()
-                    .contains("already defined")
-            );
-        }
+        assert_eq!(program.types.cells(program.globals[0].ty), 36);
     }
 
     #[test]
-    fn parameters_share_body_scope_and_nested_blocks_may_shadow() {
-        let error =
-            analyze_source("cell same(cell value) { cell value; return value; } void main() {}")
-                .unwrap_err();
-        assert!(error.message().contains("already declared"));
-
-        let program = analyze_source(
-            "cell[2] same(cell[2] value) { { cell value; } return value; } void main() {}",
-        )
-        .unwrap();
-        assert_eq!(program.functions[0].locals.len(), 2);
-        assert_eq!(program.functions[0].locals[0].ty, hir::Type::Array(2));
-        assert_eq!(program.functions[0].locals[1].ty, hir::Type::Cell);
-    }
-
-    #[test]
-    fn global_initializers_are_general_typed_expressions_in_declaration_order() {
-        let program = analyze_source(
-            "cell later = first(); cell earlier = input(); cell first() { return earlier; } void main() {}",
-        )
-        .unwrap();
-        assert_eq!(program.globals[0].name, "later");
-        assert!(matches!(
-            program.globals[0].initializer.as_ref().unwrap().kind,
-            HirExpressionKind::Call { .. }
-        ));
-        assert!(matches!(
-            program.globals[1].initializer.as_ref().unwrap().kind,
-            HirExpressionKind::Input
-        ));
-    }
-
-    #[test]
-    fn retains_array_identity_and_constant_or_dynamic_indices() {
-        let program = analyze_source(
-            "cell[4] global; void main() { cell[4] local; cell i; local[1 + 2] = global[i]; }",
-        )
-        .unwrap();
-        assert_eq!(program.functions[0].locals.len(), 2);
-        assert_eq!(program.functions[0].locals[0].ty, hir::Type::Array(4));
-        let HirStatementKind::Block(body) = &program.functions[0].body.kind else {
-            panic!()
-        };
-        let HirStatementKind::Assignment { target, value, .. } = &body[2].kind else {
-            panic!()
-        };
-        assert!(matches!(
-            target,
-            HirPlace::ArrayElement {
-                index: ArrayIndex::Constant(3),
-                ..
-            }
-        ));
-        assert!(matches!(
-            value.kind,
-            HirExpressionKind::ArrayElement {
-                index: ArrayIndex::Dynamic(_),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn supports_typed_whole_array_assignment_parameters_and_returns() {
-        let program = analyze_source(
-            "cell[4] copy(cell[4] value) { cell[4] result; result = value; return result; } \
-             void main() { cell[4] source; cell[4] target; target = copy(source); }",
-        )
-        .unwrap();
-        assert_eq!(
-            program.functions[0].signature.return_type,
-            hir::Type::Array(4)
-        );
-        assert_eq!(
-            program.functions[0].signature.parameter_types,
-            vec![hir::Type::Array(4)]
-        );
-        let HirStatementKind::Block(body) = &program.functions[1].body.kind else {
-            panic!()
-        };
-        let HirStatementKind::Assignment { target, value, .. } = &body[2].kind else {
-            panic!()
-        };
-        assert_eq!(target.ty(), hir::Type::Array(4));
-        assert_eq!(value.ty, hir::Type::Array(4));
-    }
-
-    #[test]
-    fn enforces_call_arity_and_value_context() {
-        let arity =
-            analyze_source("cell helper(cell x) { return x; } void main() { output(helper()); }")
-                .unwrap_err();
-        assert!(arity.message().contains("expects 1 argument"));
-
-        let void_value =
-            analyze_source("void helper() {} void main() { cell x = helper(); }").unwrap_err();
-        assert!(void_value.message().contains("cannot be used as a value"));
-
-        let aggregate_statement =
-            analyze_source("cell[2] helper() { cell[2] x; return x; } void main() { helper(); }")
-                .unwrap_err();
+    fn validates_enum_and_struct_definitions() {
         assert!(
-            aggregate_statement
-                .message()
-                .contains("cannot be used as a statement")
-        );
-    }
-
-    #[test]
-    fn diagnoses_all_array_type_mismatches() {
-        let cases = [
-            (
-                "void main() { cell[2] a; cell[3] b; a = b; }",
-                "expected cell[2]",
-            ),
-            (
-                "void take(cell[2] a) {} void main() { cell[3] b; take(b); }",
-                "expected cell[2]",
-            ),
-            (
-                "cell[2] make() { cell[3] a; return a; } void main() {}",
-                "expected cell[2]",
-            ),
-            ("void main() { cell[2] a; output(a); }", "expected cell"),
-            (
-                "void main() { cell[2] a; a += a; }",
-                "compound assignment target",
-            ),
-            ("void main() { cell[2] a; if (a) {} }", "if condition"),
-            ("void main() { cell[2] a; output(a[2]); }", "out of bounds"),
-        ];
-        for (source, expected) in cases {
-            let error = analyze_source(source).unwrap_err();
-            assert!(error.message().contains(expected), "{:?}", error.message());
-        }
-    }
-
-    #[test]
-    fn keeps_rhs_before_dynamic_assignment_index_in_hir() {
-        let program = analyze_source("void main() { cell[4] a; a[input()] = input(); }").unwrap();
-        let HirStatementKind::Block(body) = &program.functions[0].body.kind else {
-            panic!()
-        };
-        let HirStatementKind::Assignment { target, value, .. } = &body[1].kind else {
-            panic!()
-        };
-        assert!(matches!(value.kind, HirExpressionKind::Input));
-        assert!(matches!(
-            target,
-            HirPlace::ArrayElement {
-                index: ArrayIndex::Dynamic(index),
-                ..
-            } if matches!(index.kind, HirExpressionKind::Input)
-        ));
-    }
-
-    #[test]
-    fn resolves_forward_and_mutual_calls_and_definite_returns() {
-        let program = analyze_source(
-            "cell first(cell n) { if (n) return second(n - 1); else return 0; } \
-             cell second(cell n) { if (n) return first(n - 1); else return 1; } \
-             void main() {}",
-        )
-        .unwrap();
-        assert_eq!(program.entry, FunctionId::new(2));
-        assert!(
-            analyze_source("cell[2] bad() { cell[2] a; if (input()) return a; } void main() {}")
+            analyze_source("enum Bad { A = 1 } void main() {}")
                 .unwrap_err()
                 .message()
-                .contains("every path")
+                .contains("discriminant 0")
+        );
+        assert!(
+            analyze_source("struct Bad { Bad value; } void main() {}")
+                .unwrap_err()
+                .message()
+                .contains("recursively")
         );
     }
 
     #[test]
-    fn constant_conditions_refine_definite_return_flow() {
+    fn strings_len_constants_and_methods_are_typed() {
         analyze_source(
-            "cell from_if() { if (!(1 - 1)) return 7; } \
-             cell[2] from_while() { cell[2] a; while (2 > 1 && 3) return a; } \
-             void main() {}",
+            r#"
+            const cell N = 2 + 1;
+            cell id(cell value) { return value; }
+            void main() {
+                cell[] text = "a\0b";
+                cell[N] copy = text;
+                output(copy[0].id() + len(text));
+            }
+            "#,
         )
         .unwrap();
-
-        for source in [
-            "cell bad() { if (0) return 1; } void main() {}",
-            "cell[2] bad() { cell[2] a; while (0) return a; } void main() {}",
-        ] {
-            assert!(
-                analyze_source(source)
-                    .unwrap_err()
-                    .message()
-                    .contains("every path")
-            );
-        }
     }
 
     #[test]
-    fn validates_main_and_forbids_calls_to_it() {
-        assert!(
-            analyze_source("cell global;")
-                .unwrap_err()
-                .message()
-                .contains("void main()")
-        );
-        assert!(
-            analyze_source("cell main;")
-                .unwrap_err()
-                .message()
-                .contains("void main()")
-        );
-        assert!(
-            analyze_source("cell main() { return 0; }")
-                .unwrap_err()
-                .message()
-                .contains("return type")
-        );
-        assert!(
-            analyze_source("void helper() { main(); } void main() {}")
-                .unwrap_err()
-                .message()
-                .contains("cannot be called")
-        );
+    fn abort_satisfies_nonvoid_return_flow() {
+        analyze_source("cell fail() { abort(); } void main() { fail(); }").unwrap_err();
+        analyze_source("cell fail() { abort(); } void main() {}").unwrap();
+    }
+
+    #[test]
+    fn len_is_allowed_in_constant_expressions_without_evaluating_its_operand() {
+        analyze_source(
+            "cell[3] values; const cell N = len(values); \
+             cell[3] identity(cell[3] value) { return value; } \
+             const cell M = len(identity(values)); \
+             void main() { output(N + M); }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn len_type_checks_unevaluated_nested_expressions_and_constant_indices() {
+        for source in [
+            "struct Z { cell q; } Z z; cell[2][3] xs; \
+             const cell N = len(xs[+z]); void main() {}",
+            "cell[2][3] xs; const cell N = len(xs[2]); void main() {}",
+        ] {
+            assert!(
+                analyze_source(source).is_err(),
+                "invalid unevaluated expression was accepted: {source}"
+            );
+        }
+        analyze_source(
+            "cell[2][3] xs; cell runtime; \
+             const cell N = len(xs[runtime]); void main() { output(N); }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mixed_len_and_array_length_cycles_are_diagnosed() {
+        let error = analyze_source("const cell N = len(values); cell[N] values; void main() {}")
+            .unwrap_err();
+        assert!(error.message().contains("cycle"));
+    }
+
+    #[test]
+    fn method_call_statements_accept_non_identifier_receivers() {
+        analyze_source(
+            "void discard(cell value) {} void main() { input().discard(); ('x').discard(); }",
+        )
+        .unwrap();
     }
 }

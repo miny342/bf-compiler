@@ -958,16 +958,12 @@ call深度によるBFテープ右端超過とする。
 
 ### 現在の実装状況
 
-第8段階まで実装している。第9段階以降は本文で意味を確定した未実装仕様であり、実装済みになる
-まで明示的なコンパイルエラーとして拒否する。parameterなしの`void main()`をentry pointとし、
-scalarの`cell`/`void`関数、parameter、call、return、forward call、直接再帰、相互再帰を使用
-できる。callの引数は左から右に評価し、callerのlocalはcalleeの実行中も保存する。
-すべての比較演算と、callを含む場合にも短絡評価する論理`&&`および`||`を使用できる。
+第12段階まで実装している。parameterなしの`void main()`、scalar/aggregate関数、値渡し、
+return、forward call、直接・相互再帰を使用できる。enum、struct、任意要素型・多次元の固定長
+配列、field/index projection、文字列配列、`len`、`const cell`、method call糖衣、衛生的block
+macro、`abort`を使用できる。引数と添字の評価順、短絡評価、aggregateのsnapshot/copy semanticsを
+typed HIR、Continuation IR、activation固有outboxで保持する。
 
-global変数とglobal配列を宣言でき、宣言順の初期化、関数からの読み書き、定数添字と
-動的添字を使用できる。local/global配列の動的アクセスにはarray portalを使用する。
-配列は値として全体代入、関数parameter、returnに使用でき、引数評価時のsnapshotと
-activationごとのaggregate return outboxによりcopy semanticsを保つ。
-
-scalarと配列の関数には[ABI.md](ABI.md)のframe stackとContinuation dispatcherを使用する。
-ABI backendは`D = 8`と`D = 16`の両方のchunk geometryをサポートする。
+globalは宣言順に初期化し、local/global aggregateの動的projectionには16-bit logical offsetの
+aggregate portalを使用する。[ABI.md](ABI.md)のbackendは`D = 8`と`D = 16`の両chunk geometryを
+サポートする。第13段階のself-host compiler自体は未実装である。

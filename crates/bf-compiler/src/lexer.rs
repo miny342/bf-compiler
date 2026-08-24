@@ -10,15 +10,22 @@ pub(crate) struct Token {
 pub(crate) enum TokenKind {
     Cell,
     Void,
+    Enum,
+    Struct,
+    Const,
+    Macro,
     Return,
     If,
     Else,
     While,
+    Abort,
     Input,
     Output,
+    Len,
     Identifier(String),
     Number(u16),
     Character(u8),
+    String(Vec<u8>),
     LeftBrace,
     RightBrace,
     LeftParen,
@@ -41,6 +48,8 @@ pub(crate) enum TokenKind {
     PipePipe,
     LeftBracket,
     RightBracket,
+    Dot,
+    ColonColon,
     Eof,
 }
 
@@ -81,12 +90,18 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 let kind = match text {
                     "cell" => TokenKind::Cell,
                     "void" => TokenKind::Void,
+                    "enum" => TokenKind::Enum,
+                    "struct" => TokenKind::Struct,
+                    "const" => TokenKind::Const,
+                    "macro" => TokenKind::Macro,
                     "return" => TokenKind::Return,
                     "if" => TokenKind::If,
                     "else" => TokenKind::Else,
                     "while" => TokenKind::While,
+                    "abort" => TokenKind::Abort,
                     "input" => TokenKind::Input,
                     "output" => TokenKind::Output,
+                    "len" => TokenKind::Len,
                     _ => TokenKind::Identifier(text.to_owned()),
                 };
                 tokens.push(Token {
@@ -136,6 +151,15 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                     offset: start,
                 });
             }
+            b'"' => {
+                let start = position;
+                let (value, next) = lex_string(bytes, position)?;
+                position = next;
+                tokens.push(Token {
+                    kind: TokenKind::String(value),
+                    offset: start,
+                });
+            }
             byte => {
                 let start = position;
                 if !byte.is_ascii() {
@@ -153,6 +177,11 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                     b',' => TokenKind::Comma,
                     b'[' => TokenKind::LeftBracket,
                     b']' => TokenKind::RightBracket,
+                    b'.' => TokenKind::Dot,
+                    b':' if bytes.get(position) == Some(&b':') => {
+                        position += 1;
+                        TokenKind::ColonColon
+                    }
                     b';' => TokenKind::Semicolon,
                     b'=' if bytes.get(position) == Some(&b'=') => {
                         position += 1;
@@ -259,6 +288,59 @@ fn lex_character(bytes: &[u8], start: usize) -> Result<(u8, usize), FrontendErro
         ));
     }
     Ok((value, position + 1))
+}
+
+fn lex_string(bytes: &[u8], start: usize) -> Result<(Vec<u8>, usize), FrontendError> {
+    let mut position = start + 1;
+    let mut value = Vec::new();
+    loop {
+        let Some(&byte) = bytes.get(position) else {
+            return Err(FrontendError::at(start, "unterminated string literal"));
+        };
+        if byte == b'"' {
+            return Ok((value, position + 1));
+        }
+        if byte == b'\\' {
+            position += 1;
+            let Some(&escape) = bytes.get(position) else {
+                return Err(FrontendError::at(start, "unterminated string escape"));
+            };
+            let decoded = match escape {
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'0' => 0,
+                b'\\' => b'\\',
+                b'"' => b'"',
+                b'\'' => b'\'',
+                b'x' => {
+                    let Some(digits) = bytes.get(position + 1..position + 3) else {
+                        return Err(FrontendError::at(start, "expected two hexadecimal digits"));
+                    };
+                    if !digits.iter().all(u8::is_ascii_hexdigit) {
+                        return Err(FrontendError::at(start, "expected two hexadecimal digits"));
+                    }
+                    position += 2;
+                    hexadecimal_value(digits[0]) * 16 + hexadecimal_value(digits[1])
+                }
+                _ => return Err(FrontendError::at(start, "unknown string escape")),
+            };
+            value.push(decoded);
+            position += 1;
+        } else {
+            if !byte.is_ascii() || byte.is_ascii_control() {
+                return Err(FrontendError::at(start, "invalid byte in string literal"));
+            }
+            value.push(byte);
+            position += 1;
+        }
+        if value.len() > 256 {
+            return Err(FrontendError::at(
+                start,
+                "string literal cannot contain more than 256 bytes",
+            ));
+        }
+    }
 }
 
 fn hexadecimal_value(byte: u8) -> u8 {

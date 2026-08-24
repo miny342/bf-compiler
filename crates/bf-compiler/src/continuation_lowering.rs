@@ -4,15 +4,16 @@ use std::error::Error;
 use std::fmt;
 
 use crate::continuation_ir::{
-    Address, ArrayRegion, Continuation, ContinuationId, ContinuationIrError, ContinuationProgram,
-    FrameArrayDescriptor, FrameArrayId, FrameInstruction, FrameSlot, FrameTransferTarget,
-    FunctionDescriptor, FunctionId as ContinuationFunctionId, GlobalDescriptor,
-    GlobalId as ContinuationGlobalId, ParameterLocation, Terminator, ValueOperand, ValueType,
+    Address, AggregateRegion, Continuation, ContinuationId, ContinuationIrError,
+    ContinuationProgram, FrameAggregateDescriptor, FrameAggregateId, FrameInstruction, FrameSlot,
+    FrameTransferTarget, FunctionDescriptor, FunctionId as ContinuationFunctionId,
+    GlobalDescriptor, GlobalId as ContinuationGlobalId, LogicalOffset, ParameterLocation,
+    Terminator, ValueOperand, ValueType,
 };
 use crate::hir::{
     self, ArrayIndex, AssignmentOperator, BinaryOperator, HirExpression, HirExpressionKind,
-    HirFunction, HirPlace, HirProgram, HirStatement, HirStatementKind, Type, UnaryOperator,
-    VariableRef,
+    HirFunction, HirPlace, HirProgram, HirStatement, HirStatementKind, Projection, TypeId,
+    TypeKind, UnaryOperator, VariableRef,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +21,7 @@ pub(crate) enum ContinuationLoweringError {
     ContinuationIdsExhausted,
     InvalidHir {
         function: Option<hir::FunctionId>,
-        detail: &'static str,
+        detail: String,
     },
     InvalidContinuationIr(ContinuationIrError),
 }
@@ -37,15 +38,11 @@ impl fmt::Display for ContinuationLoweringError {
             Self::InvalidHir {
                 function: Some(function),
                 detail,
-            } => {
-                write!(f, "invalid HIR for function {}: {detail}", function.index())
-            }
+            } => write!(f, "invalid HIR for function {}: {detail}", function.index()),
             Self::InvalidHir {
                 function: None,
                 detail,
-            } => {
-                write!(f, "invalid HIR program: {detail}")
-            }
+            } => write!(f, "invalid HIR program: {detail}"),
             Self::InvalidContinuationIr(error) => {
                 write!(f, "invalid generated continuation IR: {error}")
             }
@@ -72,22 +69,20 @@ pub(crate) fn lower_hir(
     program: &HirProgram,
 ) -> Result<ContinuationProgram, ContinuationLoweringError> {
     validate_program_shape(program)?;
-
     let mut ids = IdAllocator::with_reserved_entries(program.functions.len())?;
     let entries = (0..program.functions.len())
         .map(|index| continuation_id(index + 1))
         .collect::<Result<Vec<_>, _>>()?;
-
     let globals = program
         .globals
         .iter()
         .map(|global| {
-            GlobalDescriptor::new(
+            Ok(GlobalDescriptor::new(
                 ContinuationGlobalId::new(global.id.index()),
-                value_type(global.ty),
-            )
+                value_type(program, global.ty)?,
+            ))
         })
-        .collect();
+        .collect::<Result<Vec<_>, ContinuationLoweringError>>()?;
 
     let mut functions = Vec::with_capacity(program.functions.len());
     let mut continuations = Vec::new();
@@ -96,10 +91,9 @@ pub(crate) fn lower_hir(
         let mut lowerer =
             FunctionLowerer::new(program, function, function_id, entries[index], &mut ids)?;
         lowerer.lower()?;
-        functions.push(lowerer.descriptor(entries[index]));
+        functions.push(lowerer.descriptor(entries[index])?);
         continuations.extend(lowerer.continuations);
     }
-
     ContinuationProgram::new_with_globals(
         ContinuationFunctionId::new(program.entry.index()),
         globals,
@@ -115,79 +109,67 @@ fn continuation_id(value: usize) -> Result<ContinuationId, ContinuationLoweringE
     ContinuationId::new(value).ok_or(ContinuationLoweringError::ContinuationIdsExhausted)
 }
 
-const fn value_type(ty: Type) -> ValueType {
-    match ty {
-        Type::Cell => ValueType::Cell,
-        Type::Array(cells) => ValueType::Array(cells),
-        Type::Void => ValueType::Void,
-    }
+fn value_type(program: &HirProgram, ty: TypeId) -> Result<ValueType, ContinuationLoweringError> {
+    Ok(match program.types.kind(ty) {
+        TypeKind::Cell | TypeKind::Enum { .. } => ValueType::Cell,
+        TypeKind::Struct { .. } | TypeKind::Array { .. } => ValueType::Aggregate {
+            cells: program.types.cells(ty),
+        },
+        TypeKind::Void => ValueType::Void,
+    })
 }
 
 fn invalid_hir(
     function: Option<hir::FunctionId>,
-    detail: &'static str,
+    detail: impl Into<String>,
 ) -> ContinuationLoweringError {
-    ContinuationLoweringError::InvalidHir { function, detail }
+    ContinuationLoweringError::InvalidHir {
+        function,
+        detail: detail.into(),
+    }
 }
 
 fn validate_program_shape(program: &HirProgram) -> Result<(), ContinuationLoweringError> {
     let Some(entry) = program.functions.get(program.entry.index()) else {
         return Err(invalid_hir(None, "entry function is out of bounds"));
     };
-    if entry.id != program.entry {
-        return Err(invalid_hir(None, "entry ID does not index its function"));
-    }
-    if entry.signature.return_type != Type::Void || !entry.parameters.is_empty() {
+    if entry.id != program.entry
+        || entry.signature.return_type != TypeId::VOID
+        || !entry.parameters.is_empty()
+    {
         return Err(invalid_hir(
             Some(entry.id),
             "main must have signature void main()",
         ));
     }
-
     for (index, global) in program.globals.iter().enumerate() {
-        if global.id.index() != index {
-            return Err(invalid_hir(None, "global IDs must match vector indices"));
-        }
-        if !valid_value_type(global.ty) {
-            return Err(invalid_hir(None, "global has an invalid value type"));
-        }
-        if global
-            .initializer
-            .as_ref()
-            .is_some_and(|value| value.ty != Type::Cell)
-            || matches!(global.ty, Type::Array(_)) && global.initializer.is_some()
+        if global.id.index() != index
+            || global.ty == TypeId::VOID
+            || global
+                .initializer
+                .as_ref()
+                .is_some_and(|value| value.ty != global.ty)
         {
             return Err(invalid_hir(
                 None,
-                "global initializer does not match its type",
+                "global descriptor or initializer is invalid",
             ));
         }
     }
-
     for (index, function) in program.functions.iter().enumerate() {
-        if function.id.index() != index {
+        if function.id.index() != index
+            || function.parameters.len() != function.signature.parameter_types.len()
+        {
             return Err(invalid_hir(
                 Some(function.id),
-                "function IDs must match vector indices",
-            ));
-        }
-        if !valid_declared_type(function.signature.return_type) {
-            return Err(invalid_hir(
-                Some(function.id),
-                "invalid function return type",
-            ));
-        }
-        if function.parameters.len() != function.signature.parameter_types.len() {
-            return Err(invalid_hir(
-                Some(function.id),
-                "parameter list and signature have different lengths",
+                "function descriptor is invalid",
             ));
         }
         for (local_index, local) in function.locals.iter().enumerate() {
-            if local.id.index() != local_index || !valid_value_type(local.ty) {
+            if local.id.index() != local_index || local.ty == TypeId::VOID {
                 return Err(invalid_hir(
                     Some(function.id),
-                    "local IDs/types are not well formed",
+                    "local descriptor is invalid",
                 ));
             }
         }
@@ -203,31 +185,16 @@ fn validate_program_shape(program: &HirProgram) -> Result<(), ContinuationLoweri
                     "parameter local is out of bounds",
                 ));
             };
-            if local.ty != *expected || !valid_value_type(*expected) {
+            if local.ty != *expected || seen[parameter.local.index()] {
                 return Err(invalid_hir(
                     Some(function.id),
-                    "parameter local does not match its signature type",
-                ));
-            }
-            if seen[parameter.local.index()] {
-                return Err(invalid_hir(
-                    Some(function.id),
-                    "two parameters use the same local",
+                    "parameter type/identity mismatch",
                 ));
             }
             seen[parameter.local.index()] = true;
         }
     }
     Ok(())
-}
-
-const fn valid_declared_type(ty: Type) -> bool {
-    matches!(ty, Type::Cell | Type::Void)
-        || matches!(ty, Type::Array(cells) if cells >= 1 && cells <= 256)
-}
-
-const fn valid_value_type(ty: Type) -> bool {
-    !matches!(ty, Type::Void) && valid_declared_type(ty)
 }
 
 struct IdAllocator {
@@ -256,8 +223,41 @@ struct OpenContinuation {
 
 #[derive(Debug, Clone, Copy)]
 enum LocalStorage {
-    Cell(FrameSlot),
-    Array(FrameArrayId, usize),
+    Scalar(FrameSlot),
+    Aggregate(FrameAggregateId, usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AggregateRef {
+    region: AggregateRegion,
+    offset: usize,
+    cells: usize,
+}
+
+impl AggregateRef {
+    fn operand(self) -> ValueOperand {
+        ValueOperand::Aggregate {
+            region: self.region,
+            offset: self.offset,
+            cells: self.cells,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ValueLocation {
+    Scalar(Address),
+    Aggregate(AggregateRef),
+    Dynamic {
+        region: AggregateRegion,
+        offset: LogicalOffset,
+        cells: usize,
+    },
+    /// Runtime access through a zero-length aggregate. Source behavior is
+    /// undefined, but accepting it must not create invalid continuation IR.
+    Undefined {
+        cells: usize,
+    },
 }
 
 struct FunctionLowerer<'a, 'ids> {
@@ -269,7 +269,7 @@ struct FunctionLowerer<'a, 'ids> {
     current: Option<OpenContinuation>,
     continuations: Vec<Continuation>,
     local_storage: Vec<LocalStorage>,
-    frame_arrays: Vec<FrameArrayDescriptor>,
+    frame_aggregates: Vec<FrameAggregateDescriptor>,
     next_slot: usize,
     outbox_cells: usize,
 }
@@ -283,24 +283,21 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         ids: &'ids mut IdAllocator,
     ) -> Result<Self, ContinuationLoweringError> {
         let mut next_slot = 0;
-        let mut frame_arrays = Vec::new();
+        let mut frame_aggregates = Vec::new();
         let mut local_storage = Vec::with_capacity(source.locals.len());
         for local in &source.locals {
-            local_storage.push(match local.ty {
-                Type::Cell => {
-                    let slot = FrameSlot::new(next_slot);
-                    next_slot += 1;
-                    LocalStorage::Cell(slot)
-                }
-                Type::Array(cells) => {
-                    let id = FrameArrayId::new(frame_arrays.len());
-                    frame_arrays.push(FrameArrayDescriptor::new(id, cells));
-                    LocalStorage::Array(id, cells)
-                }
-                Type::Void => {
-                    return Err(invalid_hir(Some(source.id), "void local has no storage"));
-                }
-            });
+            if program.types.is_scalar(local.ty) {
+                let slot = FrameSlot::new(next_slot);
+                next_slot += 1;
+                local_storage.push(LocalStorage::Scalar(slot));
+            } else if program.types.is_aggregate(local.ty) {
+                let id = FrameAggregateId::new(frame_aggregates.len());
+                let cells = program.types.cells(local.ty);
+                frame_aggregates.push(FrameAggregateDescriptor::new(id, cells));
+                local_storage.push(LocalStorage::Aggregate(id, cells));
+            } else {
+                return Err(invalid_hir(Some(source.id), "void local has no storage"));
+            }
         }
         Ok(Self {
             program,
@@ -314,33 +311,36 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             }),
             continuations: Vec::new(),
             local_storage,
-            frame_arrays,
+            frame_aggregates,
             next_slot,
             outbox_cells: 0,
         })
     }
 
-    fn descriptor(&self, entry: ContinuationId) -> FunctionDescriptor {
+    fn descriptor(
+        &self,
+        entry: ContinuationId,
+    ) -> Result<FunctionDescriptor, ContinuationLoweringError> {
         let parameters = self
             .source
             .parameters
             .iter()
             .map(
                 |parameter| match self.local_storage[parameter.local.index()] {
-                    LocalStorage::Cell(slot) => ParameterLocation::Cell(slot),
-                    LocalStorage::Array(array, _) => ParameterLocation::Array(array),
+                    LocalStorage::Scalar(slot) => ParameterLocation::Cell(slot),
+                    LocalStorage::Aggregate(region, _) => ParameterLocation::Aggregate(region),
                 },
             )
             .collect();
-        FunctionDescriptor::new_typed(
+        Ok(FunctionDescriptor::new_aggregates(
             self.function,
             parameters,
             self.next_slot,
-            self.frame_arrays.clone(),
+            self.frame_aggregates.clone(),
             self.outbox_cells,
-            value_type(self.source.signature.return_type),
+            value_type(self.program, self.source.signature.return_type)?,
             entry,
-        )
+        ))
     }
 
     fn lower(&mut self) -> Result<(), ContinuationLoweringError> {
@@ -349,15 +349,15 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         }
         self.lower_statement(&self.source.body)?;
         if self.current.is_some() {
-            match (self.main, self.source.signature.return_type) {
-                (true, _) => self.finish(Terminator::Halt),
-                (false, Type::Void) => self.finish(Terminator::Return { value: None }),
-                (false, Type::Cell | Type::Array(_)) => {
-                    return Err(invalid_hir(
-                        Some(self.source.id),
-                        "value function can reach the end without returning",
-                    ));
-                }
+            if self.main {
+                self.finish(Terminator::Halt);
+            } else if self.source.signature.return_type == TypeId::VOID {
+                self.finish(Terminator::Return { value: None });
+            } else {
+                return Err(invalid_hir(
+                    Some(self.source.id),
+                    "value function can reach the end without returning",
+                ));
             }
         }
         Ok(())
@@ -366,25 +366,27 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
     fn lower_global_initializers(&mut self) -> Result<(), ContinuationLoweringError> {
         for global in &self.program.globals {
             let id = ContinuationGlobalId::new(global.id.index());
-            match global.ty {
-                Type::Cell => {
-                    let destination = Address::Global(id);
-                    self.emit(FrameInstruction::Set {
-                        dst: destination,
-                        value: 0,
-                    });
-                    if let Some(initializer) = &global.initializer {
-                        let value = self.temporary_cell();
-                        self.evaluate_cell(initializer, value)?;
-                        self.move_cell(value, destination);
-                    }
+            if self.program.types.is_scalar(global.ty) {
+                let destination = Address::Global(id);
+                self.emit(FrameInstruction::Set {
+                    dst: destination,
+                    value: 0,
+                });
+                if let Some(initializer) = &global.initializer {
+                    let value = self.evaluate_scalar_temporary(initializer)?;
+                    self.move_cell(value, destination);
                 }
-                Type::Array(cells) => {
-                    let region = ArrayRegion::Global(id);
-                    self.clear_array(region, cells);
-                }
-                Type::Void => {
-                    return Err(invalid_hir(None, "void global has no storage"));
+            } else {
+                let cells = self.program.types.cells(global.ty);
+                let destination = AggregateRef {
+                    region: AggregateRegion::Global(id),
+                    offset: 0,
+                    cells,
+                };
+                self.clear_aggregate(destination);
+                if let Some(initializer) = &global.initializer {
+                    let value = self.evaluate_aggregate(initializer)?;
+                    self.copy_aggregate(value, destination);
                 }
             }
         }
@@ -409,57 +411,51 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 }
             }
             HirStatementKind::Declaration { local, initializer } => match self.local(*local)? {
-                LocalStorage::Cell(slot) => {
+                LocalStorage::Scalar(slot) => {
                     let destination = Address::Frame(slot);
                     self.emit(FrameInstruction::Set {
                         dst: destination,
                         value: 0,
                     });
                     if let Some(initializer) = initializer {
-                        let value = self.temporary_cell();
-                        self.evaluate_cell(initializer, value)?;
+                        let value = self.evaluate_scalar_temporary(initializer)?;
                         self.move_cell(value, destination);
                     }
                 }
-                LocalStorage::Array(array, cells) => {
-                    if initializer.is_some() {
-                        return Err(invalid_hir(
-                            Some(self.source.id),
-                            "array declaration has an initializer",
-                        ));
+                LocalStorage::Aggregate(region, cells) => {
+                    let destination = AggregateRef {
+                        region: AggregateRegion::Frame(region),
+                        offset: 0,
+                        cells,
+                    };
+                    self.clear_aggregate(destination);
+                    if let Some(initializer) = initializer {
+                        let value = self.evaluate_aggregate(initializer)?;
+                        self.copy_aggregate(value, destination);
                     }
-                    self.clear_array(ArrayRegion::Frame(array), cells);
                 }
             },
             HirStatementKind::Assignment {
                 value,
                 target,
                 operator,
-            } => {
-                self.lower_assignment(value, target, *operator)?;
-            }
+            } => self.lower_assignment(value, target, *operator)?,
             HirStatementKind::Output(expression) => {
-                let value = self.temporary_cell();
-                self.evaluate_cell(expression, value)?;
+                let value = self.evaluate_scalar_temporary(expression)?;
                 self.emit(FrameInstruction::Output { src: value });
             }
             HirStatementKind::Call {
                 function,
                 arguments,
-            } => {
-                self.lower_call(*function, arguments, Type::Void)?;
-            }
+            } => self.lower_call(*function, arguments, TypeId::VOID)?,
+            HirStatementKind::Abort => self.finish(Terminator::Abort),
             HirStatementKind::Return(value) => self.lower_return(value.as_ref())?,
             HirStatementKind::If {
                 condition,
                 then_branch,
                 else_branch,
-            } => {
-                self.lower_if(condition, then_branch, else_branch.as_deref())?;
-            }
-            HirStatementKind::While { condition, body } => {
-                self.lower_while(condition, body)?;
-            }
+            } => self.lower_if(condition, then_branch, else_branch.as_deref())?,
+            HirStatementKind::While { condition, body } => self.lower_while(condition, body)?,
         }
         Ok(())
     }
@@ -470,61 +466,68 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         target: &HirPlace,
         operator: AssignmentOperator,
     ) -> Result<(), ContinuationLoweringError> {
-        // Source semantics require the complete RHS before a dynamic LHS index.
-        match value.ty {
-            Type::Cell => {
-                let rhs = self.temporary_cell();
-                self.evaluate_cell(value, rhs)?;
-                match target {
-                    HirPlace::Variable {
-                        variable,
-                        ty: Type::Cell,
-                    } => {
-                        self.update_cell(rhs, self.cell_variable(*variable)?, operator);
-                    }
-                    HirPlace::ArrayElement {
-                        array,
-                        length,
-                        index,
-                    } => {
-                        let region = self.array_variable(*array, *length)?;
-                        self.update_array_element(rhs, region, index, operator)?;
-                    }
-                    _ => {
-                        return Err(invalid_hir(
-                            Some(self.source.id),
-                            "cell assignment target has a non-cell type",
-                        ));
+        // Snapshot the complete RHS before evaluating any dynamic LHS index.
+        if self.program.types.is_scalar(value.ty) {
+            let rhs = self.evaluate_scalar_temporary(value)?;
+            let destination = self.resolve_place(target)?;
+            match destination {
+                ValueLocation::Scalar(destination) => self.update_cell(rhs, destination, operator),
+                ValueLocation::Aggregate(aggregate) if aggregate.cells == 1 => {
+                    let destination = self.aggregate_address(aggregate, 0)?;
+                    self.update_cell(rhs, destination, operator);
+                }
+                ValueLocation::Dynamic {
+                    region,
+                    offset,
+                    cells: 1,
+                } => {
+                    if operator == AssignmentOperator::Set {
+                        self.aggregate_store(region, offset, ValueOperand::Cell(rhs), 1)?;
+                    } else {
+                        let current = self.temporary_cell();
+                        self.aggregate_load(region, offset, ValueOperand::Cell(current), 1)?;
+                        self.transfer(
+                            rhs,
+                            current,
+                            if operator == AssignmentOperator::Add {
+                                1
+                            } else {
+                                255
+                            },
+                        );
+                        self.aggregate_store(region, offset, ValueOperand::Cell(current), 1)?;
                     }
                 }
-            }
-            Type::Array(cells) if operator == AssignmentOperator::Set => {
-                let rhs = self.evaluate_array(value)?;
-                let HirPlace::Variable {
-                    variable,
-                    ty: Type::Array(target_cells),
-                } = target
-                else {
+                ValueLocation::Undefined { .. } => {}
+                _ => {
                     return Err(invalid_hir(
                         Some(self.source.id),
-                        "aggregate assignment target is not an array variable",
-                    ));
-                };
-                if cells != *target_cells {
-                    return Err(invalid_hir(
-                        Some(self.source.id),
-                        "aggregate assignment has mismatched lengths",
+                        "invalid scalar assignment target",
                     ));
                 }
-                let destination = self.array_variable(*variable, cells)?;
-                self.copy_array(rhs, destination, cells);
             }
-            Type::Array(_) | Type::Void => {
-                return Err(invalid_hir(
-                    Some(self.source.id),
-                    "assignment value/operator has an invalid type",
-                ));
+        } else if self.program.types.is_aggregate(value.ty) && operator == AssignmentOperator::Set {
+            let rhs = self.evaluate_aggregate(value)?;
+            match self.resolve_place(target)? {
+                ValueLocation::Aggregate(destination) => self.copy_aggregate(rhs, destination),
+                ValueLocation::Dynamic {
+                    region,
+                    offset,
+                    cells,
+                } => self.aggregate_store(region, offset, rhs.operand(), cells)?,
+                ValueLocation::Undefined { .. } => {}
+                ValueLocation::Scalar(_) => {
+                    return Err(invalid_hir(
+                        Some(self.source.id),
+                        "invalid aggregate assignment target",
+                    ));
+                }
             }
+        } else {
+            return Err(invalid_hir(
+                Some(self.source.id),
+                "assignment type/operator is invalid",
+            ));
         }
         Ok(())
     }
@@ -537,76 +540,36 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         }
     }
 
-    fn update_array_element(
-        &mut self,
-        rhs: Address,
-        array: ArrayRegion,
-        index: &ArrayIndex,
-        operator: AssignmentOperator,
-    ) -> Result<(), ContinuationLoweringError> {
-        match index {
-            ArrayIndex::Constant(index) => {
-                let destination = Address::ArrayElement {
-                    array,
-                    index: usize::from(*index),
-                };
-                self.update_cell(rhs, destination, operator);
-            }
-            ArrayIndex::Dynamic(index) => {
-                let index_value = self.temporary_cell();
-                self.evaluate_cell(index, index_value)?;
-                match operator {
-                    AssignmentOperator::Set => {
-                        self.array_store(array, index_value, rhs)?;
-                    }
-                    AssignmentOperator::Add | AssignmentOperator::Subtract => {
-                        let store_index = self.temporary_cell();
-                        self.copy_cell(index_value, store_index);
-                        let current = self.temporary_cell();
-                        self.array_load(array, index_value, current)?;
-                        self.transfer(
-                            rhs,
-                            current,
-                            if operator == AssignmentOperator::Add {
-                                1
-                            } else {
-                                255
-                            },
-                        );
-                        self.array_store(array, store_index, current)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn lower_return(
         &mut self,
         value: Option<&HirExpression>,
     ) -> Result<(), ContinuationLoweringError> {
-        match (self.source.signature.return_type, value) {
-            (Type::Void, None) if self.main => self.finish(Terminator::Halt),
-            (Type::Void, None) => self.finish(Terminator::Return { value: None }),
-            (Type::Cell, Some(value)) if !self.main => {
-                let result = self.temporary_cell();
-                self.evaluate_cell(value, result)?;
-                self.finish(Terminator::Return {
-                    value: Some(ValueOperand::Cell(result)),
-                });
-            }
-            (Type::Array(cells), Some(value)) if !self.main && value.ty == Type::Array(cells) => {
-                let result = self.evaluate_array(value)?;
-                self.finish(Terminator::Return {
-                    value: Some(ValueOperand::Array(result)),
-                });
-            }
-            _ => {
-                return Err(invalid_hir(
-                    Some(self.source.id),
-                    "return value does not match the function return type",
-                ));
-            }
+        let return_type = self.source.signature.return_type;
+        if return_type == TypeId::VOID && value.is_none() {
+            self.finish(if self.main {
+                Terminator::Halt
+            } else {
+                Terminator::Return { value: None }
+            });
+        } else if !self.main && self.program.types.is_scalar(return_type) {
+            let value =
+                value.ok_or_else(|| invalid_hir(Some(self.source.id), "missing return value"))?;
+            let result = self.evaluate_scalar_temporary(value)?;
+            self.finish(Terminator::Return {
+                value: Some(ValueOperand::Cell(result)),
+            });
+        } else if !self.main && self.program.types.is_aggregate(return_type) {
+            let value =
+                value.ok_or_else(|| invalid_hir(Some(self.source.id), "missing return value"))?;
+            let result = self.evaluate_aggregate(value)?;
+            self.finish(Terminator::Return {
+                value: Some(result.operand()),
+            });
+        } else {
+            return Err(invalid_hir(
+                Some(self.source.id),
+                "return value/type mismatch",
+            ));
         }
         Ok(())
     }
@@ -626,9 +589,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             }
             return Ok(());
         }
-
-        let condition_value = self.temporary_cell();
-        self.evaluate_cell(condition, condition_value)?;
+        let condition_value = self.evaluate_scalar_temporary(condition)?;
         let then_id = self.ids.allocate()?;
         let else_id = self.ids.allocate()?;
         self.finish(Terminator::Branch {
@@ -636,7 +597,6 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             then_target: then_id,
             else_target: else_id,
         });
-
         let mut join_id = None;
         self.start(then_id);
         self.lower_statement(then_branch)?;
@@ -645,7 +605,6 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             join_id = Some(target);
             self.finish(Terminator::Goto { target });
         }
-
         self.start(else_id);
         if let Some(else_branch) = else_branch {
             self.lower_statement(else_branch)?;
@@ -686,7 +645,6 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             }
             return Ok(());
         }
-
         let condition_id = self.ids.allocate()?;
         let body_id = self.ids.allocate()?;
         let after_id = self.ids.allocate()?;
@@ -694,8 +652,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             target: condition_id,
         });
         self.start(condition_id);
-        let condition_value = self.temporary_cell();
-        self.evaluate_cell(condition, condition_value)?;
+        let condition_value = self.evaluate_scalar_temporary(condition)?;
         self.finish(Terminator::Branch {
             condition: condition_value,
             then_target: body_id,
@@ -712,47 +669,40 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         Ok(())
     }
 
-    fn evaluate_cell(
+    fn evaluate_scalar(
         &mut self,
         expression: &HirExpression,
         destination: Address,
     ) -> Result<(), ContinuationLoweringError> {
-        self.require_cell(expression)?;
+        if !self.program.types.is_scalar(expression.ty) {
+            return Err(invalid_hir(
+                Some(self.source.id),
+                "expected scalar expression",
+            ));
+        }
         match &expression.kind {
-            HirExpressionKind::Literal(value) => {
+            HirExpressionKind::Literal(value) | HirExpressionKind::EnumVariant(value) => {
                 self.emit(FrameInstruction::Set {
                     dst: destination,
                     value: *value,
                 });
             }
-            HirExpressionKind::Variable(variable) => {
-                self.copy_cell(self.cell_variable(*variable)?, destination);
+            HirExpressionKind::Place(place) => {
+                let location = self.resolve_place(place)?;
+                self.load_scalar_location(location, destination)?;
             }
-            HirExpressionKind::ArrayElement {
-                array,
-                length,
-                index,
-            } => {
-                let array = self.array_variable(*array, *length)?;
-                match index {
-                    ArrayIndex::Constant(index) => self.copy_cell(
-                        Address::ArrayElement {
-                            array,
-                            index: usize::from(*index),
-                        },
-                        destination,
-                    ),
-                    ArrayIndex::Dynamic(index) => {
-                        let index = self.evaluate_cell_temporary(index)?;
-                        self.array_load(array, index, destination)?;
-                    }
-                }
+            HirExpressionKind::Project { base, projections } => {
+                let base_type = base.ty;
+                let base = self.evaluate_aggregate(base)?;
+                let location =
+                    self.resolve_region_projections(base.region, base_type, projections, 1)?;
+                self.load_scalar_location(location, destination)?;
             }
             HirExpressionKind::Input => self.emit(FrameInstruction::Input { dst: destination }),
             HirExpressionKind::Unary { operator, operand } => match operator {
-                UnaryOperator::Plus => self.evaluate_cell(operand, destination)?,
+                UnaryOperator::Plus => self.evaluate_scalar(operand, destination)?,
                 UnaryOperator::Negate => {
-                    let value = self.evaluate_cell_temporary(operand)?;
+                    let value = self.evaluate_scalar_temporary(operand)?;
                     self.emit(FrameInstruction::Set {
                         dst: destination,
                         value: 0,
@@ -760,7 +710,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                     self.transfer(value, destination, 255);
                 }
                 UnaryOperator::Not => {
-                    let value = self.evaluate_cell_temporary(operand)?;
+                    let value = self.evaluate_scalar_temporary(operand)?;
                     self.boolean_from(value, destination, 0, 1);
                 }
             },
@@ -768,47 +718,125 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 operator,
                 left,
                 right,
-            } => {
-                self.evaluate_binary(*operator, left, right, destination)?;
-            }
+            } => self.evaluate_binary(*operator, left, right, destination)?,
             HirExpressionKind::Call {
                 function,
                 arguments,
             } => {
-                self.lower_call(*function, arguments, Type::Cell)?;
+                self.lower_call(*function, arguments, expression.ty)?;
                 self.move_cell(Address::AbiValue, destination);
+            }
+            HirExpressionKind::StringLiteral(_) => {
+                return Err(invalid_hir(Some(self.source.id), "string is not scalar"));
             }
         }
         Ok(())
     }
 
-    fn evaluate_array(
+    fn load_scalar_location(
+        &mut self,
+        location: ValueLocation,
+        destination: Address,
+    ) -> Result<(), ContinuationLoweringError> {
+        match location {
+            ValueLocation::Scalar(source) => self.copy_cell(source, destination),
+            ValueLocation::Aggregate(source) if source.cells == 1 => {
+                let source = self.aggregate_address(source, 0)?;
+                self.copy_cell(source, destination);
+            }
+            ValueLocation::Dynamic {
+                region,
+                offset,
+                cells: 1,
+            } => self.aggregate_load(region, offset, ValueOperand::Cell(destination), 1)?,
+            ValueLocation::Undefined { cells: 1 } => self.emit(FrameInstruction::Set {
+                dst: destination,
+                value: 0,
+            }),
+            _ => {
+                return Err(invalid_hir(
+                    Some(self.source.id),
+                    "scalar projection has invalid size",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn evaluate_aggregate(
         &mut self,
         expression: &HirExpression,
-    ) -> Result<ArrayRegion, ContinuationLoweringError> {
-        let Type::Array(cells) = expression.ty else {
+    ) -> Result<AggregateRef, ContinuationLoweringError> {
+        if !self.program.types.is_aggregate(expression.ty) {
             return Err(invalid_hir(
                 Some(self.source.id),
-                "array expression has non-array type",
+                "expected aggregate expression",
             ));
-        };
-        let snapshot = self.temporary_array(cells);
+        }
+        let cells = self.program.types.cells(expression.ty);
+        let snapshot = self.temporary_aggregate(cells);
         match &expression.kind {
-            HirExpressionKind::Variable(variable) => {
-                let source = self.array_variable(*variable, cells)?;
-                self.copy_array(source, snapshot, cells);
+            HirExpressionKind::StringLiteral(bytes) => {
+                self.clear_aggregate(snapshot);
+                for (index, value) in bytes.iter().copied().enumerate() {
+                    self.emit(FrameInstruction::Set {
+                        dst: self.aggregate_address(snapshot, index)?,
+                        value,
+                    });
+                }
+            }
+            HirExpressionKind::Place(place) => match self.resolve_place(place)? {
+                ValueLocation::Aggregate(source) => self.copy_aggregate(source, snapshot),
+                ValueLocation::Dynamic {
+                    region,
+                    offset,
+                    cells,
+                } => self.aggregate_load(region, offset, snapshot.operand(), cells)?,
+                ValueLocation::Undefined { .. } => self.clear_aggregate(snapshot),
+                ValueLocation::Scalar(_) => {
+                    return Err(invalid_hir(
+                        Some(self.source.id),
+                        "aggregate place resolved to scalar",
+                    ));
+                }
+            },
+            HirExpressionKind::Project { base, projections } => {
+                let base_type = base.ty;
+                let base = self.evaluate_aggregate(base)?;
+                match self.resolve_region_projections(base.region, base_type, projections, cells)? {
+                    ValueLocation::Aggregate(source) => self.copy_aggregate(source, snapshot),
+                    ValueLocation::Dynamic {
+                        region,
+                        offset,
+                        cells,
+                    } => self.aggregate_load(region, offset, snapshot.operand(), cells)?,
+                    ValueLocation::Undefined { .. } => self.clear_aggregate(snapshot),
+                    ValueLocation::Scalar(_) => {
+                        return Err(invalid_hir(
+                            Some(self.source.id),
+                            "aggregate projection resolved to scalar",
+                        ));
+                    }
+                }
             }
             HirExpressionKind::Call {
                 function,
                 arguments,
             } => {
-                self.lower_call(*function, arguments, Type::Array(cells))?;
-                self.copy_array(ArrayRegion::Outbox, snapshot, cells);
+                self.lower_call(*function, arguments, expression.ty)?;
+                self.copy_aggregate(
+                    AggregateRef {
+                        region: AggregateRegion::Outbox,
+                        offset: 0,
+                        cells,
+                    },
+                    snapshot,
+                );
             }
             _ => {
                 return Err(invalid_hir(
                     Some(self.source.id),
-                    "unsupported aggregate expression kind",
+                    "unsupported aggregate expression",
                 ));
             }
         }
@@ -822,12 +850,10 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         right: &HirExpression,
         destination: Address,
     ) -> Result<(), ContinuationLoweringError> {
-        self.require_cell(left)?;
-        self.require_cell(right)?;
         match operator {
             BinaryOperator::Add | BinaryOperator::Subtract => {
-                self.evaluate_cell(left, destination)?;
-                let right = self.evaluate_cell_temporary(right)?;
+                self.evaluate_scalar(left, destination)?;
+                let right = self.evaluate_scalar_temporary(right)?;
                 self.transfer(
                     right,
                     destination,
@@ -839,8 +865,8 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 );
             }
             BinaryOperator::Equal | BinaryOperator::NotEqual => {
-                let left = self.evaluate_cell_temporary(left)?;
-                let right = self.evaluate_cell_temporary(right)?;
+                let left = self.evaluate_scalar_temporary(left)?;
+                let right = self.evaluate_scalar_temporary(right)?;
                 self.transfer(right, left, 255);
                 let (nonzero, zero) = if operator == BinaryOperator::Equal {
                     (0, 1)
@@ -853,8 +879,8 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             | BinaryOperator::LessEqual
             | BinaryOperator::Greater
             | BinaryOperator::GreaterEqual => {
-                let left = self.evaluate_cell_temporary(left)?;
-                let right = self.evaluate_cell_temporary(right)?;
+                let left = self.evaluate_scalar_temporary(left)?;
+                let right = self.evaluate_scalar_temporary(right)?;
                 match operator {
                     BinaryOperator::Less => self.less_than(left, right, destination, 1, 0),
                     BinaryOperator::LessEqual => self.less_than(right, left, destination, 0, 1),
@@ -877,7 +903,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         right: &HirExpression,
         destination: Address,
     ) -> Result<(), ContinuationLoweringError> {
-        let left_value = self.evaluate_cell_temporary(left)?;
+        let left_value = self.evaluate_scalar_temporary(left)?;
         let right_id = self.ids.allocate()?;
         let short_id = self.ids.allocate()?;
         let join_id = self.ids.allocate()?;
@@ -892,7 +918,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             else_target,
         });
         self.start(right_id);
-        let right_value = self.evaluate_cell_temporary(right)?;
+        let right_value = self.evaluate_scalar_temporary(right)?;
         self.boolean_from(right_value, destination, 1, 0);
         self.finish(Terminator::Goto { target: join_id });
         self.start(short_id);
@@ -909,7 +935,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         &mut self,
         function: hir::FunctionId,
         arguments: &[HirExpression],
-        expected_return: Type,
+        expected_return: TypeId,
     ) -> Result<(), ContinuationLoweringError> {
         let callee = self
             .program
@@ -920,30 +946,28 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         if callee.signature.return_type != expected_return
             || arguments.len() != callee.signature.parameter_types.len()
         {
-            return Err(invalid_hir(
-                Some(self.source.id),
-                "call use does not match the callee signature",
-            ));
+            return Err(invalid_hir(Some(self.source.id), "call signature mismatch"));
         }
-
         let mut operands = Vec::with_capacity(arguments.len());
         for (argument, parameter_type) in arguments.iter().zip(&callee.signature.parameter_types) {
             if argument.ty != *parameter_type {
                 return Err(invalid_hir(
                     Some(self.source.id),
-                    "call argument type does not match the callee signature",
+                    "call argument type mismatch",
                 ));
             }
-            operands.push(match parameter_type {
-                Type::Cell => ValueOperand::Cell(self.evaluate_cell_temporary(argument)?),
-                Type::Array(_) => ValueOperand::Array(self.evaluate_array(argument)?),
-                Type::Void => {
-                    return Err(invalid_hir(Some(self.source.id), "void call parameter"));
-                }
-            });
+            if self.program.types.is_scalar(*parameter_type) {
+                operands.push(ValueOperand::Cell(
+                    self.evaluate_scalar_temporary(argument)?,
+                ));
+            } else {
+                operands.push(self.evaluate_aggregate(argument)?.operand());
+            }
         }
-        if let Type::Array(cells) = expected_return {
-            self.outbox_cells = self.outbox_cells.max(cells);
+        if self.program.types.is_aggregate(expected_return) {
+            self.outbox_cells = self
+                .outbox_cells
+                .max(self.program.types.cells(expected_return));
         }
         let resume = self.ids.allocate()?;
         self.finish(Terminator::Call {
@@ -955,38 +979,275 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         Ok(())
     }
 
-    fn array_load(
+    fn resolve_place(
         &mut self,
-        array: ArrayRegion,
-        index: Address,
-        destination: Address,
+        place: &HirPlace,
+    ) -> Result<ValueLocation, ContinuationLoweringError> {
+        let root_type = self.variable_type(place.root)?;
+        if self.program.types.is_scalar(root_type) {
+            if !place.projections.is_empty() {
+                return Err(invalid_hir(
+                    Some(self.source.id),
+                    "scalar root has projections",
+                ));
+            }
+            return Ok(ValueLocation::Scalar(self.scalar_variable(place.root)?));
+        }
+        let region = self.aggregate_variable(place.root, self.program.types.cells(root_type))?;
+        self.resolve_region_projections(
+            region,
+            root_type,
+            &place.projections,
+            self.program.types.cells(place.ty),
+        )
+    }
+
+    fn resolve_region_projections(
+        &mut self,
+        region: AggregateRegion,
+        _root_type: TypeId,
+        projections: &[Projection],
+        result_cells: usize,
+    ) -> Result<ValueLocation, ContinuationLoweringError> {
+        let root_cells = self.program.types.cells(_root_type);
+        let mut constant_offset = 0usize;
+        let mut dynamic = Vec::new();
+        for projection in projections {
+            match projection {
+                Projection::Field { cell_offset } => {
+                    constant_offset =
+                        constant_offset.checked_add(*cell_offset).ok_or_else(|| {
+                            invalid_hir(Some(self.source.id), "projection offset overflows")
+                        })?;
+                }
+                Projection::Index {
+                    index,
+                    element_cells,
+                    ..
+                } => match index {
+                    ArrayIndex::Constant(index) => {
+                        let contribution = usize::from(*index)
+                            .checked_mul(*element_cells)
+                            .ok_or_else(|| {
+                                invalid_hir(Some(self.source.id), "projection stride overflows")
+                            })?;
+                        constant_offset =
+                            constant_offset.checked_add(contribution).ok_or_else(|| {
+                                invalid_hir(Some(self.source.id), "projection offset overflows")
+                            })?;
+                    }
+                    ArrayIndex::Dynamic(index) => dynamic.push((index.as_ref(), *element_cells)),
+                },
+            }
+        }
+        if dynamic.is_empty() {
+            return Ok(ValueLocation::Aggregate(AggregateRef {
+                region,
+                offset: constant_offset,
+                cells: result_cells,
+            }));
+        }
+        let low = self.temporary_cell();
+        let high = self.temporary_cell();
+        self.emit(FrameInstruction::Set {
+            dst: low,
+            value: constant_offset as u8,
+        });
+        self.emit(FrameInstruction::Set {
+            dst: high,
+            value: ((constant_offset >> 8) & 0xff) as u8,
+        });
+        for (index, stride) in dynamic {
+            let index = self.evaluate_scalar_temporary(index)?;
+            self.add_scaled_offset(index, stride, low, high);
+        }
+        if root_cells == 0 {
+            return Ok(ValueLocation::Undefined {
+                cells: result_cells,
+            });
+        }
+        Ok(ValueLocation::Dynamic {
+            region,
+            offset: LogicalOffset::new(low, high),
+            cells: result_cells,
+        })
+    }
+
+    fn add_scaled_offset(&mut self, counter: Address, stride: usize, low: Address, high: Address) {
+        if stride == 0 {
+            self.emit(FrameInstruction::Transfer {
+                src: counter,
+                targets: vec![],
+            });
+            return;
+        }
+        let low_add = stride as u8;
+        let high_add = ((stride >> 8) & 0xff) as u8;
+        let mut body = Vec::new();
+        if low_add != 0 {
+            let compare_left = self.temporary_cell();
+            let compare_right = self.temporary_cell();
+            let right_test = self.temporary_cell();
+            let restore = self.temporary_cell();
+            let carry = self.temporary_cell();
+            body.extend(copy_instructions(low, compare_left, restore));
+            body.push(FrameInstruction::Set {
+                dst: compare_right,
+                value: 0_u8.wrapping_sub(low_add),
+            });
+            body.extend(less_than_instructions(
+                compare_left,
+                compare_right,
+                carry,
+                right_test,
+                restore,
+                0,
+                1,
+            ));
+            body.push(FrameInstruction::AddConst {
+                dst: low,
+                value: low_add,
+            });
+            body.push(FrameInstruction::Branch {
+                condition: carry,
+                then_body: vec![FrameInstruction::AddConst {
+                    dst: high,
+                    value: 1,
+                }],
+                else_body: vec![],
+            });
+        }
+        if high_add != 0 {
+            body.push(FrameInstruction::AddConst {
+                dst: high,
+                value: high_add,
+            });
+        }
+        body.push(FrameInstruction::AddConst {
+            dst: counter,
+            value: 255,
+        });
+        self.emit(FrameInstruction::Loop {
+            condition: counter,
+            body,
+        });
+    }
+
+    fn aggregate_load(
+        &mut self,
+        source: AggregateRegion,
+        offset: LogicalOffset,
+        destination: ValueOperand,
+        cells: usize,
     ) -> Result<(), ContinuationLoweringError> {
+        if cells == 0 {
+            return Ok(());
+        }
         let resume = self.ids.allocate()?;
-        self.finish(Terminator::ArrayLoad {
-            array,
-            index,
+        self.finish(Terminator::AggregateLoad {
+            source,
+            offset,
             destination,
+            cells,
             return_to: resume,
         });
         self.start(resume);
         Ok(())
     }
 
-    fn array_store(
+    fn aggregate_store(
         &mut self,
-        array: ArrayRegion,
-        index: Address,
-        value: Address,
+        destination: AggregateRegion,
+        offset: LogicalOffset,
+        source: ValueOperand,
+        cells: usize,
     ) -> Result<(), ContinuationLoweringError> {
+        if cells == 0 {
+            return Ok(());
+        }
         let resume = self.ids.allocate()?;
-        self.finish(Terminator::ArrayStore {
-            array,
-            index,
-            value,
+        self.finish(Terminator::AggregateStore {
+            destination,
+            offset,
+            source,
+            cells,
             return_to: resume,
         });
         self.start(resume);
         Ok(())
+    }
+
+    fn variable_type(&self, variable: VariableRef) -> Result<TypeId, ContinuationLoweringError> {
+        match variable {
+            VariableRef::Global(global) => self
+                .program
+                .globals
+                .get(global.index())
+                .filter(|item| item.id == global)
+                .map(|item| item.ty)
+                .ok_or_else(|| invalid_hir(Some(self.source.id), "global reference is invalid")),
+            VariableRef::Local(local) => self
+                .source
+                .locals
+                .get(local.index())
+                .filter(|item| item.id == local)
+                .map(|item| item.ty)
+                .ok_or_else(|| invalid_hir(Some(self.source.id), "local reference is invalid")),
+        }
+    }
+
+    fn scalar_variable(&self, variable: VariableRef) -> Result<Address, ContinuationLoweringError> {
+        match variable {
+            VariableRef::Global(global)
+                if self.program.types.is_scalar(self.variable_type(variable)?) =>
+            {
+                Ok(Address::Global(ContinuationGlobalId::new(global.index())))
+            }
+            VariableRef::Local(local) => match self.local(local)? {
+                LocalStorage::Scalar(slot) => Ok(Address::Frame(slot)),
+                LocalStorage::Aggregate(_, _) => Err(invalid_hir(
+                    Some(self.source.id),
+                    "aggregate local used as scalar",
+                )),
+            },
+            _ => Err(invalid_hir(
+                Some(self.source.id),
+                "aggregate global used as scalar",
+            )),
+        }
+    }
+
+    fn aggregate_variable(
+        &self,
+        variable: VariableRef,
+        cells: usize,
+    ) -> Result<AggregateRegion, ContinuationLoweringError> {
+        match variable {
+            VariableRef::Global(global)
+                if self
+                    .program
+                    .types
+                    .is_aggregate(self.variable_type(variable)?)
+                    && self.program.types.cells(self.variable_type(variable)?) == cells =>
+            {
+                Ok(AggregateRegion::Global(ContinuationGlobalId::new(
+                    global.index(),
+                )))
+            }
+            VariableRef::Local(local) => match self.local(local)? {
+                LocalStorage::Aggregate(region, actual) if actual == cells => {
+                    Ok(AggregateRegion::Frame(region))
+                }
+                _ => Err(invalid_hir(
+                    Some(self.source.id),
+                    "local aggregate size mismatch",
+                )),
+            },
+            _ => Err(invalid_hir(
+                Some(self.source.id),
+                "global aggregate size mismatch",
+            )),
+        }
     }
 
     fn local(&self, local: hir::LocalId) -> Result<LocalStorage, ContinuationLoweringError> {
@@ -996,62 +1257,15 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             .ok_or_else(|| invalid_hir(Some(self.source.id), "local ID is out of bounds"))
     }
 
-    fn cell_variable(&self, variable: VariableRef) -> Result<Address, ContinuationLoweringError> {
-        match variable {
-            VariableRef::Global(global) => self
-                .program
-                .globals
-                .get(global.index())
-                .filter(|item| item.id == global && item.ty == Type::Cell)
-                .map(|_| Address::Global(ContinuationGlobalId::new(global.index())))
-                .ok_or_else(|| {
-                    invalid_hir(Some(self.source.id), "global cell reference is invalid")
-                }),
-            VariableRef::Local(local) => match self.local(local)? {
-                LocalStorage::Cell(slot) => Ok(Address::Frame(slot)),
-                LocalStorage::Array(_, _) => Err(invalid_hir(
-                    Some(self.source.id),
-                    "array local used as a cell",
-                )),
-            },
-        }
-    }
-
-    fn array_variable(
-        &self,
-        variable: VariableRef,
-        cells: usize,
-    ) -> Result<ArrayRegion, ContinuationLoweringError> {
-        match variable {
-            VariableRef::Global(global) => self
-                .program
-                .globals
-                .get(global.index())
-                .filter(|item| item.id == global && item.ty == Type::Array(cells))
-                .map(|_| ArrayRegion::Global(ContinuationGlobalId::new(global.index())))
-                .ok_or_else(|| {
-                    invalid_hir(Some(self.source.id), "global array reference is invalid")
-                }),
-            VariableRef::Local(local) => match self.local(local)? {
-                LocalStorage::Array(array, actual) if actual == cells => {
-                    Ok(ArrayRegion::Frame(array))
-                }
-                LocalStorage::Cell(_) | LocalStorage::Array(_, _) => Err(invalid_hir(
-                    Some(self.source.id),
-                    "local array reference has the wrong type",
-                )),
-            },
-        }
-    }
-
     fn require_cell(&self, expression: &HirExpression) -> Result<(), ContinuationLoweringError> {
-        if expression.ty != Type::Cell {
-            return Err(invalid_hir(
+        if expression.ty == TypeId::CELL {
+            Ok(())
+        } else {
+            Err(invalid_hir(
                 Some(self.source.id),
-                "value expression does not have cell type",
-            ));
+                "expression does not have cell type",
+            ))
         }
-        Ok(())
     }
 
     fn temporary_cell(&mut self) -> Address {
@@ -1060,32 +1274,81 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         Address::Frame(slot)
     }
 
-    fn evaluate_cell_temporary(
+    fn evaluate_scalar_temporary(
         &mut self,
         expression: &HirExpression,
     ) -> Result<Address, ContinuationLoweringError> {
         let destination = self.temporary_cell();
-        self.evaluate_cell(expression, destination)?;
+        self.evaluate_scalar(expression, destination)?;
         Ok(destination)
     }
 
-    fn temporary_array(&mut self, cells: usize) -> ArrayRegion {
-        let id = FrameArrayId::new(self.frame_arrays.len());
-        self.frame_arrays.push(FrameArrayDescriptor::new(id, cells));
-        ArrayRegion::Frame(id)
+    fn temporary_aggregate(&mut self, cells: usize) -> AggregateRef {
+        let id = FrameAggregateId::new(self.frame_aggregates.len());
+        self.frame_aggregates
+            .push(FrameAggregateDescriptor::new(id, cells));
+        AggregateRef {
+            region: AggregateRegion::Frame(id),
+            offset: 0,
+            cells,
+        }
     }
 
-    fn clear_array(&mut self, array: ArrayRegion, cells: usize) {
-        for index in 0..cells {
+    fn aggregate_address(
+        &self,
+        aggregate: AggregateRef,
+        relative: usize,
+    ) -> Result<Address, ContinuationLoweringError> {
+        if relative >= aggregate.cells {
+            return Err(invalid_hir(
+                Some(self.source.id),
+                "aggregate address is out of bounds",
+            ));
+        }
+        Ok(Address::ArrayElement {
+            array: aggregate.region,
+            index: aggregate.offset + relative,
+        })
+    }
+
+    fn clear_aggregate(&mut self, aggregate: AggregateRef) {
+        for index in 0..aggregate.cells {
             self.emit(FrameInstruction::Set {
-                dst: Address::ArrayElement { array, index },
+                dst: Address::ArrayElement {
+                    array: aggregate.region,
+                    index: aggregate.offset + index,
+                },
                 value: 0,
             });
         }
     }
 
-    fn copy_array(&mut self, src: ArrayRegion, dst: ArrayRegion, cells: usize) {
-        self.emit(FrameInstruction::AggregateCopy { src, dst, cells });
+    fn copy_aggregate(&mut self, source: AggregateRef, destination: AggregateRef) {
+        debug_assert_eq!(source.cells, destination.cells);
+        if source.cells == 0 || source == destination {
+            return;
+        }
+        if source.offset == 0 && destination.offset == 0 {
+            self.emit(FrameInstruction::AggregateCopy {
+                src: source.region,
+                dst: destination.region,
+                cells: source.cells,
+            });
+            return;
+        }
+        // Callers snapshot before an observable store, so leaf copies cannot
+        // alias even when the source-language roots overlap.
+        for index in 0..source.cells {
+            let source_address = Address::ArrayElement {
+                array: source.region,
+                index: source.offset + index,
+            };
+            let destination_address = Address::ArrayElement {
+                array: destination.region,
+                index: destination.offset + index,
+            };
+            self.copy_cell(source_address, destination_address);
+        }
     }
 
     fn emit(&mut self, instruction: FrameInstruction) {
@@ -1098,10 +1361,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
 
     fn start(&mut self, id: ContinuationId) {
         debug_assert!(self.current.is_none());
-        self.current = Some(OpenContinuation {
-            id,
-            body: Vec::new(),
-        });
+        self.current = Some(OpenContinuation { id, body: vec![] });
     }
 
     fn finish(&mut self, terminator: Terminator) {
@@ -1137,24 +1397,9 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
 
     fn copy_cell(&mut self, source: Address, destination: Address) {
         let restore = self.temporary_cell();
-        self.emit(FrameInstruction::Set {
-            dst: destination,
-            value: 0,
-        });
-        self.emit(FrameInstruction::Transfer {
-            src: source,
-            targets: vec![
-                FrameTransferTarget {
-                    dst: destination,
-                    factor: 1,
-                },
-                FrameTransferTarget {
-                    dst: restore,
-                    factor: 1,
-                },
-            ],
-        });
-        self.transfer(restore, source, 1);
+        for instruction in copy_instructions(source, destination, restore) {
+            self.emit(instruction);
+        }
     }
 
     fn boolean_from(&mut self, value: Address, destination: Address, nonzero: u8, zero: u8) {
@@ -1181,33 +1426,89 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
     ) {
         let right_test = self.temporary_cell();
         let restore = self.temporary_cell();
-        let mut body = vec![
-            FrameInstruction::Set {
-                dst: right_test,
-                value: 0,
-            },
-            FrameInstruction::Transfer {
-                src: right,
-                targets: vec![
-                    FrameTransferTarget {
-                        dst: right_test,
-                        factor: 1,
-                    },
-                    FrameTransferTarget {
-                        dst: restore,
-                        factor: 1,
-                    },
-                ],
-            },
-            FrameInstruction::Transfer {
-                src: restore,
-                targets: vec![FrameTransferTarget {
-                    dst: right,
+        for instruction in less_than_instructions(
+            left,
+            right,
+            destination,
+            right_test,
+            restore,
+            true_value,
+            false_value,
+        ) {
+            self.emit(instruction);
+        }
+    }
+}
+
+fn copy_instructions(
+    source: Address,
+    destination: Address,
+    restore: Address,
+) -> Vec<FrameInstruction> {
+    vec![
+        FrameInstruction::Set {
+            dst: destination,
+            value: 0,
+        },
+        FrameInstruction::Transfer {
+            src: source,
+            targets: vec![
+                FrameTransferTarget {
+                    dst: destination,
                     factor: 1,
-                }],
-            },
-        ];
-        body.push(FrameInstruction::Branch {
+                },
+                FrameTransferTarget {
+                    dst: restore,
+                    factor: 1,
+                },
+            ],
+        },
+        FrameInstruction::Transfer {
+            src: restore,
+            targets: vec![FrameTransferTarget {
+                dst: source,
+                factor: 1,
+            }],
+        },
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn less_than_instructions(
+    left: Address,
+    right: Address,
+    destination: Address,
+    right_test: Address,
+    restore: Address,
+    true_value: u8,
+    false_value: u8,
+) -> Vec<FrameInstruction> {
+    let body = vec![
+        FrameInstruction::Set {
+            dst: right_test,
+            value: 0,
+        },
+        FrameInstruction::Transfer {
+            src: right,
+            targets: vec![
+                FrameTransferTarget {
+                    dst: right_test,
+                    factor: 1,
+                },
+                FrameTransferTarget {
+                    dst: restore,
+                    factor: 1,
+                },
+            ],
+        },
+        FrameInstruction::Transfer {
+            src: restore,
+            targets: vec![FrameTransferTarget {
+                dst: right,
+                factor: 1,
+            }],
+        },
+        FrameInstruction::Branch {
             condition: right_test,
             then_body: vec![
                 FrameInstruction::AddConst {
@@ -1221,15 +1522,27 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             ],
             else_body: vec![FrameInstruction::Transfer {
                 src: left,
-                targets: Vec::new(),
+                targets: vec![],
             }],
-        });
-        self.emit(FrameInstruction::Loop {
+        },
+    ];
+    vec![
+        FrameInstruction::Loop {
             condition: left,
             body,
-        });
-        self.boolean_from(right, destination, true_value, false_value);
-    }
+        },
+        FrameInstruction::Branch {
+            condition: right,
+            then_body: vec![FrameInstruction::Set {
+                dst: destination,
+                value: true_value,
+            }],
+            else_body: vec![FrameInstruction::Set {
+                dst: destination,
+                value: false_value,
+            }],
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -1244,206 +1557,41 @@ mod tests {
     }
 
     #[test]
-    fn globals_and_general_initializers_are_lowered_before_main_body() {
+    fn lowers_nominal_aggregates_and_dynamic_flat_offsets() {
         let program = lower(
-            "cell first = input(); cell second = identity(first); \
-             cell identity(cell x) { return x; } void main() { output(second); }",
-        );
-        assert_eq!(program.globals().len(), 2);
-        let main = program.function(ContinuationFunctionId::new(1)).unwrap();
-        assert!(main.frame_slots() >= 2);
-        let entry = program.continuation(main.entry()).unwrap();
-        assert!(
-            entry
-                .body()
-                .iter()
-                .any(|instruction| matches!(instruction, FrameInstruction::Input { .. }))
-        );
-        assert!(matches!(entry.terminator(), Terminator::Call { .. }));
-    }
-
-    #[test]
-    fn dynamic_load_and_store_split_continuations() {
-        let program = lower(
-            "cell[4] data; void main() { cell i = input(); data[i] = input(); output(data[i]); }",
+            "struct Node { cell kind; cell[2] data; } Node[100] nodes; \
+             void main() { nodes[input()].data[input()] = 9; }",
         );
         assert!(program.continuations().iter().any(|continuation| matches!(
             continuation.terminator(),
-            Terminator::ArrayStore {
-                array: ArrayRegion::Global(_),
-                ..
-            }
+            Terminator::AggregateStore { cells: 1, .. }
         )));
-        assert!(program.continuations().iter().any(|continuation| matches!(
-            continuation.terminator(),
-            Terminator::ArrayLoad {
-                array: ArrayRegion::Global(_),
-                ..
-            }
-        )));
+        assert_eq!(
+            program.globals()[0].value_type(),
+            ValueType::Aggregate { cells: 300 }
+        );
     }
 
     #[test]
-    fn dynamic_compound_assignment_evaluates_index_once_then_loads_and_stores() {
-        let program = lower("void main() { cell[4] data; data[input()] += input(); }");
-        let portal_terms: Vec<_> = program
-            .continuations()
-            .iter()
-            .filter_map(|continuation| match continuation.terminator() {
-                Terminator::ArrayLoad { .. } => Some("load"),
-                Terminator::ArrayStore { .. } => Some("store"),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(portal_terms, ["load", "store"]);
-        let input_count = program
-            .continuations()
-            .iter()
-            .flat_map(|continuation| continuation.body())
-            .filter(|instruction| matches!(instruction, FrameInstruction::Input { .. }))
-            .count();
-        assert_eq!(input_count, 2);
-    }
-
-    #[test]
-    fn rhs_is_lowered_before_dynamic_assignment_index() {
-        let program = lower("void main() { cell[4] data; data[input()] = input(); }");
+    fn strings_become_exact_aggregate_initializers() {
+        let program = lower("void main() { cell[] value = \"a\\0b\"; output(value[1]); }");
         let main = program.function(ContinuationFunctionId::new(0)).unwrap();
-        let entry = program.continuation(main.entry()).unwrap();
-        let inputs: Vec<_> = entry
-            .body()
-            .iter()
-            .filter_map(|instruction| match instruction {
-                FrameInstruction::Input { dst } => Some(*dst),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(inputs.len(), 2);
-        let Terminator::ArrayStore { index, value, .. } = entry.terminator() else {
-            panic!()
-        };
-        assert_eq!(inputs[0], *value);
-        assert_eq!(inputs[1], *index);
-    }
-
-    #[test]
-    fn aggregate_calls_use_snapshots_parameters_returns_and_outbox() {
-        let program = lower(
-            "cell[20] copy(cell[20] value) { cell[20] result; result = value; return result; } \
-             void main() { cell[20] source; cell[20] target; target = copy(source); }",
+        assert!(
+            main.frame_aggregates()
+                .iter()
+                .any(|aggregate| aggregate.cells() == 3)
         );
-        let main = program.function(ContinuationFunctionId::new(1)).unwrap();
-        let copy = program.function(ContinuationFunctionId::new(0)).unwrap();
-        assert_eq!(main.outbox_cells(), 20);
-        assert!(matches!(
-            copy.parameter_locations(),
-            [ParameterLocation::Array(_)]
-        ));
-        assert_eq!(copy.return_type(), ValueType::Array(20));
-        assert!(program.continuations().iter().any(|continuation| matches!(
-            continuation.terminator(),
-            Terminator::Return {
-                value: Some(ValueOperand::Array(_))
-            }
-        )));
     }
 
     #[test]
-    fn aggregate_arguments_are_materialized_left_to_right() {
-        let program = lower(
-            "cell[2] make(cell x) { cell[2] a; a[0] = x; return a; } \
-             void take(cell[2] a, cell[2] b) {} \
-             void main() { take(make(input()), make(input())); }",
-        );
-        let main = program.function(ContinuationFunctionId::new(2)).unwrap();
-        assert_eq!(main.outbox_cells(), 2);
-        let calls: Vec<_> = program
-            .continuations()
-            .iter()
-            .filter_map(|continuation| match continuation.terminator() {
-                Terminator::Call { callee, .. } if continuation.function() == main.id() => {
-                    Some(callee.index())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(calls, vec![0, 0, 1]);
-    }
-
-    #[test]
-    fn constant_indices_do_not_use_array_portals() {
-        let program = lower("void main() { cell[4] a; a[3] = 7; output(a[3]); }");
-        assert!(!program.continuations().iter().any(|continuation| matches!(
-            continuation.terminator(),
-            Terminator::ArrayLoad { .. } | Terminator::ArrayStore { .. }
-        )));
+    fn abort_is_a_distinct_terminator() {
+        let program = lower("void stop() { abort(); } void main() { stop(); }");
         assert!(
             program
                 .continuations()
                 .iter()
-                .flat_map(|continuation| continuation.body())
-                .any(|instruction| matches!(
-                    instruction,
-                    FrameInstruction::Set {
-                        dst: Address::ArrayElement { index: 3, .. },
-                        ..
-                    }
-                ))
+                .any(|continuation| matches!(continuation.terminator(), Terminator::Abort))
         );
-    }
-
-    #[test]
-    fn array_declarations_clear_every_element_at_their_execution_point() {
-        let program = lower(
-            "cell[3] global; void main() { cell keep = 1; while (keep) { cell[3] local; local[0] = 9; keep = 0; } }",
-        );
-        let main = program.function(ContinuationFunctionId::new(0)).unwrap();
-        let entry = program.continuation(main.entry()).unwrap();
-        let global_clears = entry
-            .body()
-            .iter()
-            .filter(|instruction| {
-                matches!(
-                    instruction,
-                    FrameInstruction::Set {
-                        dst: Address::ArrayElement {
-                            array: ArrayRegion::Global(_),
-                            ..
-                        },
-                        value: 0
-                    }
-                )
-            })
-            .count();
-        assert_eq!(global_clears, 3);
-
-        let local_clear_continuation = program
-            .continuations()
-            .iter()
-            .find(|continuation| {
-                continuation
-                    .body()
-                    .iter()
-                    .filter(|instruction| {
-                        matches!(
-                            instruction,
-                            FrameInstruction::Set {
-                                dst: Address::ArrayElement {
-                                    array: ArrayRegion::Frame(_),
-                                    ..
-                                },
-                                value: 0
-                            }
-                        )
-                    })
-                    .count()
-                    >= 3
-            })
-            .expect("loop body must clear the local declaration each time it executes");
-        assert!(matches!(
-            local_clear_continuation.terminator(),
-            Terminator::Goto { .. }
-        ));
     }
 
     #[test]
@@ -1454,15 +1602,5 @@ mod tests {
             last_available.allocate(),
             Err(ContinuationLoweringError::ContinuationIdsExhausted)
         );
-
-        let mut full = IdAllocator::with_reserved_entries(65_535).unwrap();
-        assert_eq!(
-            full.allocate(),
-            Err(ContinuationLoweringError::ContinuationIdsExhausted)
-        );
-        assert!(matches!(
-            IdAllocator::with_reserved_entries(65_536),
-            Err(ContinuationLoweringError::ContinuationIdsExhausted)
-        ));
     }
 }

@@ -88,6 +88,7 @@ impl From<AbiCodegenError> for SourceCompileError {
 pub fn lower_source(source: &str) -> Result<ContinuationProgram, FrontendError> {
     let tokens = lexer::lex(source)?;
     let ast = parser::parse(tokens)?;
+    let ast = crate::macro_expansion::expand(ast)?;
     let hir = semantic::analyze(&ast)?;
     lower_hir(&hir).map_err(|error| FrontendError::without_offset(error.to_string()))
 }

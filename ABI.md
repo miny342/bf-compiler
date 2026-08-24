@@ -275,10 +275,12 @@ aggregate leafは、frontierからの負のコンパイル時定数offsetとし�
 frame内の大分類は低addressから次の順とする。
 
 ```text
-B | parameters / locals / temporaries | outbox high chunks ... chunk 1 | chunk 0 | dispatch context | F
+B | aligned aggregate regions | scalar parameters / locals / temporaries | outbox high chunks ... chunk 1 | chunk 0 | dispatch context | F
 ```
 
-outboxを持たない関数ではその領域を省略する。個々のparameter/local配置は
+outboxを持たない関数ではその領域を省略する。scalar領域をcontext寄りへ置くことで、
+大きなlocal aggregateがあっても式評価と16-bit offset計算のpointer移動を増やさない。
+個々のparameter/local配置は
 `FrameDescriptor`で決めるが、dispatch contextとoutbox logical chunk 0のfrontier
 相対位置は全関数で共通にする。
 
@@ -925,12 +927,19 @@ program開始時、BFテープはすべて0であることを前提とする。
 BFC sourceのentry pointはparameterなしの`void main()`である。ABI上では、そのactivationを
 stackのrootとなるmain frameとして扱う。`main`はcallerを持たず、明示的にcallできない。
 
-1. static global initializerを実行する。
-2. global `aux`へ割り当てた値を初期化する。
-3. anchorが0であることを保つ。
-4. main frameを確保する。
-5. main frameの`ACTIVE = 1`、`PC = main entry`とする。
-6. pointerをmain frameの`ACTIVE`へ置いてtrampolineへ入る。
+source-levelにはstatic global initializerを宣言順に実行し、その完了後に`main` activationを
+開始する。backendはglobal initializer中のcall/return/`abort`にもdispatcher contextが必要なため、
+将来のmain frame領域をbootstrap contextとして先に予約し、初期化continuationをそこで実行してよい。
+このbootstrap phaseはsource-levelのmain activationではなく、main localを読み出せない。初期化が
+完了すると同じ予約領域をroot main activationとして引き継ぐ。このoverlayはsourceから観測できない。
+
+物理的な初期化順は次のとおりとする。
+
+1. anchorが0であることを保つ。
+2. root frame領域を予約し、bootstrap contextの`ACTIVE = 1`、`PC = global initializer entry`とする。
+3. static global initializerを宣言順に実行し、global `aux`へ割り当てた値も初期化する。
+4. 初期化命令列を終えた実行位置からsource `main`本体へ進み、同じ領域をmain activationとして扱う。
+5. pointerをroot contextの`ACTIVE`へ置いたtrampolineを継続する。
 
 program終了時はmain frameの`ACTIVE`を0にする。テープの他の値をclearする義務はない。
 
@@ -1136,5 +1145,4 @@ moving-index方式や別のdispatchへ後から交換する。
 - tail call optimization。
 - debug専用のstack overflow guard。
 
-これらを除くversion 0の項目は現在の実装基準であり、version 1の節は次段階のnormativeな
-実装仕様とする。
+これらを除くversion 0の項目とversion 1の節は、現在の実装基準である。

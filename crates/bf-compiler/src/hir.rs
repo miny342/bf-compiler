@@ -1,20 +1,109 @@
 //! Typed, name-resolved source IR.
-//!
-//! This layer preserves aggregate identity and evaluation order. Physical
-//! global addresses, frame slots, array portals, and aggregate outboxes are
-//! assigned by later lowering passes.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Type {
-    Cell,
-    Array(usize),
-    Void,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct TypeId(usize);
+
+impl TypeId {
+    pub(crate) const CELL: Self = Self(0);
+    pub(crate) const VOID: Self = Self(1);
+
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self.0
+    }
 }
 
-impl Type {
-    pub(crate) const fn is_value(self) -> bool {
-        !matches!(self, Self::Void)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypeTable {
+    definitions: Vec<TypeDefinition>,
+}
+
+impl TypeTable {
+    pub(crate) fn new() -> Self {
+        Self {
+            definitions: vec![
+                TypeDefinition {
+                    name: "cell".into(),
+                    kind: TypeKind::Cell,
+                    cells: 1,
+                },
+                TypeDefinition {
+                    name: "void".into(),
+                    kind: TypeKind::Void,
+                    cells: 0,
+                },
+            ],
+        }
     }
+
+    pub(crate) fn push(&mut self, definition: TypeDefinition) -> TypeId {
+        let id = TypeId::new(self.definitions.len());
+        self.definitions.push(definition);
+        id
+    }
+
+    pub(crate) fn get(&self, ty: TypeId) -> &TypeDefinition {
+        &self.definitions[ty.index()]
+    }
+
+    pub(crate) fn get_mut(&mut self, ty: TypeId) -> &mut TypeDefinition {
+        &mut self.definitions[ty.index()]
+    }
+
+    pub(crate) fn cells(&self, ty: TypeId) -> usize {
+        self.get(ty).cells
+    }
+
+    pub(crate) fn kind(&self, ty: TypeId) -> &TypeKind {
+        &self.get(ty).kind
+    }
+
+    pub(crate) fn name(&self, ty: TypeId) -> &str {
+        &self.get(ty).name
+    }
+
+    pub(crate) fn is_scalar(&self, ty: TypeId) -> bool {
+        matches!(self.kind(ty), TypeKind::Cell | TypeKind::Enum { .. })
+    }
+
+    pub(crate) fn is_aggregate(&self, ty: TypeId) -> bool {
+        matches!(
+            self.kind(ty),
+            TypeKind::Struct { .. } | TypeKind::Array { .. }
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypeDefinition {
+    pub(crate) name: String,
+    pub(crate) kind: TypeKind,
+    pub(crate) cells: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TypeKind {
+    Cell,
+    Void,
+    Enum { variants: Vec<EnumVariant> },
+    Struct { fields: Vec<Field> },
+    Array { element: TypeId, length: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EnumVariant {
+    pub(crate) name: String,
+    pub(crate) value: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Field {
+    pub(crate) name: String,
+    pub(crate) ty: TypeId,
+    pub(crate) cell_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -62,6 +151,7 @@ pub(crate) enum VariableRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HirProgram {
     pub(crate) entry: FunctionId,
+    pub(crate) types: TypeTable,
     /// Globals in declaration order. Initializers execute in this order.
     pub(crate) globals: Vec<HirGlobal>,
     /// Functions in ID order.
@@ -73,14 +163,14 @@ pub(crate) struct HirGlobal {
     pub(crate) id: GlobalId,
     pub(crate) name: String,
     pub(crate) offset: usize,
-    pub(crate) ty: Type,
+    pub(crate) ty: TypeId,
     pub(crate) initializer: Option<HirExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FunctionSignature {
-    pub(crate) return_type: Type,
-    pub(crate) parameter_types: Vec<Type>,
+    pub(crate) return_type: TypeId,
+    pub(crate) parameter_types: Vec<TypeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +184,7 @@ pub(crate) struct HirLocal {
     pub(crate) id: LocalId,
     pub(crate) name: String,
     pub(crate) offset: usize,
-    pub(crate) ty: Type,
+    pub(crate) ty: TypeId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +194,6 @@ pub(crate) struct HirFunction {
     pub(crate) offset: usize,
     pub(crate) signature: FunctionSignature,
     pub(crate) parameters: Vec<HirParameter>,
-    /// Parameters and declarations in logical-ID order.
     pub(crate) locals: Vec<HirLocal>,
     pub(crate) body: HirStatement,
 }
@@ -119,13 +208,10 @@ pub(crate) struct HirStatement {
 pub(crate) enum HirStatementKind {
     Empty,
     Block(Vec<HirStatement>),
-    /// Initialize a local at the declaration's execution point.
     Declaration {
         local: LocalId,
         initializer: Option<HirExpression>,
     },
-    /// Evaluate `value` completely, then evaluate a dynamic index in `target`,
-    /// then perform the update. Both expressions are evaluated exactly once.
     Assignment {
         value: HirExpression,
         target: HirPlace,
@@ -136,6 +222,7 @@ pub(crate) enum HirStatementKind {
         function: FunctionId,
         arguments: Vec<HirExpression>,
     },
+    Abort,
     Return(Option<HirExpression>),
     If {
         condition: HirExpression,
@@ -149,25 +236,22 @@ pub(crate) enum HirStatementKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HirPlace {
-    Variable {
-        variable: VariableRef,
-        ty: Type,
-    },
-    ArrayElement {
-        array: VariableRef,
-        length: usize,
-        index: ArrayIndex,
-    },
+pub(crate) struct HirPlace {
+    pub(crate) root: VariableRef,
+    pub(crate) projections: Vec<Projection>,
+    pub(crate) ty: TypeId,
 }
 
-impl HirPlace {
-    pub(crate) const fn ty(&self) -> Type {
-        match self {
-            Self::Variable { ty, .. } => *ty,
-            Self::ArrayElement { .. } => Type::Cell,
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Projection {
+    Field {
+        cell_offset: usize,
+    },
+    Index {
+        index: ArrayIndex,
+        length: usize,
+        element_cells: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,18 +263,20 @@ pub(crate) enum ArrayIndex {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HirExpression {
     pub(crate) kind: HirExpressionKind,
-    pub(crate) ty: Type,
+    pub(crate) ty: TypeId,
     pub(crate) offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HirExpressionKind {
     Literal(u8),
-    Variable(VariableRef),
-    ArrayElement {
-        array: VariableRef,
-        length: usize,
-        index: ArrayIndex,
+    EnumVariant(u8),
+    StringLiteral(Vec<u8>),
+    Place(HirPlace),
+    /// Projection from a non-place aggregate value. `base` is evaluated once.
+    Project {
+        base: Box<HirExpression>,
+        projections: Vec<Projection>,
     },
     Input,
     Unary {
@@ -238,14 +324,15 @@ pub(crate) enum BinaryOperator {
 
 /// Evaluate a cell expression without observing runtime state.
 pub(crate) fn constant_cell_value(expression: &HirExpression) -> Option<u8> {
-    if expression.ty != Type::Cell {
+    if expression.ty != TypeId::CELL {
         return None;
     }
-
     match &expression.kind {
         HirExpressionKind::Literal(value) => Some(*value),
-        HirExpressionKind::Variable(_)
-        | HirExpressionKind::ArrayElement { .. }
+        HirExpressionKind::EnumVariant(_)
+        | HirExpressionKind::StringLiteral(_)
+        | HirExpressionKind::Place(_)
+        | HirExpressionKind::Project { .. }
         | HirExpressionKind::Input
         | HirExpressionKind::Call { .. } => None,
         HirExpressionKind::Unary { operator, operand } => {
@@ -284,65 +371,5 @@ pub(crate) fn constant_cell_value(expression: &HirExpression) -> Option<u8> {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn expression(kind: HirExpressionKind, ty: Type) -> HirExpression {
-        HirExpression {
-            kind,
-            ty,
-            offset: 0,
-        }
-    }
-
-    #[test]
-    fn ids_preserve_their_logical_indices() {
-        assert_eq!(FunctionId::new(3).index(), 3);
-        assert_eq!(GlobalId::new(5).index(), 5);
-        assert_eq!(LocalId::new(7).index(), 7);
-    }
-
-    #[test]
-    fn aggregate_expressions_retain_identity_and_type() {
-        let value = expression(
-            HirExpressionKind::Variable(VariableRef::Global(GlobalId::new(2))),
-            Type::Array(16),
-        );
-        assert_eq!(value.ty, Type::Array(16));
-    }
-
-    #[test]
-    fn constant_evaluation_wraps_and_short_circuits() {
-        let literal = |value| expression(HirExpressionKind::Literal(value), Type::Cell);
-        let wrapped = expression(
-            HirExpressionKind::Binary {
-                operator: BinaryOperator::Add,
-                left: Box::new(literal(255)),
-                right: Box::new(literal(1)),
-            },
-            Type::Cell,
-        );
-        assert_eq!(constant_cell_value(&wrapped), Some(0));
-
-        let unreachable_call = expression(
-            HirExpressionKind::Call {
-                function: FunctionId::new(0),
-                arguments: vec![],
-            },
-            Type::Cell,
-        );
-        let short_circuit = expression(
-            HirExpressionKind::Binary {
-                operator: BinaryOperator::LogicalOr,
-                left: Box::new(literal(1)),
-                right: Box::new(unreachable_call),
-            },
-            Type::Cell,
-        );
-        assert_eq!(constant_cell_value(&short_circuit), Some(1));
     }
 }

@@ -4,9 +4,9 @@ use std::fmt;
 
 use crate::bf_optimizer::optimize_bf;
 use crate::continuation_ir::{
-    Address, ArrayRegion, Continuation, ContinuationId, ContinuationProgram, FrameInstruction,
-    FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId, ParameterLocation, Terminator,
-    ValueOperand, ValueType,
+    Address, AggregateRegion, ArrayRegion, Continuation, ContinuationId, ContinuationProgram,
+    FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId,
+    LogicalOffset, ParameterLocation, Terminator, ValueOperand, ValueType,
 };
 use crate::frame_layout::{AbiConfig, AbiField, FrameLayout, FrameLayoutError, PROTOCOL_CELLS};
 use crate::static_layout::{StaticLayout, StaticLayoutError};
@@ -85,6 +85,8 @@ impl From<StaticLayoutError> for AbiCodegenError {
 struct FunctionLayout {
     frame: FrameLayout,
     branch_temporary_start: usize,
+    portal_temporary_start: usize,
+    portal_temporary_cells: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,11 +113,30 @@ fn build_layouts(
         let value_cells = function
             .frame_slots()
             .checked_add(branch_temporaries)
+            .and_then(|cells| {
+                let portal_temporaries = program
+                    .continuations()
+                    .iter()
+                    .filter(|continuation| continuation.function() == function.id())
+                    .filter_map(|continuation| match continuation.terminator() {
+                        Terminator::AggregateLoad { cells, .. }
+                        | Terminator::AggregateStore { cells, .. } => Some(*cells),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                cells.checked_add(portal_temporaries)
+            })
             .ok_or(FrameLayoutError::SizeOverflow)?;
-        let frame = FrameLayout::with_arrays(
+        let portal_temporary_start = function
+            .frame_slots()
+            .checked_add(branch_temporaries)
+            .ok_or(FrameLayoutError::SizeOverflow)?;
+        let portal_temporary_cells = value_cells - portal_temporary_start;
+        let frame = FrameLayout::with_aggregates(
             config,
             value_cells,
-            function.frame_arrays(),
+            function.frame_aggregates(),
             function.outbox_cells(),
         )?;
         layouts.insert(
@@ -123,39 +144,66 @@ fn build_layouts(
             FunctionLayout {
                 frame,
                 branch_temporary_start: function.frame_slots(),
+                portal_temporary_start,
+                portal_temporary_cells,
             },
         );
     }
     Ok(layouts)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PortalAccessKind {
+    Load,
+    Store,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PortalOffset {
+    Byte(Address),
+    Word(LogicalOffset),
+}
+
 #[derive(Debug, Clone, Copy)]
 enum PortalOperation {
-    Load {
-        array: ArrayRegion,
-        destination: Address,
-        return_to: ContinuationId,
-    },
-    Store {
-        array: ArrayRegion,
-        return_to: ContinuationId,
-    },
+    Load { destination: ValueOperand },
+    Store { source: ValueOperand },
+}
+
+impl PortalOperation {
+    const fn kind(self) -> PortalAccessKind {
+        match self {
+            Self::Load { .. } => PortalAccessKind::Load,
+            Self::Store { .. } => PortalAccessKind::Store,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PortalAccessor {
+    id: ContinuationId,
+    kind: PortalAccessKind,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct PortalSite {
     resume: ContinuationId,
+    accessor: ContinuationId,
     function: FunctionId,
+    region: AggregateRegion,
+    offset: PortalOffset,
     operation: PortalOperation,
+    leaf: usize,
+    cells: usize,
+    return_to: ContinuationId,
+    next_resume: Option<ContinuationId>,
 }
 
 #[derive(Debug)]
 struct PortalPlan {
-    load: Option<ContinuationId>,
-    store: Option<ContinuationId>,
+    accessors: Vec<PortalAccessor>,
     sites: HashMap<ContinuationId, PortalSite>,
     ordered_sites: Vec<PortalSite>,
-    maximum_length: usize,
 }
 
 impl PortalPlan {
@@ -165,62 +213,108 @@ impl PortalPlan {
             .iter()
             .map(|continuation| continuation.id().get())
             .collect::<HashSet<_>>();
-        let has_load = program
-            .continuations()
-            .iter()
-            .any(|continuation| matches!(continuation.terminator(), Terminator::ArrayLoad { .. }));
-        let has_store = program
-            .continuations()
-            .iter()
-            .any(|continuation| matches!(continuation.terminator(), Terminator::ArrayStore { .. }));
-        let load = has_load
-            .then(|| allocate_hidden_id(&mut used))
-            .transpose()?;
-        let store = has_store
-            .then(|| allocate_hidden_id(&mut used))
-            .transpose()?;
-
+        let mut accessors = Vec::new();
+        let mut accessor_ids = HashMap::new();
         let mut sites = HashMap::new();
         let mut ordered_sites = Vec::new();
-        let mut maximum_length = 0;
         for continuation in program.continuations() {
-            let operation = match *continuation.terminator() {
+            let (region, offset, operation, cells, return_to) = match *continuation.terminator() {
                 Terminator::ArrayLoad {
                     array,
+                    index,
                     destination,
                     return_to,
-                    ..
-                } => PortalOperation::Load {
+                } => (
                     array,
-                    destination,
+                    PortalOffset::Byte(index),
+                    PortalOperation::Load {
+                        destination: ValueOperand::Cell(destination),
+                    },
+                    1,
                     return_to,
-                },
+                ),
                 Terminator::ArrayStore {
-                    array, return_to, ..
-                } => PortalOperation::Store { array, return_to },
+                    array,
+                    index,
+                    value,
+                    return_to,
+                } => (
+                    array,
+                    PortalOffset::Byte(index),
+                    PortalOperation::Store {
+                        source: ValueOperand::Cell(value),
+                    },
+                    1,
+                    return_to,
+                ),
+                Terminator::AggregateLoad {
+                    source,
+                    offset,
+                    destination,
+                    cells,
+                    return_to,
+                } => (
+                    source,
+                    PortalOffset::Word(offset),
+                    PortalOperation::Load { destination },
+                    cells,
+                    return_to,
+                ),
+                Terminator::AggregateStore {
+                    destination,
+                    offset,
+                    source,
+                    cells,
+                    return_to,
+                } => (
+                    destination,
+                    PortalOffset::Word(offset),
+                    PortalOperation::Store { source },
+                    cells,
+                    return_to,
+                ),
                 _ => continue,
             };
-            let resume = allocate_hidden_id(&mut used)?;
-            let site = PortalSite {
-                resume,
-                function: continuation.function(),
-                operation,
+            let key = operation.kind();
+            let accessor = if let Some(accessor) = accessor_ids.get(&key).copied() {
+                accessor
+            } else {
+                let id = allocate_hidden_id(&mut used)?;
+                accessor_ids.insert(key, id);
+                accessors.push(PortalAccessor { id, kind: key });
+                id
             };
-            sites.insert(continuation.id(), site);
-            ordered_sites.push(site);
-            let array = match operation {
-                PortalOperation::Load { array, .. } | PortalOperation::Store { array, .. } => array,
-            };
-            maximum_length =
-                maximum_length.max(array_cells(program, continuation.function(), array));
+            let resumes = (0..cells)
+                .map(|_| allocate_hidden_id(&mut used))
+                .collect::<Result<Vec<_>, _>>()?;
+            let first_site = ordered_sites.len();
+            for (leaf, &resume) in resumes.iter().enumerate() {
+                let site = PortalSite {
+                    resume,
+                    accessor,
+                    function: continuation.function(),
+                    region,
+                    offset,
+                    operation,
+                    leaf,
+                    cells,
+                    return_to,
+                    next_resume: resumes.get(leaf + 1).copied(),
+                };
+                ordered_sites.push(site);
+            }
+            sites.insert(
+                continuation.id(),
+                *ordered_sites
+                    .get(first_site)
+                    .expect("validated portal access contains at least one cell"),
+            );
         }
 
         Ok(Self {
-            load,
-            store,
+            accessors,
             sites,
             ordered_sites,
-            maximum_length,
         })
     }
 }
@@ -232,24 +326,6 @@ fn allocate_hidden_id(used: &mut HashSet<u16>) -> Result<ContinuationId, AbiCode
         }
     }
     Err(AbiCodegenError::ContinuationIdsExhausted)
-}
-
-fn array_cells(program: &ContinuationProgram, function: FunctionId, array: ArrayRegion) -> usize {
-    match array {
-        ArrayRegion::Frame(array) => program
-            .function(function)
-            .and_then(|function| function.frame_array(array))
-            .map_or(0, |array| array.cells()),
-        ArrayRegion::Global(global) => {
-            match program.global(global).map(|global| global.value_type()) {
-                Some(ValueType::Array(cells)) => cells,
-                _ => 0,
-            }
-        }
-        ArrayRegion::Outbox => program
-            .function(function)
-            .map_or(0, FunctionDescriptor::outbox_cells),
-    }
 }
 
 fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
@@ -331,17 +407,10 @@ impl<'a> AbiEmitter<'a> {
             for continuation in emitter.program.continuations() {
                 emitter.emit_dispatch_case(continuation)?;
             }
-            if let Some(load) = emitter.portal.load {
-                emitter.emit_hidden_dispatch_case(load, |emitter| {
-                    emitter.emit_array_load_accessor()?;
-                    emitter.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
-                    emitter.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
-                    Ok(())
-                })?;
-            }
-            if let Some(store) = emitter.portal.store {
-                emitter.emit_hidden_dispatch_case(store, |emitter| {
-                    emitter.emit_array_store_accessor()?;
+            let accessors = emitter.portal.accessors.clone();
+            for accessor in accessors {
+                emitter.emit_hidden_dispatch_case(accessor.id, |emitter| {
+                    emitter.emit_aggregate_accessor(accessor)?;
                     emitter.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
                     emitter.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
                     Ok(())
@@ -422,9 +491,68 @@ impl<'a> AbiEmitter<'a> {
         instructions: &[FrameInstruction],
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
-        for instruction in instructions {
-            self.emit_instruction(instruction, function)?;
+        let mut index = 0;
+        while index < instructions.len() {
+            let FrameInstruction::Set {
+                dst:
+                    Address::ArrayElement {
+                        array,
+                        index: first,
+                    },
+                value: 0,
+            } = instructions[index]
+            else {
+                self.emit_instruction(&instructions[index], function)?;
+                index += 1;
+                continue;
+            };
+            let mut end = index + 1;
+            while let Some(FrameInstruction::Set {
+                dst:
+                    Address::ArrayElement {
+                        array: candidate,
+                        index: element,
+                    },
+                value: 0,
+            }) = instructions.get(end)
+            {
+                if *candidate != array || *element != first + (end - index) {
+                    break;
+                }
+                end += 1;
+            }
+            if end - index >= 2 && array != AggregateRegion::Outbox {
+                self.emit_aggregate_clear_range(array, first, end - index, function)?;
+            } else {
+                for instruction in &instructions[index..end] {
+                    self.emit_instruction(instruction, function)?;
+                }
+            }
+            index = end;
         }
+        Ok(())
+    }
+
+    fn emit_aggregate_clear_range(
+        &mut self,
+        region: AggregateRegion,
+        first: usize,
+        cells: usize,
+        function: FunctionId,
+    ) -> Result<(), AbiCodegenError> {
+        let base = self.portal_base_location(region, function)?;
+        self.move_context_to_location(base);
+        for index in first..first + cells {
+            let mut offset = self.config.logical_offset_from_head(PROTOCOL_CELLS + index) as isize;
+            // Global navigation rebases emitter bookkeeping at the aggregate
+            // head. A frame-relative move retains the caller-context origin,
+            // so keep the base displacement in that case.
+            if let Location::Relative(base) = base {
+                offset += base;
+            }
+            self.clear(offset);
+        }
+        self.move_location_to_context(base);
         Ok(())
     }
 
@@ -551,18 +679,21 @@ impl<'a> AbiEmitter<'a> {
             } => self.emit_call(continuation.function(), *callee, arguments, *return_to)?,
             Terminator::Return { value } => self.emit_return(continuation.function(), *value)?,
             Terminator::ArrayLoad {
-                array,
-                index,
+                array: _,
+                index: _,
                 destination: _,
                 return_to: _,
-            } => self.emit_array_call(continuation, *array, *index, None)?,
-            Terminator::ArrayStore {
-                array,
-                index,
-                value,
-                return_to: _,
-            } => self.emit_array_call(continuation, *array, *index, Some(*value))?,
-            Terminator::Halt => self.clear_abi_field(AbiField::Active)?,
+            }
+            | Terminator::ArrayStore { .. }
+            | Terminator::AggregateLoad { .. }
+            | Terminator::AggregateStore { .. } => self.emit_portal_start(
+                *self
+                    .portal
+                    .sites
+                    .get(&continuation.id())
+                    .expect("every validated portal terminator has a portal site"),
+            )?,
+            Terminator::Abort | Terminator::Halt => self.clear_abi_field(AbiField::Active)?,
         }
         Ok(())
     }
@@ -581,9 +712,9 @@ impl<'a> AbiEmitter<'a> {
             .map(|parameter| {
                 let cells = match parameter {
                     ParameterLocation::Cell(_) => None,
-                    ParameterLocation::Array(array) => Some(
+                    ParameterLocation::Array(array) | ParameterLocation::Aggregate(array) => Some(
                         callee_function
-                            .frame_array(*array)
+                            .frame_aggregate(*array)
                             .expect("validated aggregate parameter")
                             .cells(),
                     ),
@@ -615,13 +746,16 @@ impl<'a> AbiEmitter<'a> {
                     );
                     self.copy_locations(src, dst, restore);
                 }
-                (ValueOperand::Array(argument), ParameterLocation::Array(parameter)) => {
+                (
+                    ValueOperand::Array(_) | ValueOperand::Aggregate { .. },
+                    ParameterLocation::Array(parameter) | ParameterLocation::Aggregate(parameter),
+                ) => {
                     let cells = parameter_cells.expect("aggregate parameter size");
                     for index in 0..cells {
-                        let src = self.array_element_location(argument, index, caller)?;
+                        let src = self.value_operand_element_location(argument, index, caller)?;
                         let dst = Location::Relative(
                             callee_context_delta
-                                + callee_frame.array_element_offset(parameter, index)?,
+                                + callee_frame.aggregate_element_offset(parameter, index)?,
                         );
                         self.copy_locations(src, dst, restore);
                     }
@@ -681,12 +815,13 @@ impl<'a> AbiEmitter<'a> {
                 self.copy_locations(value, callee_value, restore);
                 self.move_location(callee_value, caller_value);
             }
-            Some(ValueOperand::Array(array)) => {
-                let ValueType::Array(cells) = self.function(callee)?.return_type() else {
-                    unreachable!("validated aggregate return type")
+            Some(operand @ (ValueOperand::Array(_) | ValueOperand::Aggregate { .. })) => {
+                let cells = match self.function(callee)?.return_type() {
+                    ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
+                    _ => unreachable!("validated aggregate return type"),
                 };
                 for index in 0..cells {
-                    let src = self.array_element_location(array, index, callee)?;
+                    let src = self.value_operand_element_location(operand, index, callee)?;
                     let dst = Location::Relative(caller_delta + self.common_outbox_offset(index));
                     self.copy_locations(src, dst, restore);
                 }
@@ -772,118 +907,84 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    fn emit_array_call(
-        &mut self,
-        continuation: &Continuation,
-        array: ArrayRegion,
-        index: Address,
-        value: Option<Address>,
-    ) -> Result<(), AbiCodegenError> {
-        let site = *self
-            .portal
-            .sites
-            .get(&continuation.id())
-            .expect("every validated portal terminator has a portal site");
-        let accessor = if value.is_some() {
-            self.portal.store.expect("store accessor ID")
-        } else {
-            self.portal.load.expect("load accessor ID")
-        };
-        let function = continuation.function();
+    fn emit_portal_start(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
+        if let PortalOperation::Store { source } = site.operation
+            && site.cells > 1
+        {
+            let layout = self.layout(site.function)?;
+            debug_assert!(layout.portal_temporary_cells >= site.cells);
+            let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+            for leaf in 0..site.cells {
+                let src = self.value_operand_element_location(source, leaf, site.function)?;
+                let dst = self.portal_temporary_location(site.function, leaf)?;
+                self.copy_locations(src, dst, restore);
+            }
+        }
+        self.emit_portal_call(site)
+    }
+
+    fn emit_portal_call(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
         let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
 
         for field in AbiField::ALL {
-            self.clear_location(self.portal_field_location(array, field, function)?);
+            self.clear_location(self.portal_field_location(site.region, field, site.function)?);
         }
-        let index_source = self.address_location(index, function)?;
-        let index_port = self.portal_field_location(array, AbiField::Index, function)?;
-        self.copy_locations(index_source, index_port, restore);
-        if let Some(value) = value {
-            let value_source = self.address_location(value, function)?;
-            let value_port = self.portal_field_location(array, AbiField::Value, function)?;
+        let offset_low = self.portal_field_location(site.region, AbiField::Index, site.function)?;
+        let offset_high =
+            self.portal_field_location(site.region, AbiField::Scratch0, site.function)?;
+        match site.offset {
+            PortalOffset::Byte(index) => {
+                let source = self.address_location(index, site.function)?;
+                self.copy_locations(source, offset_low, restore);
+            }
+            PortalOffset::Word(offset) => {
+                let low = self.address_location(offset.low, site.function)?;
+                let high = self.address_location(offset.high, site.function)?;
+                self.copy_locations(low, offset_low, restore);
+                self.copy_locations(high, offset_high, restore);
+            }
+        }
+        if let PortalOperation::Store { source } = site.operation {
+            let value_source = if site.cells > 1 {
+                self.portal_temporary_location(site.function, site.leaf)?
+            } else {
+                self.value_operand_element_location(source, site.leaf, site.function)?
+            };
+            let value_port =
+                self.portal_field_location(site.region, AbiField::Value, site.function)?;
             self.copy_locations(value_source, value_port, restore);
         }
         self.set_location(
-            self.portal_field_location(array, AbiField::Active, function)?,
+            self.portal_field_location(site.region, AbiField::Active, site.function)?,
             1,
         );
         self.set_pc_locations(
-            array,
-            function,
+            site.region,
+            site.function,
             AbiField::NextPcLow,
             AbiField::NextPcHigh,
-            accessor,
+            site.accessor,
         )?;
         self.set_pc_locations(
-            array,
-            function,
+            site.region,
+            site.function,
             AbiField::ReturnPcLow,
             AbiField::ReturnPcHigh,
             site.resume,
         )?;
-        self.enter_portal(array, function)
+        self.enter_portal(site.region, site.function)
     }
 
-    fn emit_array_load_accessor(&mut self) -> Result<(), AbiCodegenError> {
-        self.clear_abi_field(AbiField::Value)?;
-        self.compute_array_index_divmod()?;
-        let chunks = self
-            .portal
-            .maximum_length
-            .div_ceil(self.config.chunk_cells());
-        for chunk in 0..chunks {
-            self.if_abi_field_equals(AbiField::Scratch0, chunk as u8, |emitter| {
-                let start = chunk * emitter.config.chunk_cells();
-                let length =
-                    (emitter.portal.maximum_length - start).min(emitter.config.chunk_cells());
-                for within in 0..length {
-                    emitter.if_abi_field_equals(AbiField::Scratch1, within as u8, |emitter| {
-                        let source = emitter
-                            .config
-                            .logical_offset_from_head(PROTOCOL_CELLS + start + within)
-                            as isize;
-                        let destination = emitter.current_abi_offset(AbiField::Value)?;
-                        let restore = emitter.current_abi_offset(AbiField::Restore)?;
-                        emitter.copy(source, destination, restore);
-                        Ok(())
-                    })?;
-                }
-                Ok(())
-            })?;
-        }
-        Ok(())
-    }
-
-    fn emit_array_store_accessor(&mut self) -> Result<(), AbiCodegenError> {
-        self.compute_array_index_divmod()?;
-        let chunks = self
-            .portal
-            .maximum_length
-            .div_ceil(self.config.chunk_cells());
-        for chunk in 0..chunks {
-            self.if_abi_field_equals(AbiField::Scratch0, chunk as u8, |emitter| {
-                let start = chunk * emitter.config.chunk_cells();
-                let length =
-                    (emitter.portal.maximum_length - start).min(emitter.config.chunk_cells());
-                for within in 0..length {
-                    emitter.if_abi_field_equals(AbiField::Scratch1, within as u8, |emitter| {
-                        let destination = emitter
-                            .config
-                            .logical_offset_from_head(PROTOCOL_CELLS + start + within)
-                            as isize;
-                        let source = emitter.current_abi_offset(AbiField::Value)?;
-                        emitter.move_value(source, destination);
-                        Ok(())
-                    })?;
-                }
-                Ok(())
-            })?;
-        }
-        Ok(())
-    }
-
-    fn compute_array_index_divmod(&mut self) -> Result<(), AbiCodegenError> {
+    fn emit_aggregate_accessor(&mut self, accessor: PortalAccessor) -> Result<(), AbiCodegenError> {
+        self.compute_aggregate_chunk_offset()?;
+        self.shift_portal_by_count(AbiField::Scratch1, AbiField::Scratch2, true)?;
+        self.access_payload_with_remainder(accessor.kind)?;
+        self.shift_portal_by_count(AbiField::Condition, AbiField::Restore, false)?;
         for field in [
+            AbiField::Index,
+            AbiField::Condition,
+            AbiField::Restore,
+            AbiField::Branch,
             AbiField::Scratch0,
             AbiField::Scratch1,
             AbiField::Scratch2,
@@ -891,31 +992,60 @@ impl<'a> AbiEmitter<'a> {
         ] {
             self.clear_abi_field(field)?;
         }
-        self.set_abi_field(AbiField::Scratch2, self.config.chunk_cells() as u8)?;
-        let index = self.current_abi_offset(AbiField::Index)?;
-        self.move_to(index);
+        Ok(())
+    }
+
+    fn compute_aggregate_chunk_offset(&mut self) -> Result<(), AbiCodegenError> {
+        self.copy_abi_field(AbiField::Index, AbiField::PcLow)?;
+        self.copy_abi_field(AbiField::Scratch0, AbiField::PcHigh)?;
+        for field in [
+            AbiField::Index,
+            AbiField::Scratch0,
+            AbiField::Scratch1,
+            AbiField::Scratch2,
+            AbiField::Scratch3,
+        ] {
+            self.clear_abi_field(field)?;
+        }
+        self.set_abi_field(AbiField::Scratch3, self.config.chunk_cells() as u8)?;
+        self.consume_byte_with_ticks(AbiField::PcLow)?;
+        let high = self.current_abi_offset(AbiField::PcHigh)?;
+        self.move_to(high);
+        let high_body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.division_tick()?;
+            emitter.set_abi_field(AbiField::PcLow, u8::MAX)?;
+            emitter.consume_byte_with_ticks(AbiField::PcLow)?;
+            emitter.move_to(high);
+            Ok(())
+        })?;
+        self.output.push(BfInstruction::Loop(high_body));
+        self.move_to(0);
+        self.clear_abi_field(AbiField::Scratch3)?;
+
+        let scratch = self.current_abi_offset(AbiField::Scratch0)?;
+        self.copy(
+            self.current_abi_offset(AbiField::Scratch1)?,
+            self.current_abi_offset(AbiField::Condition)?,
+            scratch,
+        );
+        self.copy(
+            self.current_abi_offset(AbiField::Scratch2)?,
+            self.current_abi_offset(AbiField::Restore)?,
+            scratch,
+        );
+        Ok(())
+    }
+
+    fn consume_byte_with_ticks(&mut self, field: AbiField) -> Result<(), AbiCodegenError> {
+        let offset = self.current_abi_offset(field)?;
+        self.move_to(offset);
         let body = self.capture(|emitter| {
             emitter.adjust(255);
             emitter.move_to(0);
-            emitter.add_abi_field(AbiField::Scratch1, 1)?;
-            emitter.add_abi_field(AbiField::Scratch2, u8::MAX)?;
-            emitter.copy_abi_field(AbiField::Scratch2, AbiField::Condition)?;
-            emitter.set_abi_field(AbiField::Scratch3, 1)?;
-            emitter.clear_field_on_nonzero(AbiField::Condition, AbiField::Scratch3)?;
-
-            let zero = emitter.current_abi_offset(AbiField::Scratch3)?;
-            emitter.move_to(zero);
-            let zero_body = emitter.capture(|emitter| {
-                emitter.adjust(255);
-                emitter.move_to(0);
-                emitter.add_abi_field(AbiField::Scratch0, 1)?;
-                emitter.clear_abi_field(AbiField::Scratch1)?;
-                emitter.set_abi_field(AbiField::Scratch2, emitter.config.chunk_cells() as u8)?;
-                emitter.move_to(zero);
-                Ok(())
-            })?;
-            emitter.output.push(BfInstruction::Loop(zero_body));
-            emitter.move_to(index);
+            emitter.division_tick()?;
+            emitter.move_to(offset);
             Ok(())
         })?;
         self.output.push(BfInstruction::Loop(body));
@@ -923,27 +1053,170 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    fn if_abi_field_equals(
-        &mut self,
-        field: AbiField,
-        value: u8,
-        body_emitter: impl FnOnce(&mut Self) -> Result<(), AbiCodegenError>,
-    ) -> Result<(), AbiCodegenError> {
-        self.copy_abi_field(field, AbiField::Condition)?;
-        self.add_abi_field(AbiField::Condition, 0_u8.wrapping_sub(value))?;
+    fn division_tick(&mut self) -> Result<(), AbiCodegenError> {
+        self.add_abi_field(AbiField::Index, 1)?;
+        self.add_abi_field(AbiField::Scratch3, u8::MAX)?;
+        self.copy_abi_field(AbiField::Scratch3, AbiField::Condition)?;
         self.set_abi_field(AbiField::Branch, 1)?;
         self.clear_branch_on_nonzero(AbiField::Condition)?;
         let branch = self.current_abi_offset(AbiField::Branch)?;
         self.move_to(branch);
+        let wrap = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.clear_abi_field(AbiField::Index)?;
+            emitter.set_abi_field(AbiField::Scratch3, emitter.config.chunk_cells() as u8)?;
+            emitter.increment_abi_u16(
+                AbiField::Scratch1,
+                AbiField::Scratch2,
+                AbiField::Scratch0,
+            )?;
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.output.push(BfInstruction::Loop(wrap));
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn increment_abi_u16(
+        &mut self,
+        low: AbiField,
+        high: AbiField,
+        carry: AbiField,
+    ) -> Result<(), AbiCodegenError> {
+        self.copy_abi_field(low, AbiField::Condition)?;
+        self.add_abi_field(AbiField::Condition, 1)?;
+        self.set_abi_field(carry, 1)?;
+        self.clear_field_on_nonzero(AbiField::Condition, carry)?;
+        self.add_abi_field(low, 1)?;
+        let carry_offset = self.current_abi_offset(carry)?;
+        self.move_to(carry_offset);
         let body = self.capture(|emitter| {
             emitter.adjust(255);
             emitter.move_to(0);
-            body_emitter(emitter)?;
-            emitter.move_to(branch);
+            emitter.add_abi_field(high, 1)?;
+            emitter.move_to(carry_offset);
             Ok(())
         })?;
         self.output.push(BfInstruction::Loop(body));
         self.move_to(0);
+        Ok(())
+    }
+
+    fn shift_portal_by_count(
+        &mut self,
+        low: AbiField,
+        high: AbiField,
+        right: bool,
+    ) -> Result<(), AbiCodegenError> {
+        let low_offset = self.current_abi_offset(low)?;
+        self.move_to(low_offset);
+        let low_body = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.shift_portal_window(right);
+            emitter.move_to(low_offset);
+        });
+        self.output.push(BfInstruction::Loop(low_body));
+        self.move_to(0);
+
+        let high_offset = self.current_abi_offset(high)?;
+        self.move_to(high_offset);
+        let high_body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.shift_portal_window(right);
+            emitter.set_abi_field(low, u8::MAX)?;
+            emitter.move_to(low_offset);
+            let low_255 = emitter.capture_infallible(|emitter| {
+                emitter.adjust(255);
+                emitter.move_to(0);
+                emitter.shift_portal_window(right);
+                emitter.move_to(low_offset);
+            });
+            emitter.output.push(BfInstruction::Loop(low_255));
+            emitter.move_to(high_offset);
+            Ok(())
+        })?;
+        self.output.push(BfInstruction::Loop(high_body));
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn shift_portal_window(&mut self, right: bool) {
+        let stride = self.config.stride() as isize;
+        let portal_chunks = self.config.portal_chunks() as isize;
+        let primary_lane = AbiField::Scratch0.index() % self.config.chunk_cells();
+        let primary = self
+            .config
+            .logical_offset_from_head(AbiField::Scratch0.index()) as isize;
+        let secondary = self
+            .config
+            .logical_offset_from_head(AbiField::Scratch3.index()) as isize;
+        let new_primary = primary + if right { stride } else { -stride };
+        let cell = |chunk: isize, lane: usize| chunk * stride + 1 + lane as isize;
+
+        for lane in 0..self.config.chunk_cells() {
+            let temporary = if lane < primary_lane {
+                primary
+            } else if lane == primary_lane {
+                secondary
+            } else {
+                new_primary
+            };
+            if right {
+                self.move_value(cell(portal_chunks, lane), temporary);
+                for chunk in (0..portal_chunks).rev() {
+                    self.move_value(cell(chunk, lane), cell(chunk + 1, lane));
+                }
+                self.move_value(temporary, cell(0, lane));
+            } else {
+                self.move_value(cell(-1, lane), temporary);
+                for chunk in 0..portal_chunks {
+                    self.move_value(cell(chunk, lane), cell(chunk - 1, lane));
+                }
+                self.move_value(temporary, cell(portal_chunks - 1, lane));
+            }
+        }
+        self.migrate_context(if right { stride } else { -stride });
+    }
+
+    fn access_payload_with_remainder(
+        &mut self,
+        kind: PortalAccessKind,
+    ) -> Result<(), AbiCodegenError> {
+        for remainder in 0..self.config.chunk_cells() {
+            let index = self.current_abi_offset(AbiField::Index)?;
+            let condition = self.current_abi_offset(AbiField::Scratch1)?;
+            let scratch = self.current_abi_offset(AbiField::Scratch2)?;
+            self.copy(index, condition, scratch);
+            self.add_abi_field(AbiField::Scratch1, 0_u8.wrapping_sub(remainder as u8))?;
+            self.set_abi_field(AbiField::Branch, 1)?;
+            self.clear_branch_on_nonzero(AbiField::Scratch1)?;
+            let branch = self.current_abi_offset(AbiField::Branch)?;
+            self.move_to(branch);
+            let body = self.capture(|emitter| {
+                emitter.adjust(255);
+                emitter.move_to(0);
+                let payload = emitter
+                    .config
+                    .logical_offset_from_head(PROTOCOL_CELLS + remainder)
+                    as isize;
+                let value = emitter.current_abi_offset(AbiField::Value)?;
+                match kind {
+                    PortalAccessKind::Load => {
+                        let scratch = emitter.current_abi_offset(AbiField::Scratch2)?;
+                        emitter.copy(payload, value, scratch);
+                    }
+                    PortalAccessKind::Store => emitter.move_value(value, payload),
+                }
+                emitter.move_to(branch);
+                Ok(())
+            })?;
+            self.output.push(BfInstruction::Loop(body));
+            self.move_to(0);
+        }
         Ok(())
     }
 
@@ -966,9 +1239,6 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn emit_portal_resume(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
-        let array = match site.operation {
-            PortalOperation::Load { array, .. } | PortalOperation::Store { array, .. } => array,
-        };
         let is_load = matches!(site.operation, PortalOperation::Load { .. });
         for field in AbiField::ALL {
             if is_load && field == AbiField::Value {
@@ -978,9 +1248,9 @@ impl<'a> AbiEmitter<'a> {
         }
 
         let frame = self.layout(site.function)?.frame.clone();
-        match array {
-            ArrayRegion::Frame(array) => {
-                let context_delta = -frame.array_base_offset(array)?;
+        match site.region {
+            AggregateRegion::Frame(aggregate) => {
+                let context_delta = -frame.aggregate_base_offset(aggregate)?;
                 if is_load {
                     let source = self.current_abi_offset(AbiField::Value)?;
                     let destination = context_delta + frame.abi_offset(AbiField::Value);
@@ -989,8 +1259,8 @@ impl<'a> AbiEmitter<'a> {
                 self.clear_abi_field(AbiField::Value)?;
                 self.migrate_context(context_delta);
             }
-            ArrayRegion::Global(global) => {
-                let base = self.static_layout.array_base_head(global)?;
+            AggregateRegion::Global(global) => {
+                let base = self.static_layout.aggregate_base_head(global)?;
                 if is_load {
                     self.move_global_portal_value_to_context(
                         base,
@@ -1001,20 +1271,92 @@ impl<'a> AbiEmitter<'a> {
                     self.emit_global_to_context(base, frame.context_chunks());
                 }
             }
-            ArrayRegion::Outbox => unreachable!("outbox cannot use the array portal"),
+            AggregateRegion::Outbox => unreachable!("outbox cannot use the aggregate portal"),
         }
 
-        if let PortalOperation::Load { destination, .. } = site.operation {
+        if let PortalOperation::Load { destination } = site.operation {
             let source = Location::Relative(frame.abi_offset(AbiField::Value));
-            let destination = self.address_location(destination, site.function)?;
+            let destination = if site.cells > 1 {
+                self.portal_temporary_location(site.function, site.leaf)?
+            } else {
+                self.value_operand_element_location(destination, site.leaf, site.function)?
+            };
             self.move_location(source, destination);
         }
-        let return_to = match site.operation {
-            PortalOperation::Load { return_to, .. } | PortalOperation::Store { return_to, .. } => {
-                return_to
+        if let Some(next_resume) = site.next_resume {
+            self.increment_portal_offset(site.offset, site.function)?;
+            let next = *self
+                .portal
+                .ordered_sites
+                .iter()
+                .find(|candidate| candidate.resume == next_resume)
+                .expect("portal leaf resume chain must be complete");
+            self.emit_portal_call(next)
+        } else {
+            if let PortalOperation::Load { destination } = site.operation
+                && site.cells > 1
+            {
+                let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+                for leaf in 0..site.cells {
+                    let source = self.portal_temporary_location(site.function, leaf)?;
+                    let destination =
+                        self.value_operand_element_location(destination, leaf, site.function)?;
+                    self.copy_locations(source, destination, restore);
+                }
             }
+            if site.cells > 1 {
+                for leaf in 0..site.cells {
+                    let temporary = self.portal_temporary_location(site.function, leaf)?;
+                    self.clear_location(temporary);
+                }
+            }
+            self.set_next_pc(site.return_to)
+        }
+    }
+
+    fn increment_portal_offset(
+        &mut self,
+        offset: PortalOffset,
+        function: FunctionId,
+    ) -> Result<(), AbiCodegenError> {
+        let PortalOffset::Word(offset) = offset else {
+            unreachable!("single-cell Version-0 access never increments its byte index")
         };
-        self.set_next_pc(return_to)
+        let low = self.address_location(offset.low, function)?;
+        let high = self.address_location(offset.high, function)?;
+        let condition = Location::Relative(self.current_abi_offset(AbiField::Condition)?);
+        let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+        let branch = Location::Relative(self.current_abi_offset(AbiField::Branch)?);
+        self.copy_locations(low, condition, restore);
+        self.move_context_to_location(condition);
+        self.adjust(1);
+        self.move_location_to_context(condition);
+        self.set_location(branch, 1);
+        self.move_context_to_location(condition);
+        let nonzero = self.capture_infallible(|emitter| {
+            emitter.clear_current();
+            emitter.move_location_to_context(condition);
+            emitter.clear_location(branch);
+            emitter.move_context_to_location(condition);
+        });
+        self.output.push(BfInstruction::Loop(nonzero));
+        self.move_location_to_context(condition);
+
+        self.move_context_to_location(low);
+        self.adjust(1);
+        self.move_location_to_context(low);
+        self.move_context_to_location(branch);
+        let carry = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.move_location_to_context(branch);
+            emitter.move_context_to_location(high);
+            emitter.adjust(1);
+            emitter.move_location_to_context(high);
+            emitter.move_context_to_location(branch);
+        });
+        self.output.push(BfInstruction::Loop(carry));
+        self.move_location_to_context(branch);
+        Ok(())
     }
 
     fn move_global_portal_value_to_context(
@@ -1049,7 +1391,7 @@ impl<'a> AbiEmitter<'a> {
 
     fn set_pc_locations(
         &mut self,
-        array: ArrayRegion,
+        array: AggregateRegion,
         function: FunctionId,
         low: AbiField,
         high: AbiField,
@@ -1068,7 +1410,7 @@ impl<'a> AbiEmitter<'a> {
 
     fn enter_portal(
         &mut self,
-        array: ArrayRegion,
+        array: AggregateRegion,
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
         match self.portal_base_location(array, function)? {
@@ -1083,59 +1425,98 @@ impl<'a> AbiEmitter<'a> {
 
     fn portal_base_location(
         &self,
-        array: ArrayRegion,
+        array: AggregateRegion,
         function: FunctionId,
     ) -> Result<Location, AbiCodegenError> {
         Ok(match array {
-            ArrayRegion::Frame(array) => {
-                Location::Relative(self.layout(function)?.frame.array_base_offset(array)?)
+            AggregateRegion::Frame(aggregate) => Location::Relative(
+                self.layout(function)?
+                    .frame
+                    .aggregate_base_offset(aggregate)?,
+            ),
+            AggregateRegion::Global(global) => {
+                Location::Global(self.static_layout.aggregate_base_head(global)?)
             }
-            ArrayRegion::Global(global) => {
-                Location::Global(self.static_layout.array_base_head(global)?)
+            AggregateRegion::Outbox => {
+                unreachable!("validated portal aggregate cannot be outbox")
             }
-            ArrayRegion::Outbox => unreachable!("validated portal array cannot be outbox"),
         })
     }
 
     fn portal_field_location(
         &self,
-        array: ArrayRegion,
+        array: AggregateRegion,
         field: AbiField,
         function: FunctionId,
     ) -> Result<Location, AbiCodegenError> {
         Ok(match array {
-            ArrayRegion::Frame(array) => Location::Relative(
+            AggregateRegion::Frame(aggregate) => Location::Relative(
                 self.layout(function)?
                     .frame
-                    .array_portal_offset(array, field)?,
+                    .aggregate_portal_offset(aggregate, field)?,
             ),
-            ArrayRegion::Global(global) => Location::Global(
+            AggregateRegion::Global(global) => Location::Global(
                 self.static_layout
-                    .array_portal_field_position(global, field)?,
+                    .aggregate_portal_field_position(global, field)?,
             ),
-            ArrayRegion::Outbox => unreachable!("validated portal array cannot be outbox"),
+            AggregateRegion::Outbox => {
+                unreachable!("validated portal aggregate cannot be outbox")
+            }
         })
     }
 
     fn array_element_location(
         &self,
-        array: ArrayRegion,
+        array: AggregateRegion,
         index: usize,
         function: FunctionId,
     ) -> Result<Location, AbiCodegenError> {
         Ok(match array {
-            ArrayRegion::Frame(array) => Location::Relative(
+            AggregateRegion::Frame(aggregate) => Location::Relative(
                 self.layout(function)?
                     .frame
-                    .array_element_offset(array, index)?,
+                    .aggregate_element_offset(aggregate, index)?,
             ),
-            ArrayRegion::Global(global) => {
-                Location::Global(self.static_layout.array_element_position(global, index)?)
-            }
-            ArrayRegion::Outbox => {
+            AggregateRegion::Global(global) => Location::Global(
+                self.static_layout
+                    .aggregate_element_position(global, index)?,
+            ),
+            AggregateRegion::Outbox => {
                 Location::Relative(self.layout(function)?.frame.outbox_offset(index)?)
             }
         })
+    }
+
+    fn value_operand_element_location(
+        &self,
+        operand: ValueOperand,
+        index: usize,
+        function: FunctionId,
+    ) -> Result<Location, AbiCodegenError> {
+        match operand {
+            ValueOperand::Cell(address) => {
+                debug_assert_eq!(index, 0);
+                self.address_location(address, function)
+            }
+            ValueOperand::Array(region) => self.array_element_location(region, index, function),
+            ValueOperand::Aggregate {
+                region,
+                offset,
+                cells: _,
+            } => self.array_element_location(region, offset + index, function),
+        }
+    }
+
+    fn portal_temporary_location(
+        &self,
+        function: FunctionId,
+        index: usize,
+    ) -> Result<Location, AbiCodegenError> {
+        let layout = self.layout(function)?;
+        debug_assert!(index < layout.portal_temporary_cells);
+        Ok(Location::Relative(layout.frame.frame_offset(
+            FrameSlot::new(layout.portal_temporary_start + index),
+        )))
     }
 
     fn common_outbox_offset(&self, index: usize) -> isize {
@@ -2236,8 +2617,7 @@ mod tests {
             .collect::<HashSet<_>>();
         let plan = PortalPlan::new(&program).unwrap();
         let mut hidden = Vec::new();
-        hidden.extend(plan.load.map(ContinuationId::get));
-        hidden.extend(plan.store.map(ContinuationId::get));
+        hidden.extend(plan.accessors.iter().map(|accessor| accessor.id.get()));
         hidden.extend(plan.ordered_sites.iter().map(|site| site.resume.get()));
         assert!(hidden.iter().all(|id| !user_ids.contains(id)));
         assert_eq!(
@@ -2250,6 +2630,272 @@ mod tests {
             allocate_hidden_id(&mut exhausted),
             Err(AbiCodegenError::ContinuationIdsExhausted)
         );
+    }
+
+    #[test]
+    fn version_one_dynamic_multi_cell_access_uses_16_bit_offsets() {
+        let main = FunctionId::new(0);
+        let root = crate::FrameAggregateId::new(0);
+        let low = FrameSlot::new(0);
+        let high = FrameSlot::new(1);
+        let function = FunctionDescriptor::new_aggregates(
+            main,
+            vec![],
+            2,
+            vec![crate::FrameAggregateDescriptor::new(root, 300)],
+            0,
+            ValueType::Void,
+            id(1),
+        );
+        let offset = LogicalOffset::new(Address::Frame(low), Address::Frame(high));
+        let continuations = vec![
+            Continuation::new(
+                id(1),
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::ArrayElement {
+                            array: AggregateRegion::Frame(root),
+                            index: 254,
+                        },
+                        value: 10,
+                    },
+                    FrameInstruction::Set {
+                        dst: Address::ArrayElement {
+                            array: AggregateRegion::Frame(root),
+                            index: 255,
+                        },
+                        value: 20,
+                    },
+                    FrameInstruction::Set {
+                        dst: Address::ArrayElement {
+                            array: AggregateRegion::Frame(root),
+                            index: 256,
+                        },
+                        value: 30,
+                    },
+                    FrameInstruction::Set {
+                        dst: Address::Frame(low),
+                        value: 254,
+                    },
+                ],
+                Terminator::AggregateLoad {
+                    source: AggregateRegion::Frame(root),
+                    offset,
+                    destination: ValueOperand::Aggregate {
+                        region: AggregateRegion::Frame(root),
+                        offset: 255,
+                        cells: 3,
+                    },
+                    cells: 3,
+                    return_to: id(2),
+                },
+            ),
+            Continuation::new(
+                id(2),
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::Frame(low),
+                        value: 0,
+                    },
+                    FrameInstruction::Set {
+                        dst: Address::Frame(high),
+                        value: 1,
+                    },
+                ],
+                Terminator::AggregateStore {
+                    destination: AggregateRegion::Frame(root),
+                    offset,
+                    source: ValueOperand::Aggregate {
+                        region: AggregateRegion::Frame(root),
+                        offset: 255,
+                        cells: 3,
+                    },
+                    cells: 3,
+                    return_to: id(3),
+                },
+            ),
+            Continuation::new(
+                id(3),
+                main,
+                [254, 255, 256, 257, 258]
+                    .into_iter()
+                    .map(|index| FrameInstruction::Output {
+                        src: Address::ArrayElement {
+                            array: AggregateRegion::Frame(root),
+                            index,
+                        },
+                    })
+                    .collect(),
+                Terminator::Halt,
+            ),
+        ];
+        let program = ContinuationProgram::new(main, vec![function], continuations).unwrap();
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(
+                execute_continuations(&program, chunk_cells),
+                &[10, 10, 10, 20, 30]
+            );
+        }
+    }
+
+    #[test]
+    fn version_zero_global_portal_reaches_index_255() {
+        let main = FunctionId::new(0);
+        let index = FrameSlot::new(0);
+        let value = FrameSlot::new(1);
+        let function = FunctionDescriptor::new(main, vec![], 2, ValueType::Void, id(1));
+        let continuations = vec![
+            Continuation::new(
+                id(1),
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::Frame(index),
+                        value: 255,
+                    },
+                    FrameInstruction::Set {
+                        dst: Address::Frame(value),
+                        value: b'Z',
+                    },
+                ],
+                Terminator::ArrayStore {
+                    array: AggregateRegion::Global(crate::GlobalId::new(0)),
+                    index: Address::Frame(index),
+                    value: Address::Frame(value),
+                    return_to: id(2),
+                },
+            ),
+            Continuation::new(
+                id(2),
+                main,
+                vec![FrameInstruction::Output {
+                    src: Address::ArrayElement {
+                        array: AggregateRegion::Global(crate::GlobalId::new(0)),
+                        index: 255,
+                    },
+                }],
+                Terminator::Halt,
+            ),
+        ];
+        let program = ContinuationProgram::new_with_globals(
+            main,
+            vec![crate::GlobalDescriptor::array(crate::GlobalId::new(0), 256)],
+            vec![function],
+            continuations,
+        )
+        .unwrap();
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"Z");
+        }
+    }
+
+    #[test]
+    fn version_one_source_accessor_plan_stays_compact() {
+        let program = crate::lower_source(
+            "struct Triple { cell a; cell b; cell c; } Triple[100] global_values; void main() { Triple[100] local_values; cell index = 85; global_values[index].b = 'G'; local_values[index] = global_values[index]; output(local_values[index].a); output(local_values[index].b); output(local_values[index].c); }",
+        )
+        .unwrap();
+        let plan = PortalPlan::new(&program).unwrap();
+        assert_eq!(plan.accessors.len(), 2);
+        assert!(plan.ordered_sites.len() < 16);
+        for chunk_cells in [8, 16] {
+            let generated =
+                lower_continuations_with_config(&program, AbiConfig::new(chunk_cells).unwrap())
+                    .unwrap()
+                    .to_source();
+            eprintln!(
+                "D={chunk_cells}: {} bytes, {} portal leaves",
+                generated.len(),
+                plan.ordered_sites.len()
+            );
+            assert!(generated.len() < 5_000_000);
+        }
+    }
+
+    #[test]
+    fn aggregate_subranges_cross_call_and_return_in_both_geometries() {
+        let main = FunctionId::new(0);
+        let helper = FunctionId::new(1);
+        let source = crate::FrameAggregateId::new(0);
+        let parameter = crate::FrameAggregateId::new(0);
+        let functions = vec![
+            FunctionDescriptor::new_aggregates(
+                main,
+                vec![],
+                0,
+                vec![crate::FrameAggregateDescriptor::new(source, 5)],
+                3,
+                ValueType::Void,
+                id(1),
+            ),
+            FunctionDescriptor::new_aggregates(
+                helper,
+                vec![ParameterLocation::Aggregate(parameter)],
+                0,
+                vec![crate::FrameAggregateDescriptor::new(parameter, 3)],
+                0,
+                ValueType::Aggregate { cells: 3 },
+                id(3),
+            ),
+        ];
+        let continuations = vec![
+            Continuation::new(
+                id(1),
+                main,
+                (*b"ABC")
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| FrameInstruction::Set {
+                        dst: Address::ArrayElement {
+                            array: AggregateRegion::Frame(source),
+                            index: index + 1,
+                        },
+                        value,
+                    })
+                    .collect(),
+                Terminator::Call {
+                    callee: helper,
+                    arguments: vec![ValueOperand::Aggregate {
+                        region: AggregateRegion::Frame(source),
+                        offset: 1,
+                        cells: 3,
+                    }],
+                    return_to: id(2),
+                },
+            ),
+            Continuation::new(
+                id(2),
+                main,
+                (0..3)
+                    .map(|index| FrameInstruction::Output {
+                        src: Address::ArrayElement {
+                            array: AggregateRegion::Outbox,
+                            index,
+                        },
+                    })
+                    .collect(),
+                Terminator::Abort,
+            ),
+            Continuation::new(
+                id(3),
+                helper,
+                vec![],
+                Terminator::Return {
+                    value: Some(ValueOperand::aggregate(
+                        AggregateRegion::Frame(parameter),
+                        3,
+                    )),
+                },
+            ),
+        ];
+        let program = ContinuationProgram::new(main, functions, continuations).unwrap();
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"ABC");
+        }
     }
 
     #[test]

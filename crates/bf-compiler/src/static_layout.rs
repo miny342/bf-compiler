@@ -1,9 +1,10 @@
 //! Checked physical layout of file-scope objects and the stack anchor.
 //!
 //! Scalar globals occupy ordinary tape cells at the low-address end. Global
-//! arrays follow in declaration order, with each array receiving its own
-//! aligned 16-cell portal prefix. The first cell after the static regions is
-//! the zero-valued stack anchor head.
+//! aggregate regions follow in declaration order. Every nonempty aggregate
+//! receives an aligned 16-cell portal prefix; zero-sized aggregates retain
+//! identity without consuming tape. The first cell after the static regions
+//! is the zero-valued stack anchor head.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -27,7 +28,7 @@ enum GlobalLayout {
         id: GlobalId,
         position: usize,
     },
-    Array {
+    Aggregate {
         id: GlobalId,
         cells: usize,
         base_head: usize,
@@ -38,7 +39,7 @@ enum GlobalLayout {
 impl GlobalLayout {
     const fn id(self) -> GlobalId {
         match self {
-            Self::Cell { id, .. } | Self::Array { id, .. } => id,
+            Self::Cell { id, .. } | Self::Aggregate { id, .. } => id,
         }
     }
 }
@@ -73,17 +74,22 @@ impl StaticLayout {
 
         let mut next_head = scalar_cells;
         for descriptor in descriptors {
-            let ValueType::Array(cells) = descriptor.value_type() else {
-                continue;
+            let cells = match descriptor.value_type() {
+                ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
+                ValueType::Cell | ValueType::Void => continue,
             };
-            let logical_cells = PROTOCOL_CELLS
-                .checked_add(cells)
-                .ok_or(StaticLayoutError::SizeOverflow)?;
-            let chunks = checked_chunks(logical_cells, config)?;
+            let chunks = if cells == 0 {
+                0
+            } else {
+                let logical_cells = PROTOCOL_CELLS
+                    .checked_add(cells)
+                    .ok_or(StaticLayoutError::SizeOverflow)?;
+                checked_chunks(logical_cells, config)?
+            };
             let physical_cells = chunks
                 .checked_mul(config.stride())
                 .ok_or(StaticLayoutError::SizeOverflow)?;
-            globals.push(GlobalLayout::Array {
+            globals.push(GlobalLayout::Aggregate {
                 id: descriptor.id(),
                 cells,
                 base_head: next_head,
@@ -147,39 +153,42 @@ impl StaticLayout {
     pub fn scalar_position(&self, global: GlobalId) -> Result<usize, StaticLayoutError> {
         match self.global_layout(global)? {
             GlobalLayout::Cell { position, .. } => Ok(position),
-            GlobalLayout::Array { .. } => Err(StaticLayoutError::ExpectedScalar { global }),
+            GlobalLayout::Aggregate { .. } => Err(StaticLayoutError::ExpectedScalar { global }),
         }
     }
 
-    /// Absolute position of an aligned global array's aux/base head.
-    pub fn array_base_head(&self, global: GlobalId) -> Result<usize, StaticLayoutError> {
+    /// Absolute position of an aligned global aggregate's aux/base head.
+    pub fn aggregate_base_head(&self, global: GlobalId) -> Result<usize, StaticLayoutError> {
         match self.global_layout(global)? {
-            GlobalLayout::Array { base_head, .. } => Ok(base_head),
-            GlobalLayout::Cell { .. } => Err(StaticLayoutError::ExpectedArray { global }),
+            GlobalLayout::Aggregate { cells: 0, .. } => {
+                Err(StaticLayoutError::ZeroSizedAggregate { global })
+            }
+            GlobalLayout::Aggregate { base_head, .. } => Ok(base_head),
+            GlobalLayout::Cell { .. } => Err(StaticLayoutError::ExpectedAggregate { global }),
         }
     }
 
-    pub fn array_chunk_count(&self, global: GlobalId) -> Result<usize, StaticLayoutError> {
+    pub fn aggregate_chunk_count(&self, global: GlobalId) -> Result<usize, StaticLayoutError> {
         match self.global_layout(global)? {
-            GlobalLayout::Array { chunks, .. } => Ok(chunks),
-            GlobalLayout::Cell { .. } => Err(StaticLayoutError::ExpectedArray { global }),
+            GlobalLayout::Aggregate { chunks, .. } => Ok(chunks),
+            GlobalLayout::Cell { .. } => Err(StaticLayoutError::ExpectedAggregate { global }),
         }
     }
 
-    /// Absolute position of a statically indexed array payload element.
-    pub fn array_element_position(
+    /// Absolute position of a statically indexed aggregate payload cell.
+    pub fn aggregate_element_position(
         &self,
         global: GlobalId,
         index: usize,
     ) -> Result<usize, StaticLayoutError> {
-        let GlobalLayout::Array {
+        let GlobalLayout::Aggregate {
             cells, base_head, ..
         } = self.global_layout(global)?
         else {
-            return Err(StaticLayoutError::ExpectedArray { global });
+            return Err(StaticLayoutError::ExpectedAggregate { global });
         };
         if index >= cells {
-            return Err(StaticLayoutError::ArrayElementOutOfBounds {
+            return Err(StaticLayoutError::AggregateElementOutOfBounds {
                 global,
                 index,
                 cells,
@@ -194,14 +203,45 @@ impl StaticLayout {
         )
     }
 
-    /// Absolute position of one field in a global array's portal prefix.
+    /// Absolute position of one field in a global aggregate's portal prefix.
+    pub fn aggregate_portal_field_position(
+        &self,
+        global: GlobalId,
+        field: AbiField,
+    ) -> Result<usize, StaticLayoutError> {
+        let base_head = self.aggregate_base_head(global)?;
+        checked_position(base_head, self.config, field.index())
+    }
+
+    /// Version-0 compatibility alias for [`Self::aggregate_base_head`].
+    pub fn array_base_head(&self, global: GlobalId) -> Result<usize, StaticLayoutError> {
+        self.aggregate_base_head(global).map_err(array_compat_error)
+    }
+
+    /// Version-0 compatibility alias for [`Self::aggregate_chunk_count`].
+    pub fn array_chunk_count(&self, global: GlobalId) -> Result<usize, StaticLayoutError> {
+        self.aggregate_chunk_count(global)
+            .map_err(array_compat_error)
+    }
+
+    /// Version-0 compatibility alias for [`Self::aggregate_element_position`].
+    pub fn array_element_position(
+        &self,
+        global: GlobalId,
+        index: usize,
+    ) -> Result<usize, StaticLayoutError> {
+        self.aggregate_element_position(global, index)
+            .map_err(array_compat_error)
+    }
+
+    /// Version-0 compatibility alias for [`Self::aggregate_portal_field_position`].
     pub fn array_portal_field_position(
         &self,
         global: GlobalId,
         field: AbiField,
     ) -> Result<usize, StaticLayoutError> {
-        let base_head = self.array_base_head(global)?;
-        checked_position(base_head, self.config, field.index())
+        self.aggregate_portal_field_position(global, field)
+            .map_err(array_compat_error)
     }
 
     fn global_layout(&self, global: GlobalId) -> Result<GlobalLayout, StaticLayoutError> {
@@ -230,6 +270,7 @@ fn validate_descriptors(descriptors: &[GlobalDescriptor]) -> Result<(), StaticLa
                     cells,
                 });
             }
+            ValueType::Aggregate { .. } => {}
             ValueType::Void => {
                 return Err(StaticLayoutError::InvalidGlobalType {
                     global: descriptor.id(),
@@ -239,6 +280,24 @@ fn validate_descriptors(descriptors: &[GlobalDescriptor]) -> Result<(), StaticLa
         }
     }
     Ok(())
+}
+
+fn array_compat_error(error: StaticLayoutError) -> StaticLayoutError {
+    match error {
+        StaticLayoutError::ExpectedAggregate { global } => {
+            StaticLayoutError::ExpectedArray { global }
+        }
+        StaticLayoutError::AggregateElementOutOfBounds {
+            global,
+            index,
+            cells,
+        } => StaticLayoutError::ArrayElementOutOfBounds {
+            global,
+            index,
+            cells,
+        },
+        other => other,
+    }
 }
 
 fn checked_chunks(cells: usize, config: AbiConfig) -> Result<usize, StaticLayoutError> {
@@ -285,6 +344,17 @@ pub enum StaticLayoutError {
     ExpectedArray {
         global: GlobalId,
     },
+    ExpectedAggregate {
+        global: GlobalId,
+    },
+    ZeroSizedAggregate {
+        global: GlobalId,
+    },
+    AggregateElementOutOfBounds {
+        global: GlobalId,
+        index: usize,
+        cells: usize,
+    },
     ArrayElementOutOfBounds {
         global: GlobalId,
         index: usize,
@@ -321,6 +391,23 @@ impl fmt::Display for StaticLayoutError {
             Self::ExpectedArray { global } => {
                 write!(f, "global {} is not an array", global.index())
             }
+            Self::ExpectedAggregate { global } => {
+                write!(f, "global {} is not an aggregate", global.index())
+            }
+            Self::ZeroSizedAggregate { global } => write!(
+                f,
+                "zero-sized global aggregate {} has no physical base or portal",
+                global.index()
+            ),
+            Self::AggregateElementOutOfBounds {
+                global,
+                index,
+                cells,
+            } => write!(
+                f,
+                "aggregate cell {index} is outside global {}'s {cells}-cell payload",
+                global.index()
+            ),
             Self::ArrayElementOutOfBounds {
                 global,
                 index,
@@ -533,5 +620,104 @@ mod tests {
             checked_position(usize::MAX, config, 0),
             Err(StaticLayoutError::SizeOverflow)
         );
+    }
+
+    #[test]
+    fn version_one_global_aggregate_crosses_legacy_and_chunk_boundaries() {
+        let global = GlobalId::new(4);
+        let descriptor = [GlobalDescriptor::aggregate(global, 299)];
+        for chunk_cells in [8, 16] {
+            let config = AbiConfig::new(chunk_cells).unwrap();
+            let layout = StaticLayout::new(config, &descriptor).unwrap();
+            let base = layout.aggregate_base_head(global).unwrap();
+
+            assert_eq!(
+                layout.aggregate_chunk_count(global),
+                Ok((PROTOCOL_CELLS + 299).div_ceil(chunk_cells))
+            );
+            for index in [0, 255, 256, 298] {
+                assert_eq!(
+                    layout.aggregate_element_position(global, index),
+                    checked_position(base, config, PROTOCOL_CELLS + index)
+                );
+            }
+            assert_eq!(
+                layout.aggregate_element_position(global, 299),
+                Err(StaticLayoutError::AggregateElementOutOfBounds {
+                    global,
+                    index: 299,
+                    cells: 299,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn zero_sized_global_aggregate_has_identity_without_storage() {
+        let empty = GlobalId::new(0);
+        let scalar = GlobalId::new(1);
+        let full = GlobalId::new(2);
+        for chunk_cells in [8, 16] {
+            let config = AbiConfig::new(chunk_cells).unwrap();
+            let mixed = StaticLayout::new(
+                config,
+                &[
+                    GlobalDescriptor::aggregate(empty, 0),
+                    GlobalDescriptor::cell(scalar),
+                    GlobalDescriptor::aggregate(full, 1),
+                ],
+            )
+            .unwrap();
+            let without_empty = StaticLayout::new(
+                config,
+                &[
+                    GlobalDescriptor::cell(scalar),
+                    GlobalDescriptor::aggregate(full, 1),
+                ],
+            )
+            .unwrap();
+
+            assert_eq!(mixed.aggregate_chunk_count(empty), Ok(0));
+            assert_eq!(mixed.anchor_head(), without_empty.anchor_head());
+            assert_eq!(
+                mixed.aggregate_base_head(full),
+                without_empty.aggregate_base_head(full)
+            );
+            assert_eq!(
+                mixed.aggregate_base_head(empty),
+                Err(StaticLayoutError::ZeroSizedAggregate { global: empty })
+            );
+            assert_eq!(
+                mixed.aggregate_portal_field_position(empty, AbiField::Value),
+                Err(StaticLayoutError::ZeroSizedAggregate { global: empty })
+            );
+            assert_eq!(
+                mixed.aggregate_element_position(empty, 0),
+                Err(StaticLayoutError::AggregateElementOutOfBounds {
+                    global: empty,
+                    index: 0,
+                    cells: 0,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_static_layout_checks_overflow_and_capacity() {
+        let global = GlobalId::new(0);
+        assert_eq!(
+            StaticLayout::new(
+                AbiConfig::default(),
+                &[GlobalDescriptor::aggregate(global, usize::MAX)]
+            ),
+            Err(StaticLayoutError::SizeOverflow)
+        );
+        assert!(matches!(
+            StaticLayout::new(
+                AbiConfig::default(),
+                &[GlobalDescriptor::aggregate(global, 30_000)]
+            ),
+            Err(StaticLayoutError::StaticAreaTooLarge { .. })
+        ));
     }
 }

@@ -25,8 +25,19 @@ fn repository_self_test_program_reports_all_ok() {
     assert_executes_for_both_chunk_sizes(
         include_str!("../../../test.bfc"),
         &[],
-        b"ok\nok\nok\nok\n",
+        b"ok\nok\nok\nok\nok\nok\nok\nok\n",
     );
+}
+
+#[test]
+fn repository_self_test_harness_aborts_after_the_first_failure() {
+    let source = include_str!("../../../test.bfc");
+    let failing = source.replace("check!(test8());", "check!(0); output('x');");
+    assert_ne!(
+        failing, source,
+        "the harness call used by this probe must exist"
+    );
+    assert_executes_for_both_chunk_sizes(&failing, &[], b"ok\nok\nok\nok\nok\nok\nok\nng\n");
 }
 
 #[test]

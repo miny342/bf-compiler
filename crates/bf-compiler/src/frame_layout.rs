@@ -1,11 +1,14 @@
 //! Physical layout of scalar activation frames for the continuation ABI.
 //!
 //! A frame is made from chunks containing one allocation flag followed by
-//! `chunk_cells` data cells. Value slots occupy the low-address end of the
-//! frame, an optional aggregate-return outbox is immediately below the ABI
-//! context, and the 16 protocol cells occupy the highest-address chunks.
+//! `chunk_cells` data cells. Aligned aggregate regions occupy the low-address
+//! end; scalar value slots are kept next to the optional aggregate-return
+//! outbox and ABI context so large aggregates do not make ordinary scalar
+//! operations expensive.
 
-use crate::continuation_ir::{FrameArrayDescriptor, FrameArrayId, FrameSlot};
+use crate::continuation_ir::{
+    FrameAggregateDescriptor, FrameAggregateId, FrameArrayDescriptor, FrameArrayId, FrameSlot,
+};
 use std::error::Error;
 use std::fmt;
 
@@ -126,16 +129,16 @@ pub struct FrameLayout {
     value_cells: usize,
     outbox_cells: usize,
     value_chunks: usize,
-    frame_arrays: Vec<FrameArrayLayout>,
-    array_chunks: usize,
+    frame_aggregates: Vec<FrameAggregateLayout>,
+    aggregate_chunks: usize,
     outbox_chunks: usize,
     context_chunks: usize,
     frame_chunks: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FrameArrayLayout {
-    descriptor: FrameArrayDescriptor,
+struct FrameAggregateLayout {
+    descriptor: FrameAggregateDescriptor,
     base_chunk: usize,
     chunks: usize,
 }
@@ -148,7 +151,7 @@ impl FrameLayout {
         value_cells: usize,
         outbox_cells: usize,
     ) -> Result<Self, FrameLayoutError> {
-        Self::with_arrays(config, value_cells, &[], outbox_cells)
+        Self::with_aggregates(config, value_cells, &[], outbox_cells)
     }
 
     /// Lay out scalar slots, aligned array regions, an aggregate outbox, and
@@ -159,9 +162,6 @@ impl FrameLayout {
         frame_arrays: &[FrameArrayDescriptor],
         outbox_cells: usize,
     ) -> Result<Self, FrameLayoutError> {
-        let value_chunks = checked_chunks(value_cells, config)?;
-        let mut array_chunks = 0usize;
-        let mut array_layouts = Vec::with_capacity(frame_arrays.len());
         for descriptor in frame_arrays {
             if !(1..=256).contains(&descriptor.cells()) {
                 return Err(FrameLayoutError::InvalidArrayLength {
@@ -169,36 +169,58 @@ impl FrameLayout {
                     cells: descriptor.cells(),
                 });
             }
-            if array_layouts
+        }
+        Self::with_aggregates(config, value_cells, frame_arrays, outbox_cells)
+            .map_err(array_compat_error)
+    }
+
+    /// Lay out aligned Version-1 aggregate regions, scalar slots, an aggregate
+    /// outbox, and the common dispatch context in that order.
+    ///
+    /// A zero-cell aggregate keeps its descriptor identity but consumes no
+    /// portal or payload chunks.
+    pub fn with_aggregates(
+        config: AbiConfig,
+        value_cells: usize,
+        frame_aggregates: &[FrameAggregateDescriptor],
+        outbox_cells: usize,
+    ) -> Result<Self, FrameLayoutError> {
+        let value_chunks = checked_chunks(value_cells, config)?;
+        let mut aggregate_chunks = 0usize;
+        let mut aggregate_layouts = Vec::with_capacity(frame_aggregates.len());
+        for descriptor in frame_aggregates {
+            if aggregate_layouts
                 .iter()
-                .any(|layout: &FrameArrayLayout| layout.descriptor.id() == descriptor.id())
+                .any(|layout: &FrameAggregateLayout| layout.descriptor.id() == descriptor.id())
             {
-                return Err(FrameLayoutError::DuplicateFrameArray {
-                    array: descriptor.id(),
+                return Err(FrameLayoutError::DuplicateFrameAggregate {
+                    aggregate: descriptor.id(),
                 });
             }
-            let chunks = checked_chunks(
-                PROTOCOL_CELLS
-                    .checked_add(descriptor.cells())
-                    .ok_or(FrameLayoutError::SizeOverflow)?,
-                config,
-            )?;
-            let base_chunk = value_chunks
-                .checked_add(array_chunks)
-                .ok_or(FrameLayoutError::SizeOverflow)?;
-            array_layouts.push(FrameArrayLayout {
+            let chunks = if descriptor.cells() == 0 {
+                0
+            } else {
+                checked_chunks(
+                    PROTOCOL_CELLS
+                        .checked_add(descriptor.cells())
+                        .ok_or(FrameLayoutError::SizeOverflow)?,
+                    config,
+                )?
+            };
+            let base_chunk = aggregate_chunks;
+            aggregate_layouts.push(FrameAggregateLayout {
                 descriptor: *descriptor,
                 base_chunk,
                 chunks,
             });
-            array_chunks = array_chunks
+            aggregate_chunks = aggregate_chunks
                 .checked_add(chunks)
                 .ok_or(FrameLayoutError::SizeOverflow)?;
         }
         let outbox_chunks = checked_chunks(outbox_cells, config)?;
         let context_chunks = config.portal_chunks();
         let frame_chunks = value_chunks
-            .checked_add(array_chunks)
+            .checked_add(aggregate_chunks)
             .and_then(|chunks| chunks.checked_add(outbox_chunks))
             .and_then(|chunks| chunks.checked_add(context_chunks))
             .ok_or(FrameLayoutError::SizeOverflow)?;
@@ -208,8 +230,8 @@ impl FrameLayout {
             value_cells,
             outbox_cells,
             value_chunks,
-            frame_arrays: array_layouts,
-            array_chunks,
+            frame_aggregates: aggregate_layouts,
+            aggregate_chunks,
             outbox_chunks,
             context_chunks,
             frame_chunks,
@@ -251,7 +273,12 @@ impl FrameLayout {
     }
 
     pub const fn array_chunks(&self) -> usize {
-        self.array_chunks
+        self.aggregate_chunks
+    }
+
+    /// Total chunks occupied by frame-owned aggregate regions.
+    pub const fn aggregate_chunks(&self) -> usize {
+        self.aggregate_chunks
     }
 
     pub const fn context_chunks(&self) -> usize {
@@ -296,74 +323,144 @@ impl FrameLayout {
             });
         }
 
-        let chunks_below_context = self.value_chunks + self.array_chunks + self.outbox_chunks;
+        let chunks_below_context = self.value_chunks + self.outbox_chunks;
         Ok(
             -(chunks_below_context as isize * self.config.stride() as isize)
                 + self.config.try_logical_offset_from_head(index)? as isize,
         )
     }
 
-    /// Offset of an aligned array's base head from the dispatch-context base.
-    pub fn array_base_offset(&self, array: FrameArrayId) -> Result<isize, FrameLayoutError> {
-        let layout = self.array_layout(array)?;
-        let chunks_below_context = self.value_chunks + self.array_chunks + self.outbox_chunks;
+    /// Offset of an aligned aggregate's base head from the dispatch-context base.
+    pub fn aggregate_base_offset(
+        &self,
+        aggregate: FrameAggregateId,
+    ) -> Result<isize, FrameLayoutError> {
+        let layout = self.aggregate_layout(aggregate)?;
+        if layout.descriptor.cells() == 0 {
+            return Err(FrameLayoutError::ZeroSizedFrameAggregate { aggregate });
+        }
+        let chunks_below_context = self.value_chunks + self.aggregate_chunks + self.outbox_chunks;
         Ok(-((chunks_below_context - layout.base_chunk) as isize * self.config.stride() as isize))
     }
 
-    pub fn array_chunk_count(&self, array: FrameArrayId) -> Result<usize, FrameLayoutError> {
-        Ok(self.array_layout(array)?.chunks)
+    pub fn aggregate_chunk_count(
+        &self,
+        aggregate: FrameAggregateId,
+    ) -> Result<usize, FrameLayoutError> {
+        Ok(self.aggregate_layout(aggregate)?.chunks)
     }
 
-    /// Offset of one payload element from the dispatch-context base.
+    /// Offset of one aggregate payload cell from the dispatch-context base.
+    pub fn aggregate_element_offset(
+        &self,
+        aggregate: FrameAggregateId,
+        index: usize,
+    ) -> Result<isize, FrameLayoutError> {
+        let layout = self.aggregate_layout(aggregate)?;
+        if index >= layout.descriptor.cells() {
+            return Err(FrameLayoutError::AggregateElementOutOfBounds {
+                aggregate,
+                index,
+                cells: layout.descriptor.cells(),
+            });
+        }
+        Ok(self.aggregate_base_offset(aggregate)?
+            + self.config.try_logical_offset_from_head(
+                PROTOCOL_CELLS
+                    .checked_add(index)
+                    .ok_or(FrameLayoutError::SizeOverflow)?,
+            )? as isize)
+    }
+
+    /// Offset of a protocol field in an aligned aggregate portal.
+    pub fn aggregate_portal_offset(
+        &self,
+        aggregate: FrameAggregateId,
+        field: AbiField,
+    ) -> Result<isize, FrameLayoutError> {
+        Ok(self.aggregate_base_offset(aggregate)?
+            + self.config.try_logical_offset_from_head(field.index())? as isize)
+    }
+
+    pub fn aggregate_base_offset_from_frontier(
+        &self,
+        aggregate: FrameAggregateId,
+    ) -> Result<isize, FrameLayoutError> {
+        Ok(self.context_offset_from_frontier() + self.aggregate_base_offset(aggregate)?)
+    }
+
+    pub fn aggregate_element_offset_from_frontier(
+        &self,
+        aggregate: FrameAggregateId,
+        index: usize,
+    ) -> Result<isize, FrameLayoutError> {
+        Ok(
+            self.context_offset_from_frontier()
+                + self.aggregate_element_offset(aggregate, index)?,
+        )
+    }
+
+    fn aggregate_layout(
+        &self,
+        aggregate: FrameAggregateId,
+    ) -> Result<&FrameAggregateLayout, FrameLayoutError> {
+        self.frame_aggregates
+            .iter()
+            .find(|layout| layout.descriptor.id() == aggregate)
+            .ok_or(FrameLayoutError::UnknownFrameAggregate { aggregate })
+    }
+
+    /// Version-0 compatibility alias for [`Self::aggregate_base_offset`].
+    pub fn array_base_offset(&self, array: FrameArrayId) -> Result<isize, FrameLayoutError> {
+        self.aggregate_base_offset(array)
+            .map_err(array_compat_error)
+    }
+
+    /// Version-0 compatibility alias for [`Self::aggregate_chunk_count`].
+    pub fn array_chunk_count(&self, array: FrameArrayId) -> Result<usize, FrameLayoutError> {
+        self.aggregate_chunk_count(array)
+            .map_err(array_compat_error)
+    }
+
+    /// Version-0 compatibility alias for [`Self::aggregate_element_offset`].
     pub fn array_element_offset(
         &self,
         array: FrameArrayId,
         index: usize,
     ) -> Result<isize, FrameLayoutError> {
-        let layout = self.array_layout(array)?;
-        if index >= layout.descriptor.cells() {
-            return Err(FrameLayoutError::ArrayElementOutOfBounds {
-                array,
-                index,
-                cells: layout.descriptor.cells(),
-            });
-        }
-        Ok(self.array_base_offset(array)?
-            + self
-                .config
-                .try_logical_offset_from_head(PROTOCOL_CELLS + index)? as isize)
+        self.aggregate_element_offset(array, index)
+            .map_err(array_compat_error)
     }
 
-    /// Offset of a protocol field in an aligned array portal.
+    /// Version-0 compatibility alias for [`Self::aggregate_portal_offset`].
     pub fn array_portal_offset(
         &self,
         array: FrameArrayId,
         field: AbiField,
     ) -> Result<isize, FrameLayoutError> {
-        Ok(self.array_base_offset(array)?
-            + self.config.try_logical_offset_from_head(field.index())? as isize)
+        self.aggregate_portal_offset(array, field)
+            .map_err(array_compat_error)
     }
 
+    /// Version-0 compatibility alias for
+    /// [`Self::aggregate_base_offset_from_frontier`].
     pub fn array_base_offset_from_frontier(
         &self,
         array: FrameArrayId,
     ) -> Result<isize, FrameLayoutError> {
-        Ok(self.context_offset_from_frontier() + self.array_base_offset(array)?)
+        self.aggregate_base_offset_from_frontier(array)
+            .map_err(array_compat_error)
     }
 
+    /// Version-0 compatibility alias for
+    /// [`Self::aggregate_element_offset_from_frontier`].
     pub fn array_element_offset_from_frontier(
         &self,
         array: FrameArrayId,
         index: usize,
     ) -> Result<isize, FrameLayoutError> {
-        Ok(self.context_offset_from_frontier() + self.array_element_offset(array, index)?)
-    }
-
-    fn array_layout(&self, array: FrameArrayId) -> Result<&FrameArrayLayout, FrameLayoutError> {
-        self.frame_arrays
-            .iter()
-            .find(|layout| layout.descriptor.id() == array)
-            .ok_or(FrameLayoutError::UnknownFrameArray { array })
+        self.aggregate_element_offset_from_frontier(array, index)
+            .map_err(array_compat_error)
     }
 
     /// Offset of an outbox cell from the dispatch-context base head.
@@ -449,12 +546,34 @@ impl FrameLayout {
 
     fn regions_do_not_overlap(&self) -> bool {
         let context_start =
-            (self.value_chunks + self.array_chunks + self.outbox_chunks) * self.config.stride();
+            (self.value_chunks + self.aggregate_chunks + self.outbox_chunks) * self.config.stride();
         let frame_end = self.frame_chunks * self.config.stride();
         context_start < frame_end
-            && (self.value_chunks + self.array_chunks) * self.config.stride() <= context_start
+            && (self.value_chunks + self.aggregate_chunks) * self.config.stride() <= context_start
             && self.outbox_chunks * self.config.stride()
-                <= context_start - (self.value_chunks + self.array_chunks) * self.config.stride()
+                <= context_start
+                    - (self.value_chunks + self.aggregate_chunks) * self.config.stride()
+    }
+}
+
+fn array_compat_error(error: FrameLayoutError) -> FrameLayoutError {
+    match error {
+        FrameLayoutError::DuplicateFrameAggregate { aggregate } => {
+            FrameLayoutError::DuplicateFrameArray { array: aggregate }
+        }
+        FrameLayoutError::UnknownFrameAggregate { aggregate } => {
+            FrameLayoutError::UnknownFrameArray { array: aggregate }
+        }
+        FrameLayoutError::AggregateElementOutOfBounds {
+            aggregate,
+            index,
+            cells,
+        } => FrameLayoutError::ArrayElementOutOfBounds {
+            array: aggregate,
+            index,
+            cells,
+        },
+        other => other,
     }
 }
 
@@ -473,6 +592,20 @@ pub enum FrameLayoutError {
     SizeOverflow,
     InvalidArrayLength {
         array: FrameArrayId,
+        cells: usize,
+    },
+    DuplicateFrameAggregate {
+        aggregate: FrameAggregateId,
+    },
+    UnknownFrameAggregate {
+        aggregate: FrameAggregateId,
+    },
+    ZeroSizedFrameAggregate {
+        aggregate: FrameAggregateId,
+    },
+    AggregateElementOutOfBounds {
+        aggregate: FrameAggregateId,
+        index: usize,
         cells: usize,
     },
     DuplicateFrameArray {
@@ -519,6 +652,28 @@ impl fmt::Display for FrameLayoutError {
                 f,
                 "frame array {} must contain between 1 and 256 cells, got {cells}",
                 array.index()
+            ),
+            Self::DuplicateFrameAggregate { aggregate } => write!(
+                f,
+                "frame aggregate {} occurs more than once",
+                aggregate.index()
+            ),
+            Self::UnknownFrameAggregate { aggregate } => {
+                write!(f, "frame aggregate {} does not exist", aggregate.index())
+            }
+            Self::ZeroSizedFrameAggregate { aggregate } => write!(
+                f,
+                "zero-sized frame aggregate {} has no physical base or portal",
+                aggregate.index()
+            ),
+            Self::AggregateElementOutOfBounds {
+                aggregate,
+                index,
+                cells,
+            } => write!(
+                f,
+                "element {index} is outside frame aggregate {} with {cells} cells",
+                aggregate.index()
             ),
             Self::DuplicateFrameArray { array } => {
                 write!(f, "frame array {} occurs more than once", array.index())
@@ -657,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn aligned_arrays_fit_between_scalar_slots_and_outbox_for_d16() {
+    fn aligned_arrays_fit_below_near_context_scalars_for_d16() {
         let first = FrameArrayId::new(0);
         let second = FrameArrayId::new(1);
         let layout = FrameLayout::with_arrays(
@@ -678,12 +833,12 @@ mod tests {
         assert_eq!(layout.outbox_chunks(), 2);
         assert_eq!(layout.context_chunks(), 1);
         assert_eq!(layout.frame_chunks(), 9);
-        assert_eq!(layout.frame_offset(FrameSlot::new(0)), -135);
-        assert_eq!(layout.array_base_offset(first), Ok(-119));
-        assert_eq!(layout.array_portal_offset(first, AbiField::Value), Ok(-118));
-        assert_eq!(layout.array_element_offset(first, 0), Ok(-101));
-        assert_eq!(layout.array_element_offset(first, 16), Ok(-84));
-        assert_eq!(layout.array_base_offset(second), Ok(-68));
+        assert_eq!(layout.frame_offset(FrameSlot::new(0)), -50);
+        assert_eq!(layout.array_base_offset(first), Ok(-136));
+        assert_eq!(layout.array_portal_offset(first, AbiField::Value), Ok(-135));
+        assert_eq!(layout.array_element_offset(first, 0), Ok(-118));
+        assert_eq!(layout.array_element_offset(first, 16), Ok(-101));
+        assert_eq!(layout.array_base_offset(second), Ok(-85));
         assert_eq!(layout.outbox_offset(0), Ok(-16));
     }
 
@@ -700,13 +855,13 @@ mod tests {
 
         assert_eq!(layout.array_chunk_count(array), Ok(4));
         assert_eq!(layout.frame_chunks(), 9);
-        assert_eq!(layout.frame_offset(FrameSlot::new(0)), -62);
-        assert_eq!(layout.array_base_offset(array), Ok(-54));
-        assert_eq!(layout.array_portal_offset(array, AbiField::Branch), Ok(-44));
-        assert_eq!(layout.array_element_offset(array, 0), Ok(-35));
-        assert_eq!(layout.array_element_offset(array, 8), Ok(-26));
-        assert_eq!(layout.array_base_offset_from_frontier(array), Ok(-72));
-        assert_eq!(layout.array_element_offset_from_frontier(array, 8), Ok(-44));
+        assert_eq!(layout.frame_offset(FrameSlot::new(0)), -26);
+        assert_eq!(layout.array_base_offset(array), Ok(-63));
+        assert_eq!(layout.array_portal_offset(array, AbiField::Branch), Ok(-53));
+        assert_eq!(layout.array_element_offset(array, 0), Ok(-44));
+        assert_eq!(layout.array_element_offset(array, 8), Ok(-35));
+        assert_eq!(layout.array_base_offset_from_frontier(array), Ok(-81));
+        assert_eq!(layout.array_element_offset_from_frontier(array, 8), Ok(-53));
     }
 
     #[test]
@@ -794,5 +949,128 @@ mod tests {
     fn rejects_a_frame_that_cannot_fit_even_without_static_globals() {
         let error = FrameLayout::new(AbiConfig::new(16).unwrap(), 28_224, 0).unwrap_err();
         assert!(matches!(error, FrameLayoutError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn version_one_aggregate_crosses_legacy_and_chunk_boundaries() {
+        let aggregate = FrameAggregateId::new(3);
+        for chunk_cells in [8, 16] {
+            let config = AbiConfig::new(chunk_cells).unwrap();
+            let layout = FrameLayout::with_aggregates(
+                config,
+                0,
+                &[FrameAggregateDescriptor::new(aggregate, 299)],
+                0,
+            )
+            .unwrap();
+            let base = layout.aggregate_base_offset(aggregate).unwrap();
+
+            assert_eq!(
+                layout.aggregate_chunk_count(aggregate),
+                Ok((PROTOCOL_CELLS + 299).div_ceil(chunk_cells))
+            );
+            for index in [0, 255, 256, 298] {
+                assert_eq!(
+                    layout.aggregate_element_offset(aggregate, index),
+                    Ok(base
+                        + config
+                            .try_logical_offset_from_head(PROTOCOL_CELLS + index)
+                            .unwrap() as isize)
+                );
+            }
+            assert_eq!(
+                layout.aggregate_element_offset(aggregate, 299),
+                Err(FrameLayoutError::AggregateElementOutOfBounds {
+                    aggregate,
+                    index: 299,
+                    cells: 299,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn zero_sized_frame_aggregate_has_identity_without_storage() {
+        let empty = FrameAggregateId::new(0);
+        let full = FrameAggregateId::new(1);
+        for chunk_cells in [8, 16] {
+            let config = AbiConfig::new(chunk_cells).unwrap();
+            let mixed = FrameLayout::with_aggregates(
+                config,
+                2,
+                &[
+                    FrameAggregateDescriptor::new(empty, 0),
+                    FrameAggregateDescriptor::new(full, 1),
+                ],
+                0,
+            )
+            .unwrap();
+            let without_empty = FrameLayout::with_aggregates(
+                config,
+                2,
+                &[FrameAggregateDescriptor::new(full, 1)],
+                0,
+            )
+            .unwrap();
+
+            assert_eq!(mixed.aggregate_chunk_count(empty), Ok(0));
+            assert_eq!(mixed.aggregate_chunks(), without_empty.aggregate_chunks());
+            assert_eq!(mixed.frame_chunks(), without_empty.frame_chunks());
+            assert_eq!(
+                mixed.aggregate_base_offset(full),
+                without_empty.aggregate_base_offset(full)
+            );
+            assert_eq!(
+                mixed.aggregate_base_offset(empty),
+                Err(FrameLayoutError::ZeroSizedFrameAggregate { aggregate: empty })
+            );
+            assert_eq!(
+                mixed.aggregate_portal_offset(empty, AbiField::Value),
+                Err(FrameLayoutError::ZeroSizedFrameAggregate { aggregate: empty })
+            );
+            assert_eq!(
+                mixed.aggregate_element_offset(empty, 0),
+                Err(FrameLayoutError::AggregateElementOutOfBounds {
+                    aggregate: empty,
+                    index: 0,
+                    cells: 0,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_layout_checks_overflow_capacity_and_duplicate_ids() {
+        let aggregate = FrameAggregateId::new(0);
+        assert_eq!(
+            FrameLayout::with_aggregates(
+                AbiConfig::default(),
+                0,
+                &[FrameAggregateDescriptor::new(aggregate, usize::MAX)],
+                0,
+            ),
+            Err(FrameLayoutError::SizeOverflow)
+        );
+        assert!(matches!(
+            FrameLayout::with_aggregates(
+                AbiConfig::default(),
+                0,
+                &[FrameAggregateDescriptor::new(aggregate, 30_000)],
+                0,
+            ),
+            Err(FrameLayoutError::FrameTooLarge { .. })
+        ));
+        assert_eq!(
+            FrameLayout::with_aggregates(
+                AbiConfig::default(),
+                0,
+                &[
+                    FrameAggregateDescriptor::new(aggregate, 0),
+                    FrameAggregateDescriptor::new(aggregate, 1),
+                ],
+                0,
+            ),
+            Err(FrameLayoutError::DuplicateFrameAggregate { aggregate })
+        );
     }
 }

@@ -4,9 +4,63 @@
 // ok
 // ok
 // ok
+// ok
+// ok
+// ok
+// ok
 
 cell expected_collatz_steps = collatz_steps(13);
 cell[6] shared_values;
+cell[] ok_message = "ok\n";
+cell[] ng_message = "ng\n";
+
+enum TokenKind {
+    Empty,
+    Word = 7,
+    End
+}
+
+struct Span {
+    cell start;
+    cell length;
+}
+
+struct Token {
+    TokenKind kind;
+    Span span;
+    cell[3] bytes;
+}
+
+struct Wide {
+    cell[150] first;
+    cell[150] second;
+}
+
+struct Zero {
+    cell[0] bytes;
+}
+
+Wide[2] wide_values;
+
+// Nested statement macros provide the tiny test harness. Macro locals are
+// hygienic, and the message names resolve at the macro definition site.
+macro print(bytes) {
+    cell index;
+    while (index < len(bytes)) {
+        output(bytes[index]);
+        index += 1;
+    }
+}
+
+macro check(condition) {
+    cell passed = condition;
+    if (passed) {
+        print!(ok_message);
+    } else {
+        print!(ng_message);
+        abort();
+    }
+}
 
 cell is_even(cell value) {
     while (value >= 2) {
@@ -81,6 +135,24 @@ cell[6] bubble_sort(cell[6] values) {
     return values;
 }
 
+Token advance(Token token, cell amount) {
+    token.kind = TokenKind::Word;
+    token.span.start += amount;
+    token.span.length = 3;
+    token.bytes[0] = 'B';
+    token.bytes[1] = 'F';
+    token.bytes[2] = 'C';
+    return token;
+}
+
+cell[3] echo_bytes(cell[3] bytes) {
+    return bytes;
+}
+
+Zero identity_zero(Zero value) {
+    return value;
+}
+
 cell test1() {
     // Iteration, nested branches, forward global initialization, and calls.
     return expected_collatz_steps == 9 && collatz_steps(19) == 20;
@@ -125,20 +197,58 @@ cell test4() {
         && sorted[3] == 3 && sorted[4] == 4 && sorted[5] == 5;
 }
 
-void report(cell passed) {
-    if (passed) {
-        output('o');
-        output('k');
-    } else {
-        output('n');
-        output('g');
-    }
-    output(10);
+cell test5() {
+    // Nominal enum/struct values, nested fields, and method-call sugar.
+    Token original;
+    Token advanced = original.advance(4);
+    return original.kind == TokenKind::Empty
+        && advanced.kind == TokenKind::Word
+        && advanced.span.start == 4
+        && advanced.span.length == 3
+        && advanced.bytes[0] == 'B'
+        && advanced.bytes[1] == 'F'
+        && advanced.bytes[2] == 'C';
+}
+
+cell test6() {
+    // Strings are fixed cell arrays with no implicit terminator. They can be
+    // passed and returned as ordinary aggregate values, including NUL bytes.
+    cell[] embedded = "A\0B";
+    cell[3] returned = echo_bytes("C\0D");
+    return len(embedded) == 3
+        && embedded[0] == 'A' && embedded[1] == 0 && embedded[2] == 'B'
+        && returned[0] == 'C' && returned[1] == 0 && returned[2] == 'D';
+}
+
+cell test7() {
+    // `Wide` occupies 300 logical cells. This dynamic projection reaches
+    // offset 1 * 300 + 150 = 450 through the 16-bit aggregate portal.
+    cell index = 1;
+    wide_values[index].second[0] = 77;
+    return wide_values[0].second[0] == 0
+        && wide_values[index].second[0] == 77;
+}
+
+cell test8() {
+    // Zero-sized aggregates retain type identity but need no tape storage.
+    Zero first;
+    Zero second = identity_zero(first);
+    first = second;
+    return len(first.bytes) == 0;
 }
 
 void main() {
-    report(test1());
-    report(test2());
-    report(test3());
-    report(test4());
+    // These names intentionally collide with macro locals/free names. Hygiene
+    // keeps `check!` bound to its own local and the global message arrays.
+    cell passed = 99;
+    cell[1] ok_message;
+
+    check!(test1());
+    check!(test2());
+    check!(test3());
+    check!(test4());
+    check!(test5());
+    check!(test6());
+    check!(test7());
+    check!(test8());
 }

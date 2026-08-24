@@ -5,3 +5,9 @@ members = [
     "crates/bf-interpreter",
 ]
 resolver = "2"
+
+# Generated Brainfuck integration tests intentionally execute millions of
+# single-byte VM instructions. Keep the compiler under the normal test profile
+# while optimizing the interpreter dependency so `cargo test` remains usable.
+[profile.test.package.bf-interpreter]
+opt-level = 3

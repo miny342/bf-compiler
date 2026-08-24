@@ -17,6 +17,7 @@ mod frontend;
 mod hir;
 mod ir;
 mod lexer;
+mod macro_expansion;
 mod parser;
 mod semantic;
 mod static_layout;
@@ -28,10 +29,11 @@ pub use bf_ir::{BfInstruction, BfProgram};
 pub use bf_optimizer::{BfOptimizationStats, optimize_bf, optimize_bf_with_stats};
 pub use codegen::{CodegenError, compile, lower};
 pub use continuation_ir::{
-    Address, ArrayRegion, Continuation, ContinuationId, ContinuationIrError, ContinuationProgram,
-    FrameArrayDescriptor, FrameArrayId, FrameInstruction, FrameSlot, FrameTransferTarget,
-    FunctionDescriptor, FunctionId, GlobalDescriptor, GlobalId, ParameterLocation, Terminator,
-    ValueOperand, ValueType,
+    Address, AggregateRegion, ArrayRegion, Continuation, ContinuationId, ContinuationIrError,
+    ContinuationProgram, FrameAggregateDescriptor, FrameAggregateId, FrameArrayDescriptor,
+    FrameArrayId, FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId,
+    GlobalDescriptor, GlobalId, LogicalOffset, ParameterLocation, Terminator, ValueOperand,
+    ValueType,
 };
 pub use frame_layout::{
     AbiConfig, AbiField, DEFAULT_CHUNK_CELLS, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,

@@ -9,6 +9,9 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU16;
 
+/// The 16-bit logical offset can address this many payload cells.
+const MAX_AGGREGATE_CELLS: usize = u16::MAX as usize + 1;
+
 /// The stable identity of a function in a continuation program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FunctionId(usize);
@@ -51,11 +54,11 @@ impl GlobalId {
     }
 }
 
-/// The identity of an aligned array region in the current activation frame.
+/// The identity of an aligned aggregate region in the current activation frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FrameArrayId(usize);
+pub struct FrameAggregateId(usize);
 
-impl FrameArrayId {
+impl FrameAggregateId {
     pub const fn new(index: usize) -> Self {
         Self(index)
     }
@@ -64,6 +67,9 @@ impl FrameArrayId {
         self.0
     }
 }
+
+/// Version-0 compatibility name for a frame aggregate containing `cell[N]`.
+pub type FrameArrayId = FrameAggregateId;
 
 /// A nonzero dispatcher identity.
 ///
@@ -89,7 +95,12 @@ impl ContinuationId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueType {
     Cell,
+    /// Version-0 fixed-length `cell` array.
     Array(usize),
+    /// A Version-1 flattened aggregate payload.
+    Aggregate {
+        cells: usize,
+    },
     Void,
 }
 
@@ -113,6 +124,10 @@ impl GlobalDescriptor {
         Self::new(id, ValueType::Array(cells))
     }
 
+    pub const fn aggregate(id: GlobalId, cells: usize) -> Self {
+        Self::new(id, ValueType::Aggregate { cells })
+    }
+
     pub const fn id(self) -> GlobalId {
         self.id
     }
@@ -122,19 +137,19 @@ impl GlobalDescriptor {
     }
 }
 
-/// An aligned array region owned by one function activation.
+/// An aligned aggregate region owned by one function activation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FrameArrayDescriptor {
-    id: FrameArrayId,
+pub struct FrameAggregateDescriptor {
+    id: FrameAggregateId,
     cells: usize,
 }
 
-impl FrameArrayDescriptor {
-    pub const fn new(id: FrameArrayId, cells: usize) -> Self {
+impl FrameAggregateDescriptor {
+    pub const fn new(id: FrameAggregateId, cells: usize) -> Self {
         Self { id, cells }
     }
 
-    pub const fn id(self) -> FrameArrayId {
+    pub const fn id(self) -> FrameAggregateId {
         self.id
     }
 
@@ -143,13 +158,32 @@ impl FrameArrayDescriptor {
     }
 }
 
+/// Version-0 compatibility name for an aggregate descriptor.
+pub type FrameArrayDescriptor = FrameAggregateDescriptor;
+
 /// An aggregate region visible while the current function is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ArrayRegion {
-    Frame(FrameArrayId),
+pub enum AggregateRegion {
+    Frame(FrameAggregateId),
     Global(GlobalId),
     /// The current activation's caller-owned aggregate result inbox.
     Outbox,
+}
+
+/// Version-0 compatibility name for an aggregate region.
+pub type ArrayRegion = AggregateRegion;
+
+/// A compiler-owned little-endian 16-bit logical payload offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LogicalOffset {
+    pub low: Address,
+    pub high: Address,
+}
+
+impl LogicalOffset {
+    pub const fn new(low: Address, high: Address) -> Self {
+        Self { low, high }
+    }
 }
 
 /// An address visible to frame-relative instructions.
@@ -160,7 +194,10 @@ pub enum Address {
     /// A scalar object in static storage.
     Global(GlobalId),
     /// A statically indexed cell within an aggregate region.
-    ArrayElement { array: ArrayRegion, index: usize },
+    ArrayElement {
+        array: AggregateRegion,
+        index: usize,
+    },
     /// The scalar value cell in the ABI context.
     AbiValue,
 }
@@ -170,13 +207,31 @@ pub enum Address {
 pub enum ParameterLocation {
     Cell(FrameSlot),
     Array(FrameArrayId),
+    Aggregate(FrameAggregateId),
 }
 
 /// A scalar or aggregate value passed across a continuation boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueOperand {
     Cell(Address),
-    Array(ArrayRegion),
+    /// Version-0 whole-array operand.
+    Array(AggregateRegion),
+    /// A constant subrange within a flattened aggregate region.
+    Aggregate {
+        region: AggregateRegion,
+        offset: usize,
+        cells: usize,
+    },
+}
+
+impl ValueOperand {
+    pub const fn aggregate(region: AggregateRegion, cells: usize) -> Self {
+        Self::Aggregate {
+            region,
+            offset: 0,
+            cells,
+        }
+    }
 }
 
 /// One destination of a destructive [`FrameInstruction::Transfer`].
@@ -207,8 +262,8 @@ pub enum FrameInstruction {
     /// Copy the first `cells` payload cells without copying protocol cells,
     /// chunk heads, or padding.
     AggregateCopy {
-        src: ArrayRegion,
-        dst: ArrayRegion,
+        src: AggregateRegion,
+        dst: AggregateRegion,
         cells: usize,
     },
     Input {
@@ -241,7 +296,7 @@ pub struct FunctionDescriptor {
     parameter_locations: Vec<ParameterLocation>,
     scalar_parameters: Vec<FrameSlot>,
     frame_slots: usize,
-    frame_arrays: Vec<FrameArrayDescriptor>,
+    frame_aggregates: Vec<FrameAggregateDescriptor>,
     outbox_cells: usize,
     return_type: ValueType,
     entry: ContinuationId,
@@ -265,7 +320,7 @@ impl FunctionDescriptor {
             parameter_locations,
             scalar_parameters: parameters,
             frame_slots,
-            frame_arrays: Vec::new(),
+            frame_aggregates: Vec::new(),
             outbox_cells: 0,
             return_type,
             entry,
@@ -287,7 +342,7 @@ impl FunctionDescriptor {
             .iter()
             .filter_map(|parameter| match parameter {
                 ParameterLocation::Cell(slot) => Some(*slot),
-                ParameterLocation::Array(_) => None,
+                ParameterLocation::Array(_) | ParameterLocation::Aggregate(_) => None,
             })
             .collect();
         Self {
@@ -295,11 +350,33 @@ impl FunctionDescriptor {
             parameter_locations: parameters,
             scalar_parameters,
             frame_slots,
-            frame_arrays,
+            frame_aggregates: frame_arrays,
             outbox_cells,
             return_type,
             entry,
         }
+    }
+
+    /// Version-1 constructor using aggregate terminology.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_aggregates(
+        id: FunctionId,
+        parameters: Vec<ParameterLocation>,
+        frame_slots: usize,
+        frame_aggregates: Vec<FrameAggregateDescriptor>,
+        outbox_cells: usize,
+        return_type: ValueType,
+        entry: ContinuationId,
+    ) -> Self {
+        Self::new_typed(
+            id,
+            parameters,
+            frame_slots,
+            frame_aggregates,
+            outbox_cells,
+            return_type,
+            entry,
+        )
     }
 
     pub const fn id(&self) -> FunctionId {
@@ -319,11 +396,23 @@ impl FunctionDescriptor {
     }
 
     pub fn frame_arrays(&self) -> &[FrameArrayDescriptor] {
-        &self.frame_arrays
+        &self.frame_aggregates
     }
 
     pub fn frame_array(&self, id: FrameArrayId) -> Option<&FrameArrayDescriptor> {
-        self.frame_arrays.iter().find(|array| array.id == id)
+        self.frame_aggregates
+            .iter()
+            .find(|aggregate| aggregate.id == id)
+    }
+
+    pub fn frame_aggregates(&self) -> &[FrameAggregateDescriptor] {
+        &self.frame_aggregates
+    }
+
+    pub fn frame_aggregate(&self, id: FrameAggregateId) -> Option<&FrameAggregateDescriptor> {
+        self.frame_aggregates
+            .iter()
+            .find(|aggregate| aggregate.id == id)
     }
 
     pub const fn outbox_cells(&self) -> usize {
@@ -377,6 +466,26 @@ pub enum Terminator {
         value: Address,
         return_to: ContinuationId,
     },
+    /// Load a dynamically selected flattened subobject through an aggregate
+    /// portal. `cells` consecutive payload cells are copied atomically from
+    /// the runtime logical offset into `destination`.
+    AggregateLoad {
+        source: AggregateRegion,
+        offset: LogicalOffset,
+        destination: ValueOperand,
+        cells: usize,
+        return_to: ContinuationId,
+    },
+    /// Store a fully evaluated subobject through an aggregate portal.
+    AggregateStore {
+        destination: AggregateRegion,
+        offset: LogicalOffset,
+        source: ValueOperand,
+        cells: usize,
+        return_to: ContinuationId,
+    },
+    /// Terminate the trampoline immediately from any user function.
+    Abort,
     Halt,
 }
 
@@ -498,6 +607,9 @@ pub enum ContinuationIrError {
     InvalidArrayLength {
         cells: usize,
     },
+    InvalidAggregateSize {
+        cells: usize,
+    },
     UnknownMainFunction {
         function: FunctionId,
     },
@@ -583,6 +695,33 @@ pub enum ContinuationIrError {
         cells: usize,
         available: usize,
     },
+    AggregateSubrangeOutOfBounds {
+        continuation: ContinuationId,
+        region: AggregateRegion,
+        offset: usize,
+        cells: usize,
+        available: usize,
+    },
+    AggregateAccessHasZeroCells {
+        continuation: ContinuationId,
+    },
+    AggregateAccessTypeMismatch {
+        continuation: ContinuationId,
+        expected_cells: usize,
+        actual: ValueType,
+    },
+    LogicalOffsetAliases {
+        continuation: ContinuationId,
+        address: Address,
+    },
+    LogicalOffsetIsNotFrameOwned {
+        continuation: ContinuationId,
+        address: Address,
+    },
+    LogicalOffsetAliasesOperand {
+        continuation: ContinuationId,
+        address: Address,
+    },
     TransferSourceIsTarget {
         continuation: ContinuationId,
         address: Address,
@@ -660,6 +799,11 @@ impl fmt::Display for ContinuationIrError {
             Self::InvalidArrayLength { cells } => {
                 write!(f, "array length must be between 1 and 256, got {cells}")
             }
+            Self::InvalidAggregateSize { cells } => write!(
+                f,
+                "aggregate payload must contain at most {} cells, got {cells}",
+                MAX_AGGREGATE_CELLS
+            ),
             Self::UnknownMainFunction { function } => {
                 write!(f, "main function {} does not exist", function.index())
             }
@@ -808,6 +952,56 @@ impl fmt::Display for ContinuationIrError {
             } => write!(
                 f,
                 "aggregate copy of {cells} cells in continuation {} exceeds {array:?}'s {available}-cell capacity",
+                continuation.get()
+            ),
+            Self::AggregateSubrangeOutOfBounds {
+                continuation,
+                region,
+                offset,
+                cells,
+                available,
+            } => write!(
+                f,
+                "aggregate subrange {offset}..{} of {region:?} in continuation {} exceeds its {available}-cell capacity",
+                offset.saturating_add(*cells),
+                continuation.get()
+            ),
+            Self::AggregateAccessHasZeroCells { continuation } => write!(
+                f,
+                "dynamic aggregate access in continuation {} has a zero-cell payload",
+                continuation.get()
+            ),
+            Self::AggregateAccessTypeMismatch {
+                continuation,
+                expected_cells,
+                actual,
+            } => write!(
+                f,
+                "dynamic aggregate access in continuation {} moves {expected_cells} cells but its value has type {actual:?}",
+                continuation.get()
+            ),
+            Self::LogicalOffsetAliases {
+                continuation,
+                address,
+            } => write!(
+                f,
+                "logical offset bytes in continuation {} alias at {address:?}",
+                continuation.get()
+            ),
+            Self::LogicalOffsetIsNotFrameOwned {
+                continuation,
+                address,
+            } => write!(
+                f,
+                "logical offset byte {address:?} in continuation {} is not a compiler-owned frame slot",
+                continuation.get()
+            ),
+            Self::LogicalOffsetAliasesOperand {
+                continuation,
+                address,
+            } => write!(
+                f,
+                "logical offset byte {address:?} in continuation {} aliases the dynamic aggregate value operand",
                 continuation.get()
             ),
             Self::TransferSourceIsTarget {
@@ -969,24 +1163,21 @@ fn validate_program(
         }
 
         validate_declared_type(function.return_type)?;
-        if function.outbox_cells > 256 {
-            return Err(ContinuationIrError::InvalidArrayLength {
-                cells: function.outbox_cells,
-            });
-        }
+        validate_aggregate_size(function.outbox_cells)?;
 
-        let mut arrays = HashSet::with_capacity(function.frame_arrays.len());
-        for array in &function.frame_arrays {
-            validate_array_length(array.cells)?;
-            if !arrays.insert(array.id) {
+        let mut aggregates = HashSet::with_capacity(function.frame_aggregates.len());
+        for aggregate in &function.frame_aggregates {
+            validate_aggregate_size(aggregate.cells)?;
+            if !aggregates.insert(aggregate.id) {
                 return Err(ContinuationIrError::DuplicateFrameArrayId {
                     function: function.id,
-                    array: array.id,
+                    array: aggregate.id,
                 });
             }
         }
 
         let mut parameters = HashSet::with_capacity(function.parameter_locations.len());
+        let mut aggregate_parameters = HashSet::with_capacity(function.parameter_locations.len());
         for &parameter in &function.parameter_locations {
             match parameter {
                 ParameterLocation::Cell(slot) if slot.index() >= function.frame_slots => {
@@ -996,13 +1187,25 @@ fn validate_program(
                         frame_slots: function.frame_slots,
                     });
                 }
-                ParameterLocation::Array(array) if !arrays.contains(&array) => {
+                ParameterLocation::Array(array) | ParameterLocation::Aggregate(array)
+                    if !aggregates.contains(&array) =>
+                {
                     return Err(ContinuationIrError::UnknownParameterArray {
                         function: function.id,
                         array,
                     });
                 }
-                ParameterLocation::Cell(_) | ParameterLocation::Array(_) => {}
+                ParameterLocation::Array(array) | ParameterLocation::Aggregate(array)
+                    if !aggregate_parameters.insert(array) =>
+                {
+                    return Err(ContinuationIrError::DuplicateParameterLocation {
+                        function: function.id,
+                        parameter,
+                    });
+                }
+                ParameterLocation::Cell(_)
+                | ParameterLocation::Array(_)
+                | ParameterLocation::Aggregate(_) => {}
             }
             if !parameters.insert(parameter) {
                 return Err(match parameter {
@@ -1010,7 +1213,7 @@ fn validate_program(
                         function: function.id,
                         slot,
                     },
-                    ParameterLocation::Array(_) => {
+                    ParameterLocation::Array(_) | ParameterLocation::Aggregate(_) => {
                         ContinuationIrError::DuplicateParameterLocation {
                             function: function.id,
                             parameter,
@@ -1091,8 +1294,10 @@ fn validate_program(
 }
 
 fn validate_declared_type(value_type: ValueType) -> Result<(), ContinuationIrError> {
-    if let ValueType::Array(cells) = value_type {
-        validate_array_length(cells)?;
+    match value_type {
+        ValueType::Array(cells) => validate_array_length(cells)?,
+        ValueType::Aggregate { cells } => validate_aggregate_size(cells)?,
+        ValueType::Cell | ValueType::Void => {}
     }
     Ok(())
 }
@@ -1100,6 +1305,13 @@ fn validate_declared_type(value_type: ValueType) -> Result<(), ContinuationIrErr
 fn validate_array_length(cells: usize) -> Result<(), ContinuationIrError> {
     if !(1..=256).contains(&cells) {
         return Err(ContinuationIrError::InvalidArrayLength { cells });
+    }
+    Ok(())
+}
+
+fn validate_aggregate_size(cells: usize) -> Result<(), ContinuationIrError> {
+    if cells > MAX_AGGREGATE_CELLS {
+        return Err(ContinuationIrError::InvalidAggregateSize { cells });
     }
     Ok(())
 }
@@ -1146,9 +1358,9 @@ fn validate_instructions(
                 }
             }
             FrameInstruction::AggregateCopy { src, dst, cells } => {
-                validate_array_length(*cells)?;
+                validate_aggregate_size(*cells)?;
                 for array in [*src, *dst] {
-                    let available = array_region_cells(array, continuation, function, globals)?;
+                    let available = aggregate_region_cells(array, continuation, function, globals)?;
                     if *cells > available {
                         return Err(ContinuationIrError::AggregateCopySizeMismatch {
                             continuation,
@@ -1228,7 +1440,7 @@ fn validate_terminator(
             {
                 let actual = value_operand_type(argument, continuation.id, function, globals)?;
                 let expected = parameter_type(parameter, callee_descriptor);
-                if actual != expected {
+                if !value_types_match(actual, expected) {
                     return Err(ContinuationIrError::CallArgumentTypeMismatch {
                         continuation: continuation.id,
                         callee: *callee,
@@ -1238,7 +1450,7 @@ fn validate_terminator(
                     });
                 }
             }
-            if let ValueType::Array(required) = callee_descriptor.return_type
+            if let Some(required) = aggregate_type_cells(callee_descriptor.return_type)
                 && function.outbox_cells < required
             {
                 return Err(ContinuationIrError::CallerOutboxTooSmall {
@@ -1257,7 +1469,7 @@ fn validate_terminator(
             }
             if let Some(value) = value {
                 let actual = value_operand_type(*value, continuation.id, function, globals)?;
-                if actual != function.return_type {
+                if !value_types_match(actual, function.return_type) {
                     return Err(ContinuationIrError::ReturnTypeMismatch {
                         continuation: continuation.id,
                         function: continuation.function,
@@ -1300,6 +1512,45 @@ fn validate_terminator(
             validate_address(*value, continuation.id, function, globals)?;
             validate_successor(continuation, *return_to, continuations)
         }
+        Terminator::AggregateLoad {
+            source,
+            offset,
+            destination,
+            cells,
+            return_to,
+        } => {
+            validate_dynamic_aggregate_region(*source, *cells, continuation.id, function, globals)?;
+            validate_logical_offset(*offset, continuation.id, function, globals)?;
+            validate_aggregate_access_operand(
+                *destination,
+                *cells,
+                continuation.id,
+                function,
+                globals,
+            )?;
+            validate_logical_offset_operand_alias(*offset, *destination, continuation.id)?;
+            validate_successor(continuation, *return_to, continuations)
+        }
+        Terminator::AggregateStore {
+            destination,
+            offset,
+            source,
+            cells,
+            return_to,
+        } => {
+            validate_dynamic_aggregate_region(
+                *destination,
+                *cells,
+                continuation.id,
+                function,
+                globals,
+            )?;
+            validate_logical_offset(*offset, continuation.id, function, globals)?;
+            validate_aggregate_access_operand(*source, *cells, continuation.id, function, globals)?;
+            validate_logical_offset_operand_alias(*offset, *source, continuation.id)?;
+            validate_successor(continuation, *return_to, continuations)
+        }
+        Terminator::Abort => Ok(()),
         Terminator::Halt if continuation.function == main => Ok(()),
         Terminator::Halt => Err(ContinuationIrError::HaltOutsideMain {
             continuation: continuation.id,
@@ -1335,7 +1586,7 @@ fn validate_address(
             Ok(())
         }
         Address::ArrayElement { array, index } => {
-            let cells = array_region_cells(array, continuation, function, globals)?;
+            let cells = aggregate_region_cells(array, continuation, function, globals)?;
             if index >= cells {
                 return Err(ContinuationIrError::ArrayElementOutOfBounds {
                     continuation,
@@ -1364,34 +1615,33 @@ fn global_descriptor<'a>(
         })
 }
 
-fn array_region_cells(
-    array: ArrayRegion,
+fn aggregate_region_cells(
+    aggregate: AggregateRegion,
     continuation: ContinuationId,
     function: &FunctionDescriptor,
     globals: &HashMap<GlobalId, &GlobalDescriptor>,
 ) -> Result<usize, ContinuationIrError> {
-    match array {
-        ArrayRegion::Frame(array) => function
-            .frame_array(array)
+    match aggregate {
+        AggregateRegion::Frame(aggregate) => function
+            .frame_aggregate(aggregate)
             .map(|descriptor| descriptor.cells)
             .ok_or(ContinuationIrError::UnknownFrameArray {
                 continuation,
-                array,
+                array: aggregate,
             }),
-        ArrayRegion::Global(global) => {
+        AggregateRegion::Global(global) => {
             let descriptor = global_descriptor(global, continuation, globals)?;
             match descriptor.value_type {
-                ValueType::Array(cells) => Ok(cells),
+                ValueType::Array(cells) | ValueType::Aggregate { cells } => Ok(cells),
                 actual => Err(ContinuationIrError::GlobalTypeMismatch {
                     continuation,
                     global,
-                    expected: ValueType::Array(0),
+                    expected: ValueType::Aggregate { cells: 0 },
                     actual,
                 }),
             }
         }
-        ArrayRegion::Outbox if function.outbox_cells != 0 => Ok(function.outbox_cells),
-        ArrayRegion::Outbox => Err(ContinuationIrError::OutboxUnavailable { continuation }),
+        AggregateRegion::Outbox => Ok(function.outbox_cells),
     }
 }
 
@@ -1407,7 +1657,7 @@ fn validate_portal_array(
             array,
         });
     }
-    array_region_cells(array, continuation, function, globals)?;
+    aggregate_region_cells(array, continuation, function, globals)?;
     Ok(())
 }
 
@@ -1422,12 +1672,33 @@ fn value_operand_type(
             validate_address(address, continuation, function, globals)?;
             Ok(ValueType::Cell)
         }
-        ValueOperand::Array(array) => Ok(ValueType::Array(array_region_cells(
+        ValueOperand::Array(array) => Ok(ValueType::Array(aggregate_region_cells(
             array,
             continuation,
             function,
             globals,
         )?)),
+        ValueOperand::Aggregate {
+            region,
+            offset,
+            cells,
+        } => {
+            validate_aggregate_size(cells)?;
+            let available = aggregate_region_cells(region, continuation, function, globals)?;
+            let in_bounds = offset
+                .checked_add(cells)
+                .is_some_and(|end| end <= available);
+            if !in_bounds {
+                return Err(ContinuationIrError::AggregateSubrangeOutOfBounds {
+                    continuation,
+                    region,
+                    offset,
+                    cells,
+                    available,
+                });
+            }
+            Ok(ValueType::Aggregate { cells })
+        }
     }
 }
 
@@ -1440,7 +1711,124 @@ fn parameter_type(parameter: ParameterLocation, function: &FunctionDescriptor) -
                 .expect("validated parameter array must exist")
                 .cells,
         ),
+        ParameterLocation::Aggregate(aggregate) => ValueType::Aggregate {
+            cells: function
+                .frame_aggregate(aggregate)
+                .expect("validated parameter aggregate must exist")
+                .cells,
+        },
     }
+}
+
+fn aggregate_type_cells(value_type: ValueType) -> Option<usize> {
+    match value_type {
+        ValueType::Array(cells) | ValueType::Aggregate { cells } => Some(cells),
+        ValueType::Cell | ValueType::Void => None,
+    }
+}
+
+fn value_types_match(left: ValueType, right: ValueType) -> bool {
+    left == right
+        || matches!(
+            (left, right),
+            (ValueType::Array(left), ValueType::Aggregate { cells: right })
+                | (ValueType::Aggregate { cells: left }, ValueType::Array(right))
+                if left == right
+        )
+}
+
+fn validate_logical_offset(
+    offset: LogicalOffset,
+    continuation: ContinuationId,
+    function: &FunctionDescriptor,
+    globals: &HashMap<GlobalId, &GlobalDescriptor>,
+) -> Result<(), ContinuationIrError> {
+    validate_address(offset.low, continuation, function, globals)?;
+    validate_address(offset.high, continuation, function, globals)?;
+    for address in [offset.low, offset.high] {
+        if !matches!(address, Address::Frame(_)) {
+            return Err(ContinuationIrError::LogicalOffsetIsNotFrameOwned {
+                continuation,
+                address,
+            });
+        }
+    }
+    if offset.low == offset.high {
+        return Err(ContinuationIrError::LogicalOffsetAliases {
+            continuation,
+            address: offset.low,
+        });
+    }
+    Ok(())
+}
+
+fn validate_logical_offset_operand_alias(
+    offset: LogicalOffset,
+    operand: ValueOperand,
+    continuation: ContinuationId,
+) -> Result<(), ContinuationIrError> {
+    let ValueOperand::Cell(address) = operand else {
+        return Ok(());
+    };
+    if address == offset.low || address == offset.high {
+        return Err(ContinuationIrError::LogicalOffsetAliasesOperand {
+            continuation,
+            address,
+        });
+    }
+    Ok(())
+}
+
+fn validate_dynamic_aggregate_region(
+    region: AggregateRegion,
+    cells: usize,
+    continuation: ContinuationId,
+    function: &FunctionDescriptor,
+    globals: &HashMap<GlobalId, &GlobalDescriptor>,
+) -> Result<(), ContinuationIrError> {
+    if cells == 0 {
+        return Err(ContinuationIrError::AggregateAccessHasZeroCells { continuation });
+    }
+    validate_aggregate_size(cells)?;
+    if region == AggregateRegion::Outbox {
+        return Err(ContinuationIrError::ArrayPortalRequiresArray {
+            continuation,
+            array: region,
+        });
+    }
+    let available = aggregate_region_cells(region, continuation, function, globals)?;
+    if cells > available {
+        return Err(ContinuationIrError::AggregateCopySizeMismatch {
+            continuation,
+            array: region,
+            cells,
+            available,
+        });
+    }
+    Ok(())
+}
+
+fn validate_aggregate_access_operand(
+    operand: ValueOperand,
+    cells: usize,
+    continuation: ContinuationId,
+    function: &FunctionDescriptor,
+    globals: &HashMap<GlobalId, &GlobalDescriptor>,
+) -> Result<(), ContinuationIrError> {
+    let actual = value_operand_type(operand, continuation, function, globals)?;
+    let actual_cells = match actual {
+        ValueType::Cell => 1,
+        ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
+        ValueType::Void => 0,
+    };
+    if actual_cells != cells {
+        return Err(ContinuationIrError::AggregateAccessTypeMismatch {
+            continuation,
+            expected_cells: cells,
+            actual,
+        });
+    }
+    Ok(())
 }
 
 fn validate_successor(
@@ -1953,6 +2341,278 @@ mod tests {
                 index: 4,
                 cells: 4,
             })
+        );
+    }
+
+    #[test]
+    fn accepts_version_one_aggregate_subranges_and_dynamic_accesses() {
+        let payload = FrameAggregateId::new(0);
+        let parameter = FrameAggregateId::new(0);
+        let main = FunctionDescriptor::new_aggregates(
+            FunctionId::new(0),
+            vec![],
+            2,
+            vec![FrameAggregateDescriptor::new(payload, 320)],
+            300,
+            ValueType::Void,
+            cid(1),
+        );
+        let helper = FunctionDescriptor::new_aggregates(
+            FunctionId::new(1),
+            vec![ParameterLocation::Aggregate(parameter)],
+            0,
+            vec![FrameAggregateDescriptor::new(parameter, 300)],
+            0,
+            ValueType::Aggregate { cells: 300 },
+            cid(5),
+        );
+        let offset = LogicalOffset::new(
+            Address::Frame(FrameSlot::new(0)),
+            Address::Frame(FrameSlot::new(1)),
+        );
+        let payload_subrange = ValueOperand::Aggregate {
+            region: AggregateRegion::Frame(payload),
+            offset: 10,
+            cells: 300,
+        };
+        let continuations = vec![
+            continuation(
+                1,
+                0,
+                vec![],
+                Terminator::AggregateLoad {
+                    source: AggregateRegion::Global(GlobalId::new(0)),
+                    offset,
+                    destination: payload_subrange,
+                    cells: 300,
+                    return_to: cid(2),
+                },
+            ),
+            continuation(
+                2,
+                0,
+                vec![],
+                Terminator::AggregateStore {
+                    destination: AggregateRegion::Global(GlobalId::new(0)),
+                    offset,
+                    source: payload_subrange,
+                    cells: 300,
+                    return_to: cid(3),
+                },
+            ),
+            continuation(
+                3,
+                0,
+                vec![],
+                Terminator::Call {
+                    callee: FunctionId::new(1),
+                    arguments: vec![payload_subrange],
+                    return_to: cid(4),
+                },
+            ),
+            continuation(4, 0, vec![], Terminator::Abort),
+            continuation(
+                5,
+                1,
+                vec![],
+                Terminator::Return {
+                    value: Some(ValueOperand::aggregate(
+                        AggregateRegion::Frame(parameter),
+                        300,
+                    )),
+                },
+            ),
+        ];
+
+        let program = ContinuationProgram::new_with_globals(
+            FunctionId::new(0),
+            vec![GlobalDescriptor::aggregate(GlobalId::new(0), 1024)],
+            vec![main, helper],
+            continuations,
+        )
+        .unwrap();
+        assert_eq!(
+            program.function(FunctionId::new(0)).unwrap().outbox_cells(),
+            300
+        );
+        assert_eq!(
+            program.global(GlobalId::new(0)).unwrap().value_type(),
+            ValueType::Aggregate { cells: 1024 }
+        );
+    }
+
+    #[test]
+    fn abort_is_valid_in_non_main_functions_without_a_return_value() {
+        let main = descriptor(0, vec![], 0, ValueType::Void, 1);
+        let helper = FunctionDescriptor::new_aggregates(
+            FunctionId::new(1),
+            vec![],
+            0,
+            vec![],
+            0,
+            ValueType::Aggregate { cells: 512 },
+            cid(2),
+        );
+        assert!(
+            ContinuationProgram::new(
+                FunctionId::new(0),
+                vec![main, helper],
+                vec![
+                    continuation(1, 0, vec![], Terminator::Halt),
+                    continuation(2, 1, vec![], Terminator::Abort),
+                ],
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_dynamic_aggregate_accesses() {
+        let aggregate = FrameAggregateId::new(0);
+        let descriptor = || {
+            FunctionDescriptor::new_aggregates(
+                FunctionId::new(0),
+                vec![],
+                2,
+                vec![FrameAggregateDescriptor::new(aggregate, 10)],
+                0,
+                ValueType::Void,
+                cid(1),
+            )
+        };
+        let offset = LogicalOffset::new(
+            Address::Frame(FrameSlot::new(0)),
+            Address::Frame(FrameSlot::new(1)),
+        );
+
+        let zero = ContinuationProgram::new(
+            FunctionId::new(0),
+            vec![descriptor()],
+            vec![
+                continuation(
+                    1,
+                    0,
+                    vec![],
+                    Terminator::AggregateLoad {
+                        source: AggregateRegion::Frame(aggregate),
+                        offset,
+                        destination: ValueOperand::Aggregate {
+                            region: AggregateRegion::Frame(aggregate),
+                            offset: 0,
+                            cells: 0,
+                        },
+                        cells: 0,
+                        return_to: cid(2),
+                    },
+                ),
+                continuation(2, 0, vec![], Terminator::Halt),
+            ],
+        );
+        assert_eq!(
+            zero,
+            Err(ContinuationIrError::AggregateAccessHasZeroCells {
+                continuation: cid(1),
+            })
+        );
+
+        let out_of_bounds = ContinuationProgram::new(
+            FunctionId::new(0),
+            vec![descriptor()],
+            vec![
+                continuation(
+                    1,
+                    0,
+                    vec![],
+                    Terminator::AggregateStore {
+                        destination: AggregateRegion::Frame(aggregate),
+                        offset,
+                        source: ValueOperand::Aggregate {
+                            region: AggregateRegion::Frame(aggregate),
+                            offset: 8,
+                            cells: 3,
+                        },
+                        cells: 3,
+                        return_to: cid(2),
+                    },
+                ),
+                continuation(2, 0, vec![], Terminator::Halt),
+            ],
+        );
+        assert_eq!(
+            out_of_bounds,
+            Err(ContinuationIrError::AggregateSubrangeOutOfBounds {
+                continuation: cid(1),
+                region: AggregateRegion::Frame(aggregate),
+                offset: 8,
+                cells: 3,
+                available: 10,
+            })
+        );
+
+        let aliases = ContinuationProgram::new(
+            FunctionId::new(0),
+            vec![descriptor()],
+            vec![
+                continuation(
+                    1,
+                    0,
+                    vec![],
+                    Terminator::AggregateLoad {
+                        source: AggregateRegion::Frame(aggregate),
+                        offset: LogicalOffset::new(offset.low, offset.low),
+                        destination: ValueOperand::Cell(Address::Frame(FrameSlot::new(0))),
+                        cells: 1,
+                        return_to: cid(2),
+                    },
+                ),
+                continuation(2, 0, vec![], Terminator::Halt),
+            ],
+        );
+        assert_eq!(
+            aliases,
+            Err(ContinuationIrError::LogicalOffsetAliases {
+                continuation: cid(1),
+                address: offset.low,
+            })
+        );
+
+        let operand_aliases = ContinuationProgram::new(
+            FunctionId::new(0),
+            vec![descriptor()],
+            vec![
+                continuation(
+                    1,
+                    0,
+                    vec![],
+                    Terminator::AggregateStore {
+                        destination: AggregateRegion::Frame(aggregate),
+                        offset,
+                        source: ValueOperand::Cell(offset.high),
+                        cells: 1,
+                        return_to: cid(2),
+                    },
+                ),
+                continuation(2, 0, vec![], Terminator::Halt),
+            ],
+        );
+        assert_eq!(
+            operand_aliases,
+            Err(ContinuationIrError::LogicalOffsetAliasesOperand {
+                continuation: cid(1),
+                address: offset.high,
+            })
+        );
+    }
+
+    #[test]
+    fn version_zero_array_names_remain_compatible_aliases() {
+        let id: FrameArrayId = FrameAggregateId::new(7);
+        let descriptor = FrameArrayDescriptor::new(id, 4);
+        let region: ArrayRegion = AggregateRegion::Frame(id);
+        assert_eq!(descriptor.id(), FrameAggregateId::new(7));
+        assert_eq!(
+            ValueOperand::Array(region),
+            ValueOperand::Array(AggregateRegion::Frame(id))
         );
     }
 }

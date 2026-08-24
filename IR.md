@@ -31,8 +31,8 @@ Continuationを生成し、ABI backendへ渡す。低水準APIとして、静的
 IRを分ける目的は、ソース言語の意味、関数の制御フローとframe配置、Brainfuckの
 データポインタや相対移動を分離することである。
 
-現在の実装はLANGUAGE.mdの第8段階までであり、以下のenum、struct、macro、多段projection、
-16-bit aggregate offsetはversion 1のnormativeなtarget IR仕様である。
+現在の実装はLANGUAGE.mdの第12段階までであり、以下のenum、struct、macro、多段projection、
+16-bit aggregate offsetを含むversion 1 IRを使用する。
 
 ## Source AST、展開、typed HIR
 
@@ -508,8 +508,8 @@ typed HIRは次を検証する。
 6. array portalと動的配列命令を追加する。（完了）
 7. 配列の値渡し、aggregate return outboxを接続する。（完了）
 8. BF IRの局所最適化を別パスとして追加する。（完了）
-9. source型をTypeId/layout tableへ一般化し、enum、struct、再帰的array、projectionを追加する。
-10. aggregate regionと16-bit logical offset portalをContinuation IR/ABIへ追加する。
-11. 文字列、`len`、`const cell`、method sugar、block macro、`abort`をfrontendへ追加する。
+9. source型をTypeId/layout tableへ一般化し、enum、struct、再帰的array、projectionを追加する。（完了）
+10. aggregate regionと16-bit logical offset portalをContinuation IR/ABIへ追加する。（完了）
+11. 文字列、`len`、`const cell`、method sugar、block macro、`abort`をfrontendへ追加する。（完了）
 12. BFCでstreaming lexer/parserを記述し、self-hostに不足する最小機能を実測から判断する。
 13. profileに基づき、BF固有templateとcost modelを段階的に追加する。
