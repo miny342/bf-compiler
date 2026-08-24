@@ -118,7 +118,7 @@ impl Lowerer {
 
     fn lower_program(mut self, program: &AstProgram) -> Result<Program, FrontendError> {
         let mut instructions = Vec::new();
-        self.lower_statements(&program.statements, &mut instructions)?;
+        self.lower_statements(&program.main_body, &mut instructions)?;
         Program::new(self.next_cell, instructions).map_err(Self::ir_error)
     }
 
@@ -480,8 +480,12 @@ mod tests {
 
     use super::*;
 
+    fn main_source(body: &str) -> String {
+        format!("void main() {{\n{body}\n}}")
+    }
+
     fn execute(source: &str, input: &[u8]) -> Vec<u8> {
-        let brainfuck = compile_source(source).unwrap();
+        let brainfuck = compile_source(&main_source(source)).unwrap();
         run(brainfuck.as_bytes(), input).unwrap()
     }
 
@@ -545,7 +549,7 @@ mod tests {
             output(left);
             output(right);
         "#;
-        let brainfuck = compile_source(source).unwrap();
+        let brainfuck = compile_source(&main_source(source)).unwrap();
         let cases = [
             (0, 0),
             (0, 1),
@@ -624,31 +628,64 @@ mod tests {
 
     #[test]
     fn reports_source_errors_with_offsets() {
-        let undefined = lower_source("output(missing);").unwrap_err();
-        assert_eq!(undefined.offset(), Some(7));
+        let undefined_source = main_source("output(missing);");
+        let undefined = lower_source(&undefined_source).unwrap_err();
+        assert_eq!(undefined.offset(), undefined_source.find("missing"));
         assert!(undefined.message().contains("undefined variable"));
 
-        let future_feature = lower_source("future_function(1);").unwrap_err();
+        let future_feature = lower_source(&main_source("future_function(1);")).unwrap_err();
         assert!(future_feature.message().contains("function calls"));
 
-        let future_array = lower_source("cell[16] values;").unwrap_err();
+        let future_array = lower_source(&main_source("cell[16] values;")).unwrap_err();
         assert!(future_array.message().contains("arrays"));
 
-        let future_definition =
-            lower_source("cell identity(cell value) { return value; }").unwrap_err();
-        assert!(future_definition.message().contains("functions"));
+        let future_definition = lower_source("void helper() {}").unwrap_err();
+        assert!(
+            future_definition
+                .message()
+                .contains("only the 'main' function")
+        );
 
-        let unbraced_declaration = lower_source("cell x; if (x) cell y;").unwrap_err();
+        let unbraced_declaration =
+            lower_source(&main_source("cell x; if (x) cell y;")).unwrap_err();
         assert!(unbraced_declaration.message().contains("inside a block"));
 
-        let comment = lower_source("/* no end").unwrap_err();
+        let comment = lower_source(&main_source("/* no end")).unwrap_err();
         assert!(comment.message().contains("unterminated block comment"));
 
-        let non_ascii_code = lower_source("cell 値;").unwrap_err();
+        let non_ascii_code = lower_source(&main_source("cell 値;")).unwrap_err();
         assert!(
             non_ascii_code
                 .message()
                 .contains("only allowed inside comments")
         );
+    }
+
+    #[test]
+    fn requires_exactly_one_parameterless_void_main() {
+        let empty = lower_source("").unwrap_err();
+        assert!(empty.message().contains("void main()"));
+
+        let top_level_statement = lower_source("output('x');").unwrap_err();
+        assert!(
+            top_level_statement
+                .message()
+                .contains("start with 'void main()'")
+        );
+
+        let parameter = lower_source("void main(cell value) {}").unwrap_err();
+        assert!(parameter.message().contains("must not have parameters"));
+
+        let second_function = lower_source("void main() {} void helper() {}").unwrap_err();
+        assert!(second_function.message().contains("only one top-level"));
+    }
+
+    #[test]
+    fn rejects_all_non_builtin_function_calls() {
+        let statement_call = lower_source(&main_source("helper();")).unwrap_err();
+        assert!(statement_call.message().contains("function calls"));
+
+        let expression_call = lower_source(&main_source("cell value = helper();")).unwrap_err();
+        assert!(expression_call.message().contains("function calls"));
     }
 }

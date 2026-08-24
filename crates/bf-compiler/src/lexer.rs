@@ -9,6 +9,8 @@ pub(crate) struct Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TokenKind {
     Cell,
+    Void,
+    Return,
     If,
     Else,
     While,
@@ -76,6 +78,8 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 let text = &source[start..position];
                 let kind = match text {
                     "cell" => TokenKind::Cell,
+                    "void" => TokenKind::Void,
+                    "return" => TokenKind::Return,
                     "if" => TokenKind::If,
                     "else" => TokenKind::Else,
                     "while" => TokenKind::While,

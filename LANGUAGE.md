@@ -19,22 +19,22 @@ BFCはBrainfuckを直接記述するためのアセンブリではなく、人�
 - ユーザー定義関数、直接再帰、相互再帰を認める。
 - マクロおよびプリプロセッサは持たない。
 - 暗黙の入出力は行わない。
-- トップレベルの文を先頭から実行し、特別な`main`関数は持たない。
+- 実行開始点は、引数を取らず`void`を返す`main`関数とする。
 
 ## 最小例
 
 ```c
-cell ch;
-
-ch = input();
-while (ch != 0) {
-    output(ch);
-    ch = input();
+void main() {
+    cell ch = input();
+    while (ch != 0) {
+        output(ch);
+        ch = input();
+    }
 }
 ```
 
-トップレベル文は暗黙のroot functionとして実行する。ユーザー定義関数は同じfileの
-トップレベルへ定義し、rootまたは別の関数から呼び出せる。
+`main`はプログラムにちょうど1つ定義する。ユーザー定義関数は同じfileのトップレベルへ
+定義し、`main`または別の関数から呼び出せる。
 
 ## ソースファイル
 
@@ -159,7 +159,7 @@ cell[256] buffer;
 }
 ```
 
-- トップレベルの文は暗黙のroot scopeを形成する。
+- file scopeにはglobal変数とfunction名が属する。
 - function parameterとfunction bodyはactivationごとのlocal scopeを形成する。
 - ローカル変数の有効範囲は宣言位置から、そのブロックの終端までとする。
 - 同じスコープで同名の識別子を複数宣言できない。
@@ -167,7 +167,7 @@ cell[256] buffer;
 - `cell`、`void`、`return`、`if`、`while`などの予約語は識別子に使用できない。
 - `input`、`output`は予約され、変数名またはfunction名として使用できない。
 
-root scopeの変数はstatic領域、function parameterとlocalはactivation frameへ置く。
+file scopeの変数はstatic領域、function parameterとlocalはactivation frameへ置く。
 ブロックを抜けた後、その領域を別のlocalまたはtemporaryへ再利用してよい。
 
 ## 式
@@ -375,6 +375,22 @@ void emit(cell value) {
 - functionからglobal変数を参照できるが、callerのlocalを直接参照できない。
 - `&`、pointer、reference、参照渡しは持たない。
 
+### `main`
+
+プログラムの実行開始点は、次のsignatureを持つ`main`関数とする。
+
+```c
+void main() {
+    // program body
+}
+```
+
+- `main`は各programにちょうど1つ定義しなければならない。
+- `main`のreturn型は`void`、parameter数は0でなければならない。
+- `main`を明示的にcallすることはできない。
+- `main`の末尾へ到達するか、`return;`を実行するとprogramを正常終了する。
+- 終了コードの概念は持たない。
+
 配列を書き換えてcallerへ返す場合は、変更後の配列を明示的にreturnして代入する。
 
 ```c
@@ -396,21 +412,23 @@ cell[256] data_stack;
 cell pc;
 cell sp;
 cell opcode;
-cell running = 1;
 
-while (running) {
-    opcode = code[pc];
-    pc += 1;
-
-    if (opcode == 0) {
-        running = 0;
-    } else if (opcode == 1) {
-        data_stack[sp] = code[pc];
-        sp += 1;
+void main() {
+    cell running = 1;
+    while (running) {
+        opcode = code[pc];
         pc += 1;
-    } else if (opcode == 2) {
-        sp -= 1;
-        opcode = data_stack[sp];
+
+        if (opcode == 0) {
+            running = 0;
+        } else if (opcode == 1) {
+            data_stack[sp] = code[pc];
+            sp += 1;
+            pc += 1;
+        } else if (opcode == 2) {
+            sp -= 1;
+            opcode = data_stack[sp];
+        }
     }
 }
 ```
@@ -448,20 +466,22 @@ output(cell value)
 
 ## プログラムの実行
 
-ソースファイル全体を暗黙の最外ブロックとして扱い、トップレベルの文を記述順に
-実行する。`main`などのエントリーポイント宣言は存在しない。
+トップレベルはglobal変数宣言と関数定義だけを含む。トップレベルの実行文は認めない。
+globalを初期化した後、`main`の新しいactivationを作り、その本体から実行を開始する。
 
 ```c
-cell value = input();
-if (value != 0) {
-    output(value);
+void main() {
+    cell value = input();
+    if (value != 0) {
+        output(value);
+    }
 }
 ```
 
-- トップレベルでも変数宣言、関数定義、ブロック、代入、条件分岐、ループを使用できる。
-- 関数定義は登録されるだけで、その定義位置に到達しても実行しない。
-- ソース末尾へ到達するとプログラムを正常終了する。
-- 終了コードの概念は持たない。
+- global変数は宣言順に初期化し、初期値を省略した場合は0とする。
+- 関数定義は登録されるだけで、`main`または別の関数からcallされるまで実行しない。
+- `main`以外の関数を暗黙に実行することはない。
+- `main`の終了をもってprogramを正常終了する。
 
 ## 文法概要
 
@@ -470,7 +490,7 @@ if (value != 0) {
 ```ebnf
 program          = { top-level-item } ;
 
-top-level-item   = function-definition | block-item ;
+top-level-item   = function-definition | declaration ;
 
 block-item       = declaration | statement ;
 
@@ -528,6 +548,7 @@ function-call    = identifier "(" [ arguments ] ")" ;
 arguments        = expression { "," expression } ;
 ```
 
+構文規則に加えて、programは`void main()`をちょうど1つ含まなければならない。
 配列には初期化式を指定できない。
 
 ## コンパイル時エラー
@@ -545,6 +566,9 @@ arguments        = expression { "," expression } ;
 - `void`関数の値を使用する。
 - `void`以外の関数に値を返さない実行経路がある。
 - nested functionを定義する。
+- `main`が存在しない、複数存在する、または`void main()`以外のsignatureを持つ。
+- `main`を明示的にcallする。
+- トップレベルへ実行文を記述する。
 - 静的セル、一時セル、配列用作業セル、スタック管理セルがBFテープの30,000セルを
   超える。
 
@@ -561,7 +585,7 @@ call深度によるBFテープ右端超過とする。
 
 仕様全体を一度に実装する必要はない。次の順序で段階的に実装する。
 
-1. 字句解析、構文解析、トップレベル文、ブロック、`cell`
+1. 字句解析、構文解析、`void main()`、ブロック、`cell`
 2. `input`、`output`、代入、`+`、`-`
 3. `if`、`while`、`expression != 0`、`!`
 4. その他の比較、`&&`、`||`
@@ -576,6 +600,9 @@ call深度によるBFテープ右端超過とする。
 
 ### 現在の実装状況
 
-第4段階まで実装している。すべての比較演算と、短絡評価する論理`&&`および`||`を
-使用できる。関数と配列は仕様だけが存在し、現在のコンパイラは明示的な未実装エラー
-として拒否する。関数・配列ABIは独立experimentで検証済みである。
+第4段階まで実装している。現在のコンパイラは、トップレベルにparameterなしの
+`void main()`をちょうど1つ持つprogramを受理し、その本体を実行する。すべての比較演算と、
+短絡評価する論理`&&`および`||`を使用できる。`input()`と`output(...)`以外のfunction
+call、`main`以外のfunction定義、global変数、明示的な`return`、配列は、実装済みになる
+まで明示的なコンパイルエラーとして拒否する。関数・配列ABIは独立experimentで検証済み
+である。

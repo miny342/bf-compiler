@@ -23,7 +23,8 @@ Brainfuckソース
 関数、再帰、frame-relativeなローカル変数を追加する次段階backendでは、ASTとセルIRの
 間またはセルIR内部にContinuation IRを導入する。実験中のchunked frame stack、
 call/return、pointer位置の規約は[ABI.md](ABI.md)に定義する。現在の実装はまだこの
-ABIを使用せず、すべての`CellId`を静的セルとして割り当てる。
+ABIを使用せず、`void main()`の本体を直接セルIRへloweringし、すべての`CellId`を静的
+セルとして割り当てる。`input`と`output`以外のcallはfrontendで拒否する。
 
 二段に分ける目的は、ソース言語の意味と、Brainfuckのデータポインタや
 相対移動を分離することである。
@@ -384,7 +385,7 @@ struct Layout {
 
 1. 現在のセルIR、BF IR、BF文字列化を基準実装として安定させる。
 2. 論理セルと物理セルを分離する`Layout`を導入する。
-3. Continuation IRとABI frame layoutを導入する。
+3. `main`をroot activationとするContinuation IRとABI frame layoutを導入する。
 4. 定数添字配列を論理layoutへ接続する。
 5. array portalと動的配列命令を追加する。
 6. function call、return、aggregate valueをfrontendへ追加する。

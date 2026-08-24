@@ -1,3 +1,4 @@
+void main() {
 cell f = 'f';
 cell i = 'i';
 cell z = 'z';
@@ -78,4 +79,5 @@ while (max_counter != 0) {
     }
 
     output(nn);
+}
 }

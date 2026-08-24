@@ -20,11 +20,39 @@ struct Parser {
 
 impl Parser {
     fn parse_program(mut self) -> Result<AstProgram, FrontendError> {
-        let mut statements = Vec::new();
-        while !self.at(&TokenKind::Eof) {
-            statements.push(self.parse_block_item()?);
+        if self.at(&TokenKind::Eof) {
+            return Err(self.error_here("program must define 'void main()'"));
         }
-        Ok(AstProgram { statements })
+
+        if !self.at(&TokenKind::Void) {
+            return Err(self.error_here("program must start with 'void main()'"));
+        }
+        self.advance();
+
+        let name = self.parse_name("expected 'main' after 'void'")?;
+        if name.text != "main" {
+            return Err(FrontendError::at(
+                name.offset,
+                "only the 'main' function is implemented in this compiler stage",
+            ));
+        }
+
+        self.expect(TokenKind::LeftParen, "expected '(' after 'main'")?;
+        if !self.at(&TokenKind::RightParen) {
+            return Err(self.error_here("main must not have parameters"));
+        }
+        self.advance();
+
+        let Statement::Block(main_body) = self.parse_block()? else {
+            unreachable!();
+        };
+        if !self.at(&TokenKind::Eof) {
+            return Err(self.error_here(
+                "only one top-level 'void main()' function is implemented in this compiler stage",
+            ));
+        }
+
+        Ok(AstProgram { main_body })
     }
 
     fn parse_block_item(&mut self) -> Result<Statement, FrontendError> {
@@ -43,6 +71,10 @@ impl Parser {
             }
             TokenKind::LeftBrace => self.parse_block(),
             TokenKind::Cell => Err(self.error_here("a declaration here must be inside a block")),
+            TokenKind::Void => Err(self.error_here("nested functions are not allowed")),
+            TokenKind::Return => {
+                Err(self.error_here("return is not implemented in this compiler stage"))
+            }
             TokenKind::Output => self.parse_output(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => self.parse_while(),

@@ -1,6 +1,6 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AstProgram {
-    pub statements: Vec<Statement>,
+    pub main_body: Vec<Statement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

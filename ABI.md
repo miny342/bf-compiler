@@ -312,7 +312,7 @@ stack flagまたはglobal aux headを挟むが、`field_address`がそれを飛�
 現在のframeがdispatcherの実行対象である間は1とする。trampolineのBFループは、
 反復終端で次に実行するframeの`ACTIVE`を指す。
 
-root programを終了するときはrootの`ACTIVE`を0にし、そのcell上でtrampoline
+`main`を終了するときはmain frameの`ACTIVE`を0にし、そのcell上でtrampoline
 ループを終了する。
 
 ### `PC_LOW`と`PC_HIGH`
@@ -740,7 +740,7 @@ return先はcalleeの`RETURN_PC`に保持するため、return addressを別のv
 calleeは自身のframe size `K`と、全frameで共通なcaller `VALUE`のfrontier相対位置を
 知っているため、callerの関数種類を知らなくても戻り値を転送できる。
 
-root frameからのreturnは特別扱いし、root `ACTIVE`を0にしてprogramを終了する。
+main frameからのreturnは特別扱いし、main frameの`ACTIVE`を0にしてprogramを終了する。
 
 ## Continuation dispatcher
 
@@ -804,14 +804,17 @@ terminatorだけはarray portalへcontextを移してよい。array resume conti
 
 program開始時、BFテープはすべて0であることを前提とする。
 
+BFC sourceのentry pointはparameterなしの`void main()`である。ABI上では、そのactivationを
+stackのrootとなるmain frameとして扱う。`main`はcallerを持たず、明示的にcallできない。
+
 1. static global initializerを実行する。
 2. global `aux`へ割り当てた値を初期化する。
 3. anchorが0であることを保つ。
-4. root frameを確保する。
-5. root `ACTIVE = 1`、`PC = top-level entry`とする。
-6. pointerをroot `ACTIVE`へ置いてtrampolineへ入る。
+4. main frameを確保する。
+5. main frameの`ACTIVE = 1`、`PC = main entry`とする。
+6. pointerをmain frameの`ACTIVE`へ置いてtrampolineへ入る。
 
-program終了時はroot `ACTIVE`を0にする。テープの他の値をclearする義務はない。
+program終了時はmain frameの`ACTIVE`を0にする。テープの他の値をclearする義務はない。
 
 ## 容量と効率
 
@@ -839,7 +842,7 @@ global aligned regionではheadを`aux`として利用できるため、padding�
 
 少なくとも次をcompiler errorとする。
 
-- static global領域、anchor、最低限のroot frameが30,000 cellsへ収まらない。
+- static global領域、anchor、最低限のmain frameが30,000 cellsへ収まらない。
 - 一つのfunction frameの静的サイズが利用可能テープ領域より大きい。
 - continuation数が内部PC表現の上限を越える。
 - compilerが有効なframe-relative配置を作れない。
