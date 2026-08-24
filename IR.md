@@ -400,8 +400,8 @@ struct Layout {
 1. 現在のセルIR、BF IR、BF文字列化を基準実装として安定させる。（完了）
 2. `main`をroot activationとするContinuation IRとABI frame layoutを導入する。（完了）
 3. scalar function call、return、直接・相互再帰をfrontendとbackendへ接続する。（完了）
-4. localの定数添字配列を`LocalId`/`FrameSlot`へscalarizeする。（完了）
-5. global scalarとstatic領域の初期化を接続する。
-6. array portalと動的配列命令を追加する。
-7. 配列の値渡し、aggregate return outboxを接続する。
+4. localの定数添字配列を実装する。（完了。第7段階でaligned frame arrayへ統合）
+5. global scalarとstatic領域の初期化を接続する。（完了）
+6. array portalと動的配列命令を追加する。（完了）
+7. 配列の値渡し、aggregate return outboxを接続する。（完了）
 8. 必要性を測定してから、BF IRの最適化を別パスとして追加する。

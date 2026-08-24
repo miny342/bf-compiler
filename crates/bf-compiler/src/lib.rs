@@ -18,6 +18,7 @@ mod ir;
 mod lexer;
 mod parser;
 mod semantic;
+mod static_layout;
 
 pub use abi_codegen::{
     AbiCodegenError, compile_continuations, lower_continuations, lower_continuations_with_config,
@@ -36,3 +37,4 @@ pub use frame_layout::{
 };
 pub use frontend::{FrontendError, SourceCompileError, compile_source, lower_source};
 pub use ir::{CellId, Instruction, IrError, Program, TransferTarget};
+pub use static_layout::{StaticLayout, StaticLayoutError};

@@ -1,29 +1,27 @@
-//! Lowering from typed HIR to the continuation-oriented scalar ABI IR.
+//! Lowering from typed HIR to continuation-oriented ABI IR.
 
 use std::error::Error;
 use std::fmt;
 
 use crate::continuation_ir::{
-    Address, Continuation, ContinuationId, ContinuationIrError, ContinuationProgram,
-    FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor,
-    FunctionId as ContinuationFunctionId, Terminator, ValueType,
+    Address, ArrayRegion, Continuation, ContinuationId, ContinuationIrError, ContinuationProgram,
+    FrameArrayDescriptor, FrameArrayId, FrameInstruction, FrameSlot, FrameTransferTarget,
+    FunctionDescriptor, FunctionId as ContinuationFunctionId, GlobalDescriptor,
+    GlobalId as ContinuationGlobalId, ParameterLocation, Terminator, ValueOperand, ValueType,
 };
 use crate::hir::{
-    self, AssignmentOperator, BinaryOperator, HirExpression, HirExpressionKind, HirFunction,
-    HirProgram, HirStatement, HirStatementKind, Type, UnaryOperator,
+    self, ArrayIndex, AssignmentOperator, BinaryOperator, HirExpression, HirExpressionKind,
+    HirFunction, HirPlace, HirProgram, HirStatement, HirStatementKind, Type, UnaryOperator,
+    VariableRef,
 };
 
-/// Failure to turn typed HIR into validated continuation IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContinuationLoweringError {
-    /// The dispatcher has no more nonzero 16-bit identities available.
     ContinuationIdsExhausted,
-    /// The input violated an invariant promised by the typed HIR frontend.
     InvalidHir {
         function: Option<hir::FunctionId>,
         detail: &'static str,
     },
-    /// The generated program failed the continuation IR validator.
     InvalidContinuationIr(ContinuationIrError),
 }
 
@@ -39,11 +37,15 @@ impl fmt::Display for ContinuationLoweringError {
             Self::InvalidHir {
                 function: Some(function),
                 detail,
-            } => write!(f, "invalid HIR for function {}: {detail}", function.index()),
+            } => {
+                write!(f, "invalid HIR for function {}: {detail}", function.index())
+            }
             Self::InvalidHir {
                 function: None,
                 detail,
-            } => write!(f, "invalid HIR program: {detail}"),
+            } => {
+                write!(f, "invalid HIR program: {detail}")
+            }
             Self::InvalidContinuationIr(error) => {
                 write!(f, "invalid generated continuation IR: {error}")
             }
@@ -66,7 +68,6 @@ impl From<ContinuationIrError> for ContinuationLoweringError {
     }
 }
 
-/// Lower a typed, name-resolved scalar program to validated continuation IR.
 pub(crate) fn lower_hir(
     program: &HirProgram,
 ) -> Result<ContinuationProgram, ContinuationLoweringError> {
@@ -77,35 +78,31 @@ pub(crate) fn lower_hir(
         .map(|index| continuation_id(index + 1))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let globals = program
+        .globals
+        .iter()
+        .map(|global| {
+            GlobalDescriptor::new(
+                ContinuationGlobalId::new(global.id.index()),
+                value_type(global.ty),
+            )
+        })
+        .collect();
+
     let mut functions = Vec::with_capacity(program.functions.len());
     let mut continuations = Vec::new();
-    for (function_index, function) in program.functions.iter().enumerate() {
+    for (index, function) in program.functions.iter().enumerate() {
         let function_id = ContinuationFunctionId::new(function.id.index());
-        let mut lowerer = FunctionLowerer::new(
-            program,
-            function,
-            function_id,
-            entries[function_index],
-            &mut ids,
-        );
+        let mut lowerer =
+            FunctionLowerer::new(program, function, function_id, entries[index], &mut ids)?;
         lowerer.lower()?;
-
-        functions.push(FunctionDescriptor::new(
-            function_id,
-            function
-                .parameters
-                .iter()
-                .map(|parameter| FrameSlot::new(parameter.local.index()))
-                .collect(),
-            lowerer.next_slot,
-            value_type(function.signature.return_type),
-            entries[function_index],
-        ));
+        functions.push(lowerer.descriptor(entries[index]));
         continuations.extend(lowerer.continuations);
     }
 
-    ContinuationProgram::new(
+    ContinuationProgram::new_with_globals(
         ContinuationFunctionId::new(program.entry.index()),
+        globals,
         functions,
         continuations,
     )
@@ -118,9 +115,10 @@ fn continuation_id(value: usize) -> Result<ContinuationId, ContinuationLoweringE
     ContinuationId::new(value).ok_or(ContinuationLoweringError::ContinuationIdsExhausted)
 }
 
-fn value_type(ty: Type) -> ValueType {
+const fn value_type(ty: Type) -> ValueType {
     match ty {
         Type::Cell => ValueType::Cell,
+        Type::Array(cells) => ValueType::Array(cells),
         Type::Void => ValueType::Void,
     }
 }
@@ -146,11 +144,37 @@ fn validate_program_shape(program: &HirProgram) -> Result<(), ContinuationLoweri
         ));
     }
 
+    for (index, global) in program.globals.iter().enumerate() {
+        if global.id.index() != index {
+            return Err(invalid_hir(None, "global IDs must match vector indices"));
+        }
+        if !valid_value_type(global.ty) {
+            return Err(invalid_hir(None, "global has an invalid value type"));
+        }
+        if global
+            .initializer
+            .as_ref()
+            .is_some_and(|value| value.ty != Type::Cell)
+            || matches!(global.ty, Type::Array(_)) && global.initializer.is_some()
+        {
+            return Err(invalid_hir(
+                None,
+                "global initializer does not match its type",
+            ));
+        }
+    }
+
     for (index, function) in program.functions.iter().enumerate() {
         if function.id.index() != index {
             return Err(invalid_hir(
                 Some(function.id),
                 "function IDs must match vector indices",
+            ));
+        }
+        if !valid_declared_type(function.signature.return_type) {
+            return Err(invalid_hir(
+                Some(function.id),
+                "invalid function return type",
             ));
         }
         if function.parameters.len() != function.signature.parameter_types.len() {
@@ -159,35 +183,51 @@ fn validate_program_shape(program: &HirProgram) -> Result<(), ContinuationLoweri
                 "parameter list and signature have different lengths",
             ));
         }
-        if function
-            .signature
-            .parameter_types
-            .iter()
-            .any(|ty| *ty != Type::Cell)
-        {
-            return Err(invalid_hir(
-                Some(function.id),
-                "scalar parameters must have cell type",
-            ));
+        for (local_index, local) in function.locals.iter().enumerate() {
+            if local.id.index() != local_index || !valid_value_type(local.ty) {
+                return Err(invalid_hir(
+                    Some(function.id),
+                    "local IDs/types are not well formed",
+                ));
+            }
         }
-        let mut seen = vec![false; function.local_count];
-        for parameter in &function.parameters {
-            let Some(slot) = seen.get_mut(parameter.local.index()) else {
+        let mut seen = vec![false; function.locals.len()];
+        for (parameter, expected) in function
+            .parameters
+            .iter()
+            .zip(&function.signature.parameter_types)
+        {
+            let Some(local) = function.locals.get(parameter.local.index()) else {
                 return Err(invalid_hir(
                     Some(function.id),
                     "parameter local is out of bounds",
                 ));
             };
-            if *slot {
+            if local.ty != *expected || !valid_value_type(*expected) {
+                return Err(invalid_hir(
+                    Some(function.id),
+                    "parameter local does not match its signature type",
+                ));
+            }
+            if seen[parameter.local.index()] {
                 return Err(invalid_hir(
                     Some(function.id),
                     "two parameters use the same local",
                 ));
             }
-            *slot = true;
+            seen[parameter.local.index()] = true;
         }
     }
     Ok(())
+}
+
+const fn valid_declared_type(ty: Type) -> bool {
+    matches!(ty, Type::Cell | Type::Void)
+        || matches!(ty, Type::Array(cells) if cells >= 1 && cells <= 256)
+}
+
+const fn valid_value_type(ty: Type) -> bool {
+    !matches!(ty, Type::Void) && valid_declared_type(ty)
 }
 
 struct IdAllocator {
@@ -214,6 +254,12 @@ struct OpenContinuation {
     body: Vec<FrameInstruction>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum LocalStorage {
+    Cell(FrameSlot),
+    Array(FrameArrayId, usize),
+}
+
 struct FunctionLowerer<'a, 'ids> {
     program: &'a HirProgram,
     source: &'a HirFunction,
@@ -222,7 +268,10 @@ struct FunctionLowerer<'a, 'ids> {
     ids: &'ids mut IdAllocator,
     current: Option<OpenContinuation>,
     continuations: Vec<Continuation>,
+    local_storage: Vec<LocalStorage>,
+    frame_arrays: Vec<FrameArrayDescriptor>,
     next_slot: usize,
+    outbox_cells: usize,
 }
 
 impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
@@ -232,8 +281,28 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         function: ContinuationFunctionId,
         entry: ContinuationId,
         ids: &'ids mut IdAllocator,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ContinuationLoweringError> {
+        let mut next_slot = 0;
+        let mut frame_arrays = Vec::new();
+        let mut local_storage = Vec::with_capacity(source.locals.len());
+        for local in &source.locals {
+            local_storage.push(match local.ty {
+                Type::Cell => {
+                    let slot = FrameSlot::new(next_slot);
+                    next_slot += 1;
+                    LocalStorage::Cell(slot)
+                }
+                Type::Array(cells) => {
+                    let id = FrameArrayId::new(frame_arrays.len());
+                    frame_arrays.push(FrameArrayDescriptor::new(id, cells));
+                    LocalStorage::Array(id, cells)
+                }
+                Type::Void => {
+                    return Err(invalid_hir(Some(source.id), "void local has no storage"));
+                }
+            });
+        }
+        Ok(Self {
             program,
             source,
             function,
@@ -244,21 +313,78 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 body: Vec::new(),
             }),
             continuations: Vec::new(),
-            next_slot: source.local_count,
-        }
+            local_storage,
+            frame_arrays,
+            next_slot,
+            outbox_cells: 0,
+        })
+    }
+
+    fn descriptor(&self, entry: ContinuationId) -> FunctionDescriptor {
+        let parameters = self
+            .source
+            .parameters
+            .iter()
+            .map(
+                |parameter| match self.local_storage[parameter.local.index()] {
+                    LocalStorage::Cell(slot) => ParameterLocation::Cell(slot),
+                    LocalStorage::Array(array, _) => ParameterLocation::Array(array),
+                },
+            )
+            .collect();
+        FunctionDescriptor::new_typed(
+            self.function,
+            parameters,
+            self.next_slot,
+            self.frame_arrays.clone(),
+            self.outbox_cells,
+            value_type(self.source.signature.return_type),
+            entry,
+        )
     }
 
     fn lower(&mut self) -> Result<(), ContinuationLoweringError> {
+        if self.main {
+            self.lower_global_initializers()?;
+        }
         self.lower_statement(&self.source.body)?;
         if self.current.is_some() {
             match (self.main, self.source.signature.return_type) {
                 (true, _) => self.finish(Terminator::Halt),
                 (false, Type::Void) => self.finish(Terminator::Return { value: None }),
-                (false, Type::Cell) => {
+                (false, Type::Cell | Type::Array(_)) => {
                     return Err(invalid_hir(
                         Some(self.source.id),
-                        "cell function can reach the end without returning",
+                        "value function can reach the end without returning",
                     ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_global_initializers(&mut self) -> Result<(), ContinuationLoweringError> {
+        for global in &self.program.globals {
+            let id = ContinuationGlobalId::new(global.id.index());
+            match global.ty {
+                Type::Cell => {
+                    let destination = Address::Global(id);
+                    self.emit(FrameInstruction::Set {
+                        dst: destination,
+                        value: 0,
+                    });
+                    if let Some(initializer) = &global.initializer {
+                        let value = self.temporary_cell();
+                        self.evaluate_cell(initializer, value)?;
+                        self.move_cell(value, destination);
+                    }
+                }
+                Type::Array(cells) => {
+                    let region = ArrayRegion::Global(id);
+                    self.clear_array(region, cells);
+                }
+                Type::Void => {
+                    return Err(invalid_hir(None, "void global has no storage"));
                 }
             }
         }
@@ -282,55 +408,175 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                     }
                 }
             }
-            HirStatementKind::Declaration { local, initializer } => {
-                self.validate_local(*local)?;
-                let destination = frame(*local);
-                if let Some(initializer) = initializer {
-                    self.require_cell(initializer)?;
-                    let value = self.temporary();
-                    self.evaluate(initializer, value)?;
-                    self.move_value(value, destination);
-                } else {
+            HirStatementKind::Declaration { local, initializer } => match self.local(*local)? {
+                LocalStorage::Cell(slot) => {
+                    let destination = Address::Frame(slot);
                     self.emit(FrameInstruction::Set {
                         dst: destination,
                         value: 0,
                     });
+                    if let Some(initializer) = initializer {
+                        let value = self.temporary_cell();
+                        self.evaluate_cell(initializer, value)?;
+                        self.move_cell(value, destination);
+                    }
                 }
-            }
+                LocalStorage::Array(array, cells) => {
+                    if initializer.is_some() {
+                        return Err(invalid_hir(
+                            Some(self.source.id),
+                            "array declaration has an initializer",
+                        ));
+                    }
+                    self.clear_array(ArrayRegion::Frame(array), cells);
+                }
+            },
             HirStatementKind::Assignment {
-                local,
-                operator,
                 value,
+                target,
+                operator,
             } => {
-                self.validate_local(*local)?;
-                self.require_cell(value)?;
-                let temporary = self.temporary();
-                self.evaluate(value, temporary)?;
-                match operator {
-                    AssignmentOperator::Set => self.move_value(temporary, frame(*local)),
-                    AssignmentOperator::Add => self.transfer(temporary, frame(*local), 1),
-                    AssignmentOperator::Subtract => self.transfer(temporary, frame(*local), 255),
-                }
+                self.lower_assignment(value, target, *operator)?;
             }
             HirStatementKind::Output(expression) => {
-                self.require_cell(expression)?;
-                let value = self.temporary();
-                self.evaluate(expression, value)?;
+                let value = self.temporary_cell();
+                self.evaluate_cell(expression, value)?;
                 self.emit(FrameInstruction::Output { src: value });
             }
             HirStatementKind::Call {
                 function,
                 arguments,
-            } => self.lower_call(*function, arguments, None)?,
-            HirStatementKind::Return(value) => {
-                self.lower_return(value.as_ref())?;
+            } => {
+                self.lower_call(*function, arguments, Type::Void)?;
             }
+            HirStatementKind::Return(value) => self.lower_return(value.as_ref())?,
             HirStatementKind::If {
                 condition,
                 then_branch,
                 else_branch,
-            } => self.lower_if(condition, then_branch, else_branch.as_deref())?,
-            HirStatementKind::While { condition, body } => self.lower_while(condition, body)?,
+            } => {
+                self.lower_if(condition, then_branch, else_branch.as_deref())?;
+            }
+            HirStatementKind::While { condition, body } => {
+                self.lower_while(condition, body)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_assignment(
+        &mut self,
+        value: &HirExpression,
+        target: &HirPlace,
+        operator: AssignmentOperator,
+    ) -> Result<(), ContinuationLoweringError> {
+        // Source semantics require the complete RHS before a dynamic LHS index.
+        match value.ty {
+            Type::Cell => {
+                let rhs = self.temporary_cell();
+                self.evaluate_cell(value, rhs)?;
+                match target {
+                    HirPlace::Variable {
+                        variable,
+                        ty: Type::Cell,
+                    } => {
+                        self.update_cell(rhs, self.cell_variable(*variable)?, operator);
+                    }
+                    HirPlace::ArrayElement {
+                        array,
+                        length,
+                        index,
+                    } => {
+                        let region = self.array_variable(*array, *length)?;
+                        self.update_array_element(rhs, region, index, operator)?;
+                    }
+                    _ => {
+                        return Err(invalid_hir(
+                            Some(self.source.id),
+                            "cell assignment target has a non-cell type",
+                        ));
+                    }
+                }
+            }
+            Type::Array(cells) if operator == AssignmentOperator::Set => {
+                let rhs = self.evaluate_array(value)?;
+                let HirPlace::Variable {
+                    variable,
+                    ty: Type::Array(target_cells),
+                } = target
+                else {
+                    return Err(invalid_hir(
+                        Some(self.source.id),
+                        "aggregate assignment target is not an array variable",
+                    ));
+                };
+                if cells != *target_cells {
+                    return Err(invalid_hir(
+                        Some(self.source.id),
+                        "aggregate assignment has mismatched lengths",
+                    ));
+                }
+                let destination = self.array_variable(*variable, cells)?;
+                self.copy_array(rhs, destination, cells);
+            }
+            Type::Array(_) | Type::Void => {
+                return Err(invalid_hir(
+                    Some(self.source.id),
+                    "assignment value/operator has an invalid type",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn update_cell(&mut self, rhs: Address, destination: Address, operator: AssignmentOperator) {
+        match operator {
+            AssignmentOperator::Set => self.move_cell(rhs, destination),
+            AssignmentOperator::Add => self.transfer(rhs, destination, 1),
+            AssignmentOperator::Subtract => self.transfer(rhs, destination, 255),
+        }
+    }
+
+    fn update_array_element(
+        &mut self,
+        rhs: Address,
+        array: ArrayRegion,
+        index: &ArrayIndex,
+        operator: AssignmentOperator,
+    ) -> Result<(), ContinuationLoweringError> {
+        match index {
+            ArrayIndex::Constant(index) => {
+                let destination = Address::ArrayElement {
+                    array,
+                    index: usize::from(*index),
+                };
+                self.update_cell(rhs, destination, operator);
+            }
+            ArrayIndex::Dynamic(index) => {
+                let index_value = self.temporary_cell();
+                self.evaluate_cell(index, index_value)?;
+                match operator {
+                    AssignmentOperator::Set => {
+                        self.array_store(array, index_value, rhs)?;
+                    }
+                    AssignmentOperator::Add | AssignmentOperator::Subtract => {
+                        let store_index = self.temporary_cell();
+                        self.copy_cell(index_value, store_index);
+                        let current = self.temporary_cell();
+                        self.array_load(array, index_value, current)?;
+                        self.transfer(
+                            rhs,
+                            current,
+                            if operator == AssignmentOperator::Add {
+                                1
+                            } else {
+                                255
+                            },
+                        );
+                        self.array_store(array, store_index, current)?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -343,11 +589,16 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             (Type::Void, None) if self.main => self.finish(Terminator::Halt),
             (Type::Void, None) => self.finish(Terminator::Return { value: None }),
             (Type::Cell, Some(value)) if !self.main => {
-                self.require_cell(value)?;
-                let result = self.temporary();
-                self.evaluate(value, result)?;
+                let result = self.temporary_cell();
+                self.evaluate_cell(value, result)?;
                 self.finish(Terminator::Return {
-                    value: Some(result),
+                    value: Some(ValueOperand::Cell(result)),
+                });
+            }
+            (Type::Array(cells), Some(value)) if !self.main && value.ty == Type::Array(cells) => {
+                let result = self.evaluate_array(value)?;
+                self.finish(Terminator::Return {
+                    value: Some(ValueOperand::Array(result)),
                 });
             }
             _ => {
@@ -376,9 +627,8 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             return Ok(());
         }
 
-        let condition_value = self.temporary();
-        self.evaluate(condition, condition_value)?;
-
+        let condition_value = self.temporary_cell();
+        self.evaluate_cell(condition, condition_value)?;
         let then_id = self.ids.allocate()?;
         let else_id = self.ids.allocate()?;
         self.finish(Terminator::Branch {
@@ -411,7 +661,6 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             };
             self.finish(Terminator::Goto { target });
         }
-
         if let Some(join_id) = join_id {
             self.start(join_id);
         }
@@ -428,7 +677,6 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             if condition == 0 {
                 return Ok(());
             }
-
             let body_id = self.ids.allocate()?;
             self.finish(Terminator::Goto { target: body_id });
             self.start(body_id);
@@ -445,16 +693,14 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         self.finish(Terminator::Goto {
             target: condition_id,
         });
-
         self.start(condition_id);
-        let condition_value = self.temporary();
-        self.evaluate(condition, condition_value)?;
+        let condition_value = self.temporary_cell();
+        self.evaluate_cell(condition, condition_value)?;
         self.finish(Terminator::Branch {
             condition: condition_value,
             then_target: body_id,
             else_target: after_id,
         });
-
         self.start(body_id);
         self.lower_statement(body)?;
         if self.current.is_some() {
@@ -466,27 +712,47 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         Ok(())
     }
 
-    fn evaluate(
+    fn evaluate_cell(
         &mut self,
         expression: &HirExpression,
         destination: Address,
     ) -> Result<(), ContinuationLoweringError> {
         self.require_cell(expression)?;
         match &expression.kind {
-            HirExpressionKind::Literal(value) => self.emit(FrameInstruction::Set {
-                dst: destination,
-                value: *value,
-            }),
-            HirExpressionKind::Local(local) => {
-                self.validate_local(*local)?;
-                self.copy_value(frame(*local), destination);
+            HirExpressionKind::Literal(value) => {
+                self.emit(FrameInstruction::Set {
+                    dst: destination,
+                    value: *value,
+                });
+            }
+            HirExpressionKind::Variable(variable) => {
+                self.copy_cell(self.cell_variable(*variable)?, destination);
+            }
+            HirExpressionKind::ArrayElement {
+                array,
+                length,
+                index,
+            } => {
+                let array = self.array_variable(*array, *length)?;
+                match index {
+                    ArrayIndex::Constant(index) => self.copy_cell(
+                        Address::ArrayElement {
+                            array,
+                            index: usize::from(*index),
+                        },
+                        destination,
+                    ),
+                    ArrayIndex::Dynamic(index) => {
+                        let index = self.evaluate_cell_temporary(index)?;
+                        self.array_load(array, index, destination)?;
+                    }
+                }
             }
             HirExpressionKind::Input => self.emit(FrameInstruction::Input { dst: destination }),
             HirExpressionKind::Unary { operator, operand } => match operator {
-                UnaryOperator::Plus => self.evaluate(operand, destination)?,
+                UnaryOperator::Plus => self.evaluate_cell(operand, destination)?,
                 UnaryOperator::Negate => {
-                    let value = self.temporary();
-                    self.evaluate(operand, value)?;
+                    let value = self.evaluate_cell_temporary(operand)?;
                     self.emit(FrameInstruction::Set {
                         dst: destination,
                         value: 0,
@@ -494,8 +760,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                     self.transfer(value, destination, 255);
                 }
                 UnaryOperator::Not => {
-                    let value = self.temporary();
-                    self.evaluate(operand, value)?;
+                    let value = self.evaluate_cell_temporary(operand)?;
                     self.boolean_from(value, destination, 0, 1);
                 }
             },
@@ -503,13 +768,51 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 operator,
                 left,
                 right,
-            } => self.evaluate_binary(*operator, left, right, destination)?,
+            } => {
+                self.evaluate_binary(*operator, left, right, destination)?;
+            }
             HirExpressionKind::Call {
                 function,
                 arguments,
-            } => self.lower_call(*function, arguments, Some(destination))?,
+            } => {
+                self.lower_call(*function, arguments, Type::Cell)?;
+                self.move_cell(Address::AbiValue, destination);
+            }
         }
         Ok(())
+    }
+
+    fn evaluate_array(
+        &mut self,
+        expression: &HirExpression,
+    ) -> Result<ArrayRegion, ContinuationLoweringError> {
+        let Type::Array(cells) = expression.ty else {
+            return Err(invalid_hir(
+                Some(self.source.id),
+                "array expression has non-array type",
+            ));
+        };
+        let snapshot = self.temporary_array(cells);
+        match &expression.kind {
+            HirExpressionKind::Variable(variable) => {
+                let source = self.array_variable(*variable, cells)?;
+                self.copy_array(source, snapshot, cells);
+            }
+            HirExpressionKind::Call {
+                function,
+                arguments,
+            } => {
+                self.lower_call(*function, arguments, Type::Array(cells))?;
+                self.copy_array(ArrayRegion::Outbox, snapshot, cells);
+            }
+            _ => {
+                return Err(invalid_hir(
+                    Some(self.source.id),
+                    "unsupported aggregate expression kind",
+                ));
+            }
+        }
+        Ok(snapshot)
     }
 
     fn evaluate_binary(
@@ -523,11 +826,10 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         self.require_cell(right)?;
         match operator {
             BinaryOperator::Add | BinaryOperator::Subtract => {
-                self.evaluate(left, destination)?;
-                let right_value = self.temporary();
-                self.evaluate(right, right_value)?;
+                self.evaluate_cell(left, destination)?;
+                let right = self.evaluate_cell_temporary(right)?;
                 self.transfer(
-                    right_value,
+                    right,
                     destination,
                     if operator == BinaryOperator::Add {
                         1
@@ -537,39 +839,27 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 );
             }
             BinaryOperator::Equal | BinaryOperator::NotEqual => {
-                let left_value = self.temporary();
-                let right_value = self.temporary();
-                self.evaluate(left, left_value)?;
-                self.evaluate(right, right_value)?;
-                self.transfer(right_value, left_value, 255);
+                let left = self.evaluate_cell_temporary(left)?;
+                let right = self.evaluate_cell_temporary(right)?;
+                self.transfer(right, left, 255);
                 let (nonzero, zero) = if operator == BinaryOperator::Equal {
                     (0, 1)
                 } else {
                     (1, 0)
                 };
-                self.boolean_from(left_value, destination, nonzero, zero);
+                self.boolean_from(left, destination, nonzero, zero);
             }
             BinaryOperator::Less
             | BinaryOperator::LessEqual
             | BinaryOperator::Greater
             | BinaryOperator::GreaterEqual => {
-                let left_value = self.temporary();
-                let right_value = self.temporary();
-                self.evaluate(left, left_value)?;
-                self.evaluate(right, right_value)?;
+                let left = self.evaluate_cell_temporary(left)?;
+                let right = self.evaluate_cell_temporary(right)?;
                 match operator {
-                    BinaryOperator::Less => {
-                        self.less_than(left_value, right_value, destination, 1, 0)
-                    }
-                    BinaryOperator::LessEqual => {
-                        self.less_than(right_value, left_value, destination, 0, 1)
-                    }
-                    BinaryOperator::Greater => {
-                        self.less_than(right_value, left_value, destination, 1, 0)
-                    }
-                    BinaryOperator::GreaterEqual => {
-                        self.less_than(left_value, right_value, destination, 0, 1)
-                    }
+                    BinaryOperator::Less => self.less_than(left, right, destination, 1, 0),
+                    BinaryOperator::LessEqual => self.less_than(right, left, destination, 0, 1),
+                    BinaryOperator::Greater => self.less_than(right, left, destination, 1, 0),
+                    BinaryOperator::GreaterEqual => self.less_than(left, right, destination, 0, 1),
                     _ => unreachable!(),
                 }
             }
@@ -587,8 +877,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         right: &HirExpression,
         destination: Address,
     ) -> Result<(), ContinuationLoweringError> {
-        let left_value = self.temporary();
-        self.evaluate(left, left_value)?;
+        let left_value = self.evaluate_cell_temporary(left)?;
         let right_id = self.ids.allocate()?;
         let short_id = self.ids.allocate()?;
         let join_id = self.ids.allocate()?;
@@ -602,13 +891,10 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             then_target,
             else_target,
         });
-
         self.start(right_id);
-        let right_value = self.temporary();
-        self.evaluate(right, right_value)?;
+        let right_value = self.evaluate_cell_temporary(right)?;
         self.boolean_from(right_value, destination, 1, 0);
         self.finish(Terminator::Goto { target: join_id });
-
         self.start(short_id);
         self.emit(FrameInstruction::Set {
             dst: destination,
@@ -623,58 +909,139 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         &mut self,
         function: hir::FunctionId,
         arguments: &[HirExpression],
-        destination: Option<Address>,
+        expected_return: Type,
     ) -> Result<(), ContinuationLoweringError> {
-        let Some(callee) = self.source_program_function(function) else {
+        let callee = self
+            .program
+            .functions
+            .get(function.index())
+            .filter(|callee| callee.id == function)
+            .ok_or_else(|| invalid_hir(Some(self.source.id), "call target is out of bounds"))?;
+        if callee.signature.return_type != expected_return
+            || arguments.len() != callee.signature.parameter_types.len()
+        {
             return Err(invalid_hir(
                 Some(self.source.id),
-                "call target is out of bounds",
-            ));
-        };
-        let parameter_count = callee.signature.parameter_types.len();
-        let return_type = callee.signature.return_type;
-        if parameter_count != arguments.len() {
-            return Err(invalid_hir(
-                Some(self.source.id),
-                "call argument count does not match the callee signature",
-            ));
-        }
-        let expects_value = destination.is_some();
-        if expects_value != (return_type == Type::Cell) {
-            return Err(invalid_hir(
-                Some(self.source.id),
-                "call use does not match the callee return type",
+                "call use does not match the callee signature",
             ));
         }
 
-        let mut argument_slots = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            self.require_cell(argument)?;
-            let slot = self.temporary();
-            self.evaluate(argument, slot)?;
-            argument_slots.push(slot);
+        let mut operands = Vec::with_capacity(arguments.len());
+        for (argument, parameter_type) in arguments.iter().zip(&callee.signature.parameter_types) {
+            if argument.ty != *parameter_type {
+                return Err(invalid_hir(
+                    Some(self.source.id),
+                    "call argument type does not match the callee signature",
+                ));
+            }
+            operands.push(match parameter_type {
+                Type::Cell => ValueOperand::Cell(self.evaluate_cell_temporary(argument)?),
+                Type::Array(_) => ValueOperand::Array(self.evaluate_array(argument)?),
+                Type::Void => {
+                    return Err(invalid_hir(Some(self.source.id), "void call parameter"));
+                }
+            });
+        }
+        if let Type::Array(cells) = expected_return {
+            self.outbox_cells = self.outbox_cells.max(cells);
         }
         let resume = self.ids.allocate()?;
         self.finish(Terminator::Call {
             callee: ContinuationFunctionId::new(function.index()),
-            arguments: argument_slots,
+            arguments: operands,
             return_to: resume,
         });
         self.start(resume);
-        if let Some(destination) = destination {
-            self.move_value(Address::AbiValue, destination);
-        }
         Ok(())
     }
 
-    // Set for the duration of `lower_hir`; stored indirectly to keep this
-    // builder focused on a single function. This method is replaced by the
-    // call-signature table populated in `SIGNATURES` below.
-    fn source_program_function(&self, id: hir::FunctionId) -> Option<&HirFunction> {
-        self.program
-            .functions
-            .get(id.index())
-            .filter(|function| function.id == id)
+    fn array_load(
+        &mut self,
+        array: ArrayRegion,
+        index: Address,
+        destination: Address,
+    ) -> Result<(), ContinuationLoweringError> {
+        let resume = self.ids.allocate()?;
+        self.finish(Terminator::ArrayLoad {
+            array,
+            index,
+            destination,
+            return_to: resume,
+        });
+        self.start(resume);
+        Ok(())
+    }
+
+    fn array_store(
+        &mut self,
+        array: ArrayRegion,
+        index: Address,
+        value: Address,
+    ) -> Result<(), ContinuationLoweringError> {
+        let resume = self.ids.allocate()?;
+        self.finish(Terminator::ArrayStore {
+            array,
+            index,
+            value,
+            return_to: resume,
+        });
+        self.start(resume);
+        Ok(())
+    }
+
+    fn local(&self, local: hir::LocalId) -> Result<LocalStorage, ContinuationLoweringError> {
+        self.local_storage
+            .get(local.index())
+            .copied()
+            .ok_or_else(|| invalid_hir(Some(self.source.id), "local ID is out of bounds"))
+    }
+
+    fn cell_variable(&self, variable: VariableRef) -> Result<Address, ContinuationLoweringError> {
+        match variable {
+            VariableRef::Global(global) => self
+                .program
+                .globals
+                .get(global.index())
+                .filter(|item| item.id == global && item.ty == Type::Cell)
+                .map(|_| Address::Global(ContinuationGlobalId::new(global.index())))
+                .ok_or_else(|| {
+                    invalid_hir(Some(self.source.id), "global cell reference is invalid")
+                }),
+            VariableRef::Local(local) => match self.local(local)? {
+                LocalStorage::Cell(slot) => Ok(Address::Frame(slot)),
+                LocalStorage::Array(_, _) => Err(invalid_hir(
+                    Some(self.source.id),
+                    "array local used as a cell",
+                )),
+            },
+        }
+    }
+
+    fn array_variable(
+        &self,
+        variable: VariableRef,
+        cells: usize,
+    ) -> Result<ArrayRegion, ContinuationLoweringError> {
+        match variable {
+            VariableRef::Global(global) => self
+                .program
+                .globals
+                .get(global.index())
+                .filter(|item| item.id == global && item.ty == Type::Array(cells))
+                .map(|_| ArrayRegion::Global(ContinuationGlobalId::new(global.index())))
+                .ok_or_else(|| {
+                    invalid_hir(Some(self.source.id), "global array reference is invalid")
+                }),
+            VariableRef::Local(local) => match self.local(local)? {
+                LocalStorage::Array(array, actual) if actual == cells => {
+                    Ok(ArrayRegion::Frame(array))
+                }
+                LocalStorage::Cell(_) | LocalStorage::Array(_, _) => Err(invalid_hir(
+                    Some(self.source.id),
+                    "local array reference has the wrong type",
+                )),
+            },
+        }
     }
 
     fn require_cell(&self, expression: &HirExpression) -> Result<(), ContinuationLoweringError> {
@@ -687,26 +1054,44 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         Ok(())
     }
 
-    fn validate_local(&self, local: hir::LocalId) -> Result<(), ContinuationLoweringError> {
-        if local.index() >= self.source.local_count {
-            return Err(invalid_hir(
-                Some(self.source.id),
-                "local ID is out of bounds",
-            ));
-        }
-        Ok(())
-    }
-
-    fn temporary(&mut self) -> Address {
+    fn temporary_cell(&mut self) -> Address {
         let slot = FrameSlot::new(self.next_slot);
         self.next_slot += 1;
         Address::Frame(slot)
     }
 
+    fn evaluate_cell_temporary(
+        &mut self,
+        expression: &HirExpression,
+    ) -> Result<Address, ContinuationLoweringError> {
+        let destination = self.temporary_cell();
+        self.evaluate_cell(expression, destination)?;
+        Ok(destination)
+    }
+
+    fn temporary_array(&mut self, cells: usize) -> ArrayRegion {
+        let id = FrameArrayId::new(self.frame_arrays.len());
+        self.frame_arrays.push(FrameArrayDescriptor::new(id, cells));
+        ArrayRegion::Frame(id)
+    }
+
+    fn clear_array(&mut self, array: ArrayRegion, cells: usize) {
+        for index in 0..cells {
+            self.emit(FrameInstruction::Set {
+                dst: Address::ArrayElement { array, index },
+                value: 0,
+            });
+        }
+    }
+
+    fn copy_array(&mut self, src: ArrayRegion, dst: ArrayRegion, cells: usize) {
+        self.emit(FrameInstruction::AggregateCopy { src, dst, cells });
+    }
+
     fn emit(&mut self, instruction: FrameInstruction) {
         self.current
             .as_mut()
-            .expect("instructions are only emitted into a live continuation")
+            .expect("instructions require a live continuation")
             .body
             .push(instruction);
     }
@@ -723,7 +1108,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         let current = self
             .current
             .take()
-            .expect("a live continuation is required before a terminator");
+            .expect("terminators require a live continuation");
         self.continuations.push(Continuation::new(
             current.id,
             self.function,
@@ -742,7 +1127,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         });
     }
 
-    fn move_value(&mut self, source: Address, destination: Address) {
+    fn move_cell(&mut self, source: Address, destination: Address) {
         self.emit(FrameInstruction::Set {
             dst: destination,
             value: 0,
@@ -750,8 +1135,8 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         self.transfer(source, destination, 1);
     }
 
-    fn copy_value(&mut self, source: Address, destination: Address) {
-        let restore = self.temporary();
+    fn copy_cell(&mut self, source: Address, destination: Address) {
+        let restore = self.temporary_cell();
         self.emit(FrameInstruction::Set {
             dst: destination,
             value: 0,
@@ -794,9 +1179,9 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         true_value: u8,
         false_value: u8,
     ) {
-        let right_test = self.temporary();
-        let restore = self.temporary();
-        let copy_right = vec![
+        let right_test = self.temporary_cell();
+        let restore = self.temporary_cell();
+        let mut body = vec![
             FrameInstruction::Set {
                 dst: right_test,
                 value: 0,
@@ -822,7 +1207,6 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 }],
             },
         ];
-        let mut body = copy_right;
         body.push(FrameInstruction::Branch {
             condition: right_test,
             then_body: vec![
@@ -848,341 +1232,237 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
     }
 }
 
-fn frame(local: hir::LocalId) -> Address {
-    Address::Frame(FrameSlot::new(local.index()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::{FunctionSignature, HirParameter, LocalId};
+    use crate::{lexer, parser, semantic};
 
-    fn expression(kind: HirExpressionKind) -> HirExpression {
-        HirExpression {
-            kind,
-            ty: Type::Cell,
-            offset: 0,
-        }
-    }
-
-    fn literal(value: u8) -> HirExpression {
-        expression(HirExpressionKind::Literal(value))
-    }
-
-    fn local(index: usize) -> HirExpression {
-        expression(HirExpressionKind::Local(LocalId::new(index)))
-    }
-
-    fn call(id: usize, arguments: Vec<HirExpression>) -> HirExpression {
-        expression(HirExpressionKind::Call {
-            function: hir::FunctionId::new(id),
-            arguments,
-        })
-    }
-
-    fn statement(kind: HirStatementKind) -> HirStatement {
-        HirStatement { kind, offset: 0 }
-    }
-
-    fn block(statements: Vec<HirStatement>) -> HirStatement {
-        statement(HirStatementKind::Block(statements))
-    }
-
-    fn function(
-        id: usize,
-        name: &str,
-        parameter_count: usize,
-        local_count: usize,
-        return_type: Type,
-        body: HirStatement,
-    ) -> HirFunction {
-        HirFunction {
-            id: hir::FunctionId::new(id),
-            name: name.into(),
-            offset: 0,
-            signature: FunctionSignature {
-                return_type,
-                parameter_types: vec![Type::Cell; parameter_count],
-            },
-            parameters: (0..parameter_count)
-                .map(|index| HirParameter {
-                    local: LocalId::new(index),
-                    offset: 0,
-                })
-                .collect(),
-            local_count,
-            body,
-        }
-    }
-
-    fn main(body: Vec<HirStatement>) -> HirFunction {
-        function(0, "main", 0, 0, Type::Void, block(body))
-    }
-
-    fn program(functions: Vec<HirFunction>) -> HirProgram {
-        HirProgram {
-            entry: hir::FunctionId::new(0),
-            functions,
-        }
+    fn lower(source: &str) -> ContinuationProgram {
+        let ast = parser::parse(lexer::lex(source).unwrap()).unwrap();
+        let hir = semantic::analyze(&ast).unwrap();
+        lower_hir(&hir).unwrap()
     }
 
     #[test]
-    fn scalar_call_splits_and_resume_consumes_abi_value() {
-        let source = program(vec![
-            main(vec![statement(HirStatementKind::Output(call(
-                1,
-                vec![literal(7)],
-            )))]),
-            function(
-                1,
-                "identity",
-                1,
-                1,
-                Type::Cell,
-                statement(HirStatementKind::Return(Some(local(0)))),
-            ),
-        ]);
-
-        let lowered = lower_hir(&source).unwrap();
-        assert_eq!(lowered.functions()[0].entry().get(), 1);
-        assert_eq!(lowered.functions()[1].entry().get(), 2);
-        assert_eq!(lowered.functions()[0].frame_slots(), 2);
-
-        let entry = lowered
-            .continuation(ContinuationId::new(1).unwrap())
-            .unwrap();
-        let Terminator::Call {
-            callee,
-            arguments,
-            return_to,
-        } = entry.terminator()
-        else {
-            panic!("main entry should end in a call");
-        };
-        assert_eq!(*callee, ContinuationFunctionId::new(1));
-        assert_eq!(arguments, &[Address::Frame(FrameSlot::new(1))]);
-
-        let resume = lowered.continuation(*return_to).unwrap();
-        assert!(matches!(
-            resume.body(),
-            [
-                FrameInstruction::Set {
-                    dst: Address::Frame(_),
-                    value: 0,
-                },
-                FrameInstruction::Transfer {
-                    src: Address::AbiValue,
-                    ..
-                },
-                FrameInstruction::Output { .. }
-            ]
-        ));
-        assert_eq!(resume.terminator(), &Terminator::Halt);
+    fn globals_and_general_initializers_are_lowered_before_main_body() {
+        let program = lower(
+            "cell first = input(); cell second = identity(first); \
+             cell identity(cell x) { return x; } void main() { output(second); }",
+        );
+        assert_eq!(program.globals().len(), 2);
+        let main = program.function(ContinuationFunctionId::new(1)).unwrap();
+        assert!(main.frame_slots() >= 2);
+        let entry = program.continuation(main.entry()).unwrap();
+        assert!(
+            entry
+                .body()
+                .iter()
+                .any(|instruction| matches!(instruction, FrameInstruction::Input { .. }))
+        );
+        assert!(matches!(entry.terminator(), Terminator::Call { .. }));
     }
 
     #[test]
-    fn nested_call_arguments_are_emitted_in_left_to_right_order() {
-        let constant = |id, name: &str, value| {
-            function(
-                id,
-                name,
-                0,
-                0,
-                Type::Cell,
-                statement(HirStatementKind::Return(Some(literal(value)))),
-            )
-        };
-        let source = program(vec![
-            main(vec![statement(HirStatementKind::Output(call(
-                3,
-                vec![call(1, vec![]), call(2, vec![])],
-            )))]),
-            constant(1, "left", 1),
-            constant(2, "right", 2),
-            function(
-                3,
-                "pick",
-                2,
-                2,
-                Type::Cell,
-                statement(HirStatementKind::Return(Some(local(0)))),
-            ),
-        ]);
+    fn dynamic_load_and_store_split_continuations() {
+        let program = lower(
+            "cell[4] data; void main() { cell i = input(); data[i] = input(); output(data[i]); }",
+        );
+        assert!(program.continuations().iter().any(|continuation| matches!(
+            continuation.terminator(),
+            Terminator::ArrayStore {
+                array: ArrayRegion::Global(_),
+                ..
+            }
+        )));
+        assert!(program.continuations().iter().any(|continuation| matches!(
+            continuation.terminator(),
+            Terminator::ArrayLoad {
+                array: ArrayRegion::Global(_),
+                ..
+            }
+        )));
+    }
 
-        let lowered = lower_hir(&source).unwrap();
-        let calls = lowered
+    #[test]
+    fn dynamic_compound_assignment_evaluates_index_once_then_loads_and_stores() {
+        let program = lower("void main() { cell[4] data; data[input()] += input(); }");
+        let portal_terms: Vec<_> = program
             .continuations()
             .iter()
-            .filter(|continuation| continuation.function() == ContinuationFunctionId::new(0))
             .filter_map(|continuation| match continuation.terminator() {
-                Terminator::Call { callee, .. } => Some(callee.index()),
+                Terminator::ArrayLoad { .. } => Some("load"),
+                Terminator::ArrayStore { .. } => Some("store"),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        assert_eq!(calls, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn if_with_early_returns_needs_no_join_continuation() {
-        let choose = function(
-            1,
-            "choose",
-            1,
-            1,
-            Type::Cell,
-            statement(HirStatementKind::If {
-                condition: local(0),
-                then_branch: Box::new(statement(HirStatementKind::Return(Some(literal(1))))),
-                else_branch: Some(Box::new(statement(HirStatementKind::Return(Some(
-                    literal(2),
-                ))))),
-            }),
-        );
-        let probe = function(
-            2,
-            "probe",
-            1,
-            1,
-            Type::Cell,
-            block(vec![
-                statement(HirStatementKind::If {
-                    condition: local(0),
-                    then_branch: Box::new(statement(HirStatementKind::Empty)),
-                    else_branch: None,
-                }),
-                statement(HirStatementKind::Return(Some(literal(0)))),
-            ]),
-        );
-        let lowered = lower_hir(&program(vec![main(vec![]), choose, probe])).unwrap();
-        let choose_continuations = lowered
+            .collect();
+        assert_eq!(portal_terms, ["load", "store"]);
+        let input_count = program
             .continuations()
             .iter()
-            .filter(|continuation| continuation.function() == ContinuationFunctionId::new(1))
-            .collect::<Vec<_>>();
+            .flat_map(|continuation| continuation.body())
+            .filter(|instruction| matches!(instruction, FrameInstruction::Input { .. }))
+            .count();
+        assert_eq!(input_count, 2);
+    }
 
-        assert_eq!(choose_continuations.len(), 3);
-        assert!(matches!(
-            choose_continuations[0].terminator(),
-            Terminator::Branch { .. }
-        ));
-        assert!(
-            choose_continuations[1..]
-                .iter()
-                .all(|continuation| matches!(
-                    continuation.terminator(),
-                    Terminator::Return { value: Some(_) }
-                ))
+    #[test]
+    fn rhs_is_lowered_before_dynamic_assignment_index() {
+        let program = lower("void main() { cell[4] data; data[input()] = input(); }");
+        let main = program.function(ContinuationFunctionId::new(0)).unwrap();
+        let entry = program.continuation(main.entry()).unwrap();
+        let inputs: Vec<_> = entry
+            .body()
+            .iter()
+            .filter_map(|instruction| match instruction {
+                FrameInstruction::Input { dst } => Some(*dst),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs.len(), 2);
+        let Terminator::ArrayStore { index, value, .. } = entry.terminator() else {
+            panic!()
+        };
+        assert_eq!(inputs[0], *value);
+        assert_eq!(inputs[1], *index);
+    }
+
+    #[test]
+    fn aggregate_calls_use_snapshots_parameters_returns_and_outbox() {
+        let program = lower(
+            "cell[20] copy(cell[20] value) { cell[20] result; result = value; return result; } \
+             void main() { cell[20] source; cell[20] target; target = copy(source); }",
         );
-
-        let probe_entry = lowered
-            .continuation(ContinuationId::new(3).unwrap())
-            .unwrap();
+        let main = program.function(ContinuationFunctionId::new(1)).unwrap();
+        let copy = program.function(ContinuationFunctionId::new(0)).unwrap();
+        assert_eq!(main.outbox_cells(), 20);
         assert!(matches!(
-            probe_entry.terminator(),
-            Terminator::Branch {
-                then_target,
-                else_target,
-                ..
-            } if then_target.get() == 6 && else_target.get() == 7
+            copy.parameter_locations(),
+            [ParameterLocation::Array(_)]
         ));
-        assert_eq!(
-            lowered
+        assert_eq!(copy.return_type(), ValueType::Array(20));
+        assert!(program.continuations().iter().any(|continuation| matches!(
+            continuation.terminator(),
+            Terminator::Return {
+                value: Some(ValueOperand::Array(_))
+            }
+        )));
+    }
+
+    #[test]
+    fn aggregate_arguments_are_materialized_left_to_right() {
+        let program = lower(
+            "cell[2] make(cell x) { cell[2] a; a[0] = x; return a; } \
+             void take(cell[2] a, cell[2] b) {} \
+             void main() { take(make(input()), make(input())); }",
+        );
+        let main = program.function(ContinuationFunctionId::new(2)).unwrap();
+        assert_eq!(main.outbox_cells(), 2);
+        let calls: Vec<_> = program
+            .continuations()
+            .iter()
+            .filter_map(|continuation| match continuation.terminator() {
+                Terminator::Call { callee, .. } if continuation.function() == main.id() => {
+                    Some(callee.index())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn constant_indices_do_not_use_array_portals() {
+        let program = lower("void main() { cell[4] a; a[3] = 7; output(a[3]); }");
+        assert!(!program.continuations().iter().any(|continuation| matches!(
+            continuation.terminator(),
+            Terminator::ArrayLoad { .. } | Terminator::ArrayStore { .. }
+        )));
+        assert!(
+            program
                 .continuations()
                 .iter()
-                .map(|continuation| continuation.id().get())
-                .max(),
-            Some(8),
-            "the both-returning if must not consume an unused join ID",
+                .flat_map(|continuation| continuation.body())
+                .any(|instruction| matches!(
+                    instruction,
+                    FrameInstruction::Set {
+                        dst: Address::ArrayElement { index: 3, .. },
+                        ..
+                    }
+                ))
         );
     }
 
     #[test]
-    fn logical_or_places_rhs_call_only_on_the_zero_branch() {
-        let rhs = function(
-            1,
-            "rhs",
-            0,
-            0,
-            Type::Cell,
-            statement(HirStatementKind::Return(Some(literal(1)))),
+    fn array_declarations_clear_every_element_at_their_execution_point() {
+        let program = lower(
+            "cell[3] global; void main() { cell keep = 1; while (keep) { cell[3] local; local[0] = 9; keep = 0; } }",
         );
-        let logical = expression(HirExpressionKind::Binary {
-            operator: BinaryOperator::LogicalOr,
-            left: Box::new(expression(HirExpressionKind::Input)),
-            right: Box::new(call(1, vec![])),
-        });
-        let lowered = lower_hir(&program(vec![
-            main(vec![statement(HirStatementKind::Output(logical))]),
-            rhs,
-        ]))
-        .unwrap();
-        let main_entry = lowered
-            .continuation(ContinuationId::new(1).unwrap())
-            .unwrap();
-        let Terminator::Branch {
-            then_target,
-            else_target,
-            ..
-        } = main_entry.terminator()
-        else {
-            panic!("logical or must branch after evaluating its left operand");
-        };
+        let main = program.function(ContinuationFunctionId::new(0)).unwrap();
+        let entry = program.continuation(main.entry()).unwrap();
+        let global_clears = entry
+            .body()
+            .iter()
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    FrameInstruction::Set {
+                        dst: Address::ArrayElement {
+                            array: ArrayRegion::Global(_),
+                            ..
+                        },
+                        value: 0
+                    }
+                )
+            })
+            .count();
+        assert_eq!(global_clears, 3);
+
+        let local_clear_continuation = program
+            .continuations()
+            .iter()
+            .find(|continuation| {
+                continuation
+                    .body()
+                    .iter()
+                    .filter(|instruction| {
+                        matches!(
+                            instruction,
+                            FrameInstruction::Set {
+                                dst: Address::ArrayElement {
+                                    array: ArrayRegion::Frame(_),
+                                    ..
+                                },
+                                value: 0
+                            }
+                        )
+                    })
+                    .count()
+                    >= 3
+            })
+            .expect("loop body must clear the local declaration each time it executes");
         assert!(matches!(
-            lowered.continuation(*then_target).unwrap().terminator(),
+            local_clear_continuation.terminator(),
             Terminator::Goto { .. }
         ));
-        assert!(matches!(
-            lowered.continuation(*else_target).unwrap().terminator(),
-            Terminator::Call {
-                callee,
-                ..
-            } if *callee == ContinuationFunctionId::new(1)
-        ));
     }
 
     #[test]
-    fn local_reads_copy_and_restore_the_source() {
-        let source = program(vec![HirFunction {
-            local_count: 1,
-            ..main(vec![
-                statement(HirStatementKind::Declaration {
-                    local: LocalId::new(0),
-                    initializer: Some(literal(9)),
-                }),
-                statement(HirStatementKind::Output(local(0))),
-            ])
-        }]);
-        let lowered = lower_hir(&source).unwrap();
-        assert!(lowered.continuations()[0].body().iter().any(|instruction| {
-            matches!(
-                instruction,
-                FrameInstruction::Transfer {
-                    src: Address::Frame(slot),
-                    targets,
-                } if *slot == FrameSlot::new(0) && targets.len() == 2
-            )
-        }));
-    }
+    fn continuation_id_allocator_checks_the_u16_boundary() {
+        let mut last_available = IdAllocator::with_reserved_entries(65_534).unwrap();
+        assert_eq!(last_available.allocate().unwrap().get(), u16::MAX);
+        assert_eq!(
+            last_available.allocate(),
+            Err(ContinuationLoweringError::ContinuationIdsExhausted)
+        );
 
-    #[test]
-    fn rejects_a_cell_function_that_falls_through() {
-        let source = program(vec![
-            main(vec![]),
-            function(
-                1,
-                "bad",
-                0,
-                0,
-                Type::Cell,
-                statement(HirStatementKind::Empty),
-            ),
-        ]);
+        let mut full = IdAllocator::with_reserved_entries(65_535).unwrap();
+        assert_eq!(
+            full.allocate(),
+            Err(ContinuationLoweringError::ContinuationIdsExhausted)
+        );
         assert!(matches!(
-            lower_hir(&source),
-            Err(ContinuationLoweringError::InvalidHir {
-                function: Some(id),
-                ..
-            }) if id == hir::FunctionId::new(1)
+            IdAllocator::with_reserved_entries(65_536),
+            Err(ContinuationLoweringError::ContinuationIdsExhausted)
         ));
     }
 }

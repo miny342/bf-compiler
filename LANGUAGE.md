@@ -620,16 +620,15 @@ call深度によるBFテープ右端超過とする。
 
 ### 現在の実装状況
 
-第6段階まで実装している。parameterなしの`void main()`をentry pointとし、scalarの
+第8段階まで実装している。parameterなしの`void main()`をentry pointとし、scalarの
 `cell`/`void`関数、parameter、call、return、forward call、直接再帰、相互再帰を使用
 できる。callの引数は左から右に評価し、callerのlocalはcalleeの実行中も保存する。
 すべての比較演算と、callを含む場合にも短絡評価する論理`&&`および`||`を使用できる。
 
-function内で固定長local配列を宣言し、上記の定数式添字で要素を読み書きできる。
-各要素はactivation frameの通常のscalar slotへコンパイル時に展開する。
+global変数とglobal配列を宣言でき、宣言順の初期化、関数からの読み書き、定数添字と
+動的添字を使用できる。local/global配列の動的アクセスにはarray portalを使用する。
+配列は値として全体代入、関数parameter、returnに使用でき、引数評価時のsnapshotと
+activationごとのaggregate return outboxによりcopy semanticsを保つ。
 
-global変数とglobal配列、動的添字、配列全体の代入、配列parameter、配列returnは、
-実装済みになるまで明示的なコンパイルエラーとして拒否する。scalar関数には
-[ABI.md](ABI.md)のframe stackとContinuation dispatcherを使用する。array portalと
-aggregate argument/returnは独立experimentで検証済みだが、compiler本体にはまだ接続して
-いない。
+scalarと配列の関数には[ABI.md](ABI.md)のframe stackとContinuation dispatcherを使用する。
+ABI backendは`D = 8`と`D = 16`の両方のchunk geometryをサポートする。

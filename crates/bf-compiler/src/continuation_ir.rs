@@ -1238,14 +1238,14 @@ fn validate_terminator(
                     });
                 }
             }
-            if let ValueType::Array(required) = callee_descriptor.return_type {
-                if function.outbox_cells < required {
-                    return Err(ContinuationIrError::CallerOutboxTooSmall {
-                        continuation: continuation.id,
-                        required,
-                        available: function.outbox_cells,
-                    });
-                }
+            if let ValueType::Array(required) = callee_descriptor.return_type
+                && function.outbox_cells < required
+            {
+                return Err(ContinuationIrError::CallerOutboxTooSmall {
+                    continuation: continuation.id,
+                    required,
+                    available: function.outbox_cells,
+                });
             }
             Ok(())
         }

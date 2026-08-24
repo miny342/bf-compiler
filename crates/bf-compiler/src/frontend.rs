@@ -260,14 +260,6 @@ mod tests {
         let undefined_function = lower_source(&main_source("future_function(1);")).unwrap_err();
         assert!(undefined_function.message().contains("undefined function"));
 
-        let future_dynamic_array =
-            lower_source(&main_source("cell[16] values; cell i; output(values[i]);")).unwrap_err();
-        assert!(
-            future_dynamic_array
-                .message()
-                .contains("dynamic array indices")
-        );
-
         let future_definition = lower_source("void helper() {}").unwrap_err();
         assert!(future_definition.message().contains("must define"));
 
@@ -292,11 +284,7 @@ mod tests {
         assert!(empty.message().contains("void main()"));
 
         let top_level_statement = lower_source("output('x');").unwrap_err();
-        assert!(
-            top_level_statement
-                .message()
-                .contains("function definitions")
-        );
+        assert!(top_level_statement.message().contains("'cell' or 'void'"));
 
         let parameter = lower_source("void main(cell value) {}").unwrap_err();
         assert!(parameter.message().contains("must not have parameters"));

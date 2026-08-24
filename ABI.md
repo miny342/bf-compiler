@@ -3,11 +3,11 @@
 この文書は、BFCからBrainfuckへ関数、再帰、ローカル変数、配列をloweringするための
 実験的な実行時ABIを定義する。
 
-ABI version 0の設計仕様である。現在の`bf-compiler`はscalar関数のframe、continuation
-dispatch、call/return、直接・相互再帰にこのABIを適用している。定数添字だけを使うlocal
-配列は各要素を通常のframe slotへscalarizeし、array portalを使用しない。global、動的添字の
-array portal、aggregate argument/returnはまだcompiler本体へ接続しておらず、それらを含む
-検証コードは`bf-frame-experiment` crateに置く。
+ABI version 0の設計仕様である。現在の`bf-compiler`はscalarと配列のframe、continuation
+dispatch、call/return、直接・相互再帰、static global、array portal、aggregate
+argument/returnにこのABIを適用している。定数添字はlayoutから直接解決し、動的添字は
+local/globalに共通のportal accessorを使用する。独立した低水準の検証コードは引き続き
+`bf-frame-experiment` crateに置く。
 
 ## 目的
 
@@ -865,19 +865,33 @@ debug loweringはguard flagやframe patternを検査して停止してよい。
 
 ## Continuation IR
 
-現在のscalar compilerは、静的絶対位置を表す`CellId`とは別に、frame-relativeな
-Continuation IRを実装している。命令から参照できるaddressは次の2種類である。
+compilerは、静的絶対位置を表す`CellId`とは別に、frame/static/aggregate storageを表す
+Continuation IRを実装している。主要なaddressとvalue operandは次のとおりである。
 
 ```rust
 enum Address {
     Frame(FrameSlot),
+    Global(GlobalId),
+    ArrayElement { array: ArrayRegion, index: usize },
     AbiValue,
+}
+
+enum ArrayRegion {
+    Frame(FrameArrayId),
+    Global(GlobalId),
+    Outbox,
+}
+
+enum ValueOperand {
+    Cell(Address),
+    Array(ArrayRegion),
 }
 ```
 
-`Frame`は現在のactivationに属するparameter、local、一時値を指す。`AbiValue`は
-call結果の受け渡しに使用するcontextのscalar value cellを指す。Continuationのbodyは
-frame-relativeな`FrameInstruction`列であり、末尾に必ず1個のterminatorを持つ。
+`Frame`は現在のactivationに属するscalar parameter、local、一時値を指す。`Global`は
+static scalar、`ArrayElement`は定数添字の要素を指す。`AbiValue`はscalar call結果の
+受け渡しに使用するcontext cellである。aggregateは`ArrayRegion`でstorage identityを保つ。
+Continuationのbodyは`FrameInstruction`列であり、末尾に必ず1個のterminatorを持つ。
 
 ```rust
 struct Continuation {
@@ -898,11 +912,23 @@ enum Terminator {
     },
     Call {
         callee: FunctionId,
-        arguments: Vec<Address>,
+        arguments: Vec<ValueOperand>,
         return_to: ContinuationId,
     },
     Return {
-        value: Option<Address>,
+        value: Option<ValueOperand>,
+    },
+    ArrayLoad {
+        array: ArrayRegion,
+        index: Address,
+        destination: Address,
+        return_to: ContinuationId,
+    },
+    ArrayStore {
+        array: ArrayRegion,
+        index: Address,
+        value: Address,
+        return_to: ContinuationId,
     },
     Halt,
 }
@@ -910,12 +936,10 @@ enum Terminator {
 
 typed HIRからのloweringがframe slotとcontinuation IDを割り当て、ABI backendが
 `FunctionDescriptor`に基づくframe layout、call/return、dispatcher、物理BF pointer移動を
-生成する。validatorは`void main()`、mainのcall禁止、frame slot範囲、call arity、
-continuation ownership、return型などを検査する。
-
-globalと動的添字配列をcompiler本体へ接続する段階では、global address space、
-array portal、aggregate return outboxをこのIRへ追加する。定数添字だけのlocal配列はそれより
-前に`FrameSlot`へscalarizeされるため、配列用の公開IR拡張を必要としない。
+生成する。validatorは`void main()`、mainのcall禁止、frame/global/array範囲、callの
+arityと型、outbox容量、continuation ownership、return型、portal successorなどを検査する。
+配列引数はcalleeのframe arrayへcopyし、aggregate returnはcaller activation固有のoutboxへ
+書き戻す。
 
 ## 実験結果とversion 0の決定
 
