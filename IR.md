@@ -10,7 +10,8 @@
 
 ```text
 source frontend:
-  BFC source → AST → typed HIR → Continuation IR → ABI backend → BF IR → optimize → Brainfuck
+  BFC source → AST → macro expansion/desugaring → typed HIR
+             → Continuation IR → ABI backend → BF IR → optimize → Brainfuck
 
 low-level API:
   Cell IR → static-cell backend → BF IR → optimize → Brainfuck
@@ -29,6 +30,89 @@ Continuationを生成し、ABI backendへ渡す。低水準APIとして、静的
 
 IRを分ける目的は、ソース言語の意味、関数の制御フローとframe配置、Brainfuckの
 データポインタや相対移動を分離することである。
+
+現在の実装はLANGUAGE.mdの第8段階までであり、以下のenum、struct、macro、多段projection、
+16-bit aggregate offsetはversion 1のnormativeなtarget IR仕様である。
+
+## Source AST、展開、typed HIR
+
+parserは型定義、文字列、field/index postfix、method call、macro定義・呼出しを保持したASTを
+作る。runtime IRへ進む前に次のcompile-time処理を順に行う。
+
+1. トップレベルの型、定数、macro、global、function名を収集する。
+2. block macroをfreshなlocal identityを持つblock ASTへ展開する。
+3. `receiver.function(args)`を`function(receiver, args)`へdesugarする。
+4. `cell[]`文字列宣言の長さを確定し、`len`と`const cell`を評価する。
+5. 名前解決と型検査を行い、nominal typeと評価順序を持つtyped HIRを作る。
+
+macro、method call、`cell[]`、`len`はこの段階で消費され、Continuation IRまたはABIへ専用の
+runtime機構を追加しない。文字列リテラルは型確定後にaggregate定数初期化として残す。
+arena、paged handle、多倍長整数も通常のstruct、array、global、functionとしてloweringし、
+専用のHIR命令やABI objectを定義しない。
+
+### 型とlayout
+
+source型は概念的にstableな`TypeId`で参照し、layout tableを別に持つ。
+
+```rust
+enum TypeKind {
+    Cell,
+    Enum { variants: Vec<u8> },
+    Struct { fields: Vec<Field> },
+    Array { element: TypeId, length: usize },
+    Void,
+}
+
+struct TypeLayout {
+    cells: usize,
+    fields: Vec<FieldLayout>,
+}
+```
+
+enumはnominal情報をHIRまで保持するが、layout後は1 cell scalarとして扱う。struct field offsetは
+宣言順の先行fieldのcell数合計、配列strideは要素型のcell数である。多次元配列はarray型の
+再帰として表し、sourceの`T[N][M]`は`Array(N, Array(M, T))`になる。logical layoutは
+row-majorで、structは宣言順にflattenする。zero-length arrayは0 cell aggregateである。
+
+layout計算にはchecked arithmeticを使用する。型cycle、host整数overflow、実体化時にtarget tapeへ
+配置できない大きさは、backendまで黙って持ち越さずcompile errorにする。
+
+### Place projection
+
+変数、field、配列indexを別々の式variantへ固定せず、一つのrootとprojection列として保持する。
+
+```rust
+struct HirPlace {
+    root: VariableRef,
+    projections: Vec<Projection>,
+    ty: TypeId,
+}
+
+enum Projection {
+    Field {
+        field: FieldId,
+        cell_offset: usize,
+    },
+    Index {
+        index: HirExpression,
+        length: usize,
+        element_cells: usize,
+    },
+}
+```
+
+`nodes[page][slot].kind`は一つの`HirPlace`であり、途中のarrayまたはstructへのruntime referenceを
+生成しない。定数indexとfield offsetは可能な限り一つの定数offsetへ畳み込む。動的indexは
+projection順にそれぞれ1回評価し、aggregate rootからのlogical flat offsetをbackend用temporaryへ
+計算する。
+
+function callなどplaceでないaggregate式へfield/index postfixを適用する場合、base式を一度だけ
+評価してcompiler temporaryへmaterializeし、そのtemporaryをrootとする`HirPlace`へ変換する。
+`len` operandだけはunevaluatedなのでtemporaryを作らない。
+
+placeの読み出し結果が複数cellならaggregate value、1 cellならscalar valueになる。代入ではRHSを
+完全にsnapshotしてから、LHSの動的projectionを左から右に評価する。この規則により、RHSやindexが
+同じaggregateを参照する場合もsource semanticsを保つ。
 
 ## セルIR
 
@@ -267,111 +351,112 @@ BF固有の分岐、比較、divmod、moving-indexなどのlowering候補とcost
 転送ループを認識しているため、BF IRの当面の責務はBrainfuckの構造を保持した
 中間表現と最終的な文字列化である。
 
-## 配列
+## Aggregate storageと動的projection
 
-source frontendで実装済みの定数添字local配列と、将来の動的添字および独立した
-low-level Cell IRの配列設計は区別する。動的添字によるアクセスは通常の論理cell参照として
-扱えないため、その物理表現とcontrol flowは[ABI.md](ABI.md)の16-cell array portalへ
-loweringする。
+現在実装済みの`cell[N]`は、定数添字だけを使うlocalなら個別の`FrameSlot`へscalarizeし、
+動的添字を使うlocal/globalなら[ABI.md](ABI.md)のaligned array portalへloweringする。
+セルフホスト拡張では、この仕組みをstruct、任意要素型配列、多次元配列へ一般化する。
 
-### 定数添字
+### 定数projection
+
+fieldと定数indexだけからなるplaceは、flatten済みaggregate内の定数logical cell範囲へ解決する。
 
 ```text
-array[3]
+node.left.slot       → root + field offset
+pages[2][10]         → root + 2 * row_cells + 10
+nodes[3].kind        → root + 3 * cells(Node) + field_offset(kind)
 ```
 
-現在のsource frontendは、local配列の各要素を名前解決中に連続する論理`LocalId`へ
-scalarizeする。定数式添字は範囲検査後に対応する`LocalId`へ解決し、typed HIRには
-通常のscalar localとして渡す。HIRからContinuation IRへのloweringでその`LocalId`を
-`FrameSlot`へ変換するため、実行時の配列命令、array portal、配列用reserved prefixは発生
-しない。
+local aggregateをすべて定数offsetで使用できる場合、各leafを通常の`FrameSlot`へscalarizeしてよい。
+物理chunk flagを挟ぐかどうかはABI layoutが決め、source-levelの連続性やpointer値として観測
+できない。aggregate copyはlogical leaf順に行い、protocol cell、chunk head、paddingを含めない。
 
-各要素の`FrameSlot`は論理的に連続するが、chunkのallocation flagを挟む場合があるため
-Brainfuckテープ上で物理的に連続するとは限らない。ABI backendが各`FrameSlot`の相対offsetを
-個別に決定する。この表現では配列の識別情報をtyped HIRより後ろへ残さない。
+### 動的projection
 
-一方、独立したlow-level Cell IRまたは将来の配列identityを保持するIRでは、定数添字を
-実行時命令にせず、セル配置時に論理セルへ解決する。配列要素間へ作業セルを挟む
-レイアウトを採用する可能性があるため、単純な`array_top + index`とは限らない。
+動的indexを含むplaceは、選択された途中のsubarrayやstructをruntime referenceとして表さない。
+HIR loweringは各indexを左から右に一度だけ評価し、root aggregate内のflat logical offsetを
+compiler-ownedな2 cell temporaryとして計算する。
 
-概念的には、名前解決中に次のような場所を扱う。
+```text
+offset = constant_field_offsets
+for each Index(index, element_cells):
+    offset += index * element_cells
+```
+
+各source indexは従来どおり1 cellであり、`0..=255`を表す。2 cellなのは最大30,000-cellの
+aggregate内offsetを保持するbackend内部値だけであり、sourceへ`u16`やpointerを追加しない。
+範囲外indexはLANGUAGE.mdどおり未定義動作である。
+
+Continuation IRでは配列専用identityをaggregate regionへ一般化する。
 
 ```rust
-enum Place {
-    Cell(CellId),
-    ArrayElement {
-        array: ArrayId,
-        index: usize,
+enum ValueType {
+    Cell,
+    Aggregate { cells: usize },
+    Void,
+}
+
+enum AggregateRegion {
+    Frame(FrameAggregateId),
+    Global(GlobalId),
+    Outbox,
+}
+
+struct LogicalOffset {
+    low: Address,
+    high: Address,
+}
+
+enum ValueOperand {
+    Cell(Address),
+    Aggregate {
+        region: AggregateRegion,
+        offset: usize,
+        cells: usize,
     },
 }
 ```
 
-この概念モデルでは、セルIRが確定するまでに定数添字の`ArrayElement`を`CellId`へ
-変換する。これは現在のsource frontendが直接`LocalId`へscalarizeするpipelineの説明ではない。
-
-### 動的添字
-
-```text
-array[index]
-```
-
-BFでは実行時に選択したセルを、後続命令から通常の`CellId`として参照することは
-できない。そのため、単なる`Array(array_top, index)`ではなく、選択した要素に
-対する操作まで命令に含める必要がある。
-
-セルIRには次を追加する。
+sourceのnominal type一致はtyped HIRで検査済みなので、Continuation IRのaggregate typeは
+storage cell数だけを保持する。enumもこの層では`Cell`へeraseする。定数subobjectはregion、
+offset、cellsで表し、動的subobjectは次のterminatorでportalへ渡す。
 
 ```rust
-ArrayLoad {
-    dst: CellId,
-    array: ArrayId,
-    index: CellId,
+AggregateLoad {
+    source: AggregateRegion,
+    offset: LogicalOffset,
+    destination: ValueOperand,
+    cells: usize,
+    return_to: ContinuationId,
 }
 
-ArrayStore {
-    array: ArrayId,
-    index: CellId,
-    src: CellId,
-}
-
-ArrayTake {
-    dst: CellId,
-    array: ArrayId,
-    index: CellId,
+AggregateStore {
+    destination: AggregateRegion,
+    offset: LogicalOffset,
+    source: ValueOperand,
+    cells: usize,
+    return_to: ContinuationId,
 }
 ```
 
-暫定的に想定する意味は次のとおりである。
+`cells == 1`は現在のscalar array load/storeに相当する。複数cellのload/storeはlogical offsetから
+連続するleafを順にcopyする。store前にはRHS全体をtemporaryへsnapshotし、load完了またはstore
+開始から終了までuser codeや別のportal operationを実行しない。これによりcopy途中のaliasを
+観測できず、source-levelには一回のaggregate read/writeとして見える。
 
-```text
-ArrayLoad:
-    dst = array[index]
-    array[index]は不変
-    index = 0
+zero-size aggregateのcopyは何もせず、動的access terminatorも生成しない。zero-length arrayへの
+indexは定数ならfrontend error、動的ならsource-level undefined behaviorなので、backendが有効な
+zero-size portalを提供する必要はない。
 
-ArrayStore:
-    array[index] = src
-    index = 0
-    src = 0
+文字列リテラルはdecoded byte列を持つaggregate constantとしてHIRへ残し、宣言位置または
+argument/return temporaryへ各byteを設定する。末尾NUL、文字列専用region、runtime length cellは
+追加しない。
 
-ArrayTake:
-    dst += array[index]
-    array[index] = 0
-    index = 0
-```
+### `abort`
 
-`ArrayTake`は破壊的な最適化用命令であり、frontendが通常の配列readへ直接使用しない。
-添字や格納元をsource上で保存する場合は、上位の変換処理がcompiler temporaryへ複製
-してから破壊的なABI helperへ渡す。
-
-global/localとも、16 logical protocol cellsの後ろに配列要素を置く。動的load/storeは
-共有array continuationへ入り、call-site固有resume continuationが値を回収してframeへ
-戻る。初期backendはindexをchunk/withinへ分けた二段静的dispatchを生成する。
-
-- 配列長の上限は`cell`添字が全要素を表現できる256とする。
-- 実行時範囲外添字は検査せず未定義動作とする。
-- 定数添字はportalを呼ばず、layoutから直接offsetを解決する。
-- load/storeと直後の演算を融合する最適化は後から追加してよい。
+macro展開後も`abort` statementはHIRの終端操作として残し、どのfunctionからでも生成できる
+`Terminator::Abort`へloweringする。`Abort`にはsuccessorとreturn valueがなく、以後のstatementは
+到達不能である。通常の`Halt`はmainの正常終了専用として区別する。
 
 ## セル配置
 
@@ -393,6 +478,13 @@ struct Layout {
 - 静的セル領域、配列領域、作業領域、スタック領域の分離
 
 ## 不変条件と検証
+
+typed HIRは次を検証する。
+
+- enum、struct、array、field/index projectionがLANGUAGE.mdの型規則を満たす。
+- type layoutとprojection offsetのchecked arithmeticがoverflowしない。
+- assignment/call/returnのnominal型が一致し、各動的indexの評価順序が保持される。
+- macro、method call、`len`、`cell[]`がruntime HIRへ残っていない。
 
 セルIRはコード生成前に全体を検証する。
 
@@ -416,4 +508,8 @@ struct Layout {
 6. array portalと動的配列命令を追加する。（完了）
 7. 配列の値渡し、aggregate return outboxを接続する。（完了）
 8. BF IRの局所最適化を別パスとして追加する。（完了）
-9. profileに基づき、BF固有templateとcost modelを段階的に追加する。
+9. source型をTypeId/layout tableへ一般化し、enum、struct、再帰的array、projectionを追加する。
+10. aggregate regionと16-bit logical offset portalをContinuation IR/ABIへ追加する。
+11. 文字列、`len`、`const cell`、method sugar、block macro、`abort`をfrontendへ追加する。
+12. BFCでstreaming lexer/parserを記述し、self-hostに不足する最小機能を実測から判断する。
+13. profileに基づき、BF固有templateとcost modelを段階的に追加する。

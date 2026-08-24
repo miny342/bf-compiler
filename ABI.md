@@ -1,13 +1,19 @@
 # BFC Brainfuck ABI
 
-この文書は、BFCからBrainfuckへ関数、再帰、ローカル変数、配列をloweringするための
+この文書は、BFCからBrainfuckへ関数、再帰、ローカル変数、aggregateをloweringするための
 実験的な実行時ABIを定義する。
 
-ABI version 0の設計仕様である。現在の`bf-compiler`はscalarと配列のframe、continuation
+ABI version 0と、その上に定義するセルフホスト拡張version 1の設計仕様である。
+現在の`bf-compiler`はversion 0を実装し、scalarと配列のframe、continuation
 dispatch、call/return、直接・相互再帰、static global、array portal、aggregate
 argument/returnにこのABIを適用している。定数添字はlayoutから直接解決し、動的添字は
 local/globalに共通のportal accessorを使用する。独立した低水準の検証コードは引き続き
 `bf-frame-experiment` crateに置く。
+
+version 1はenum、struct、任意要素型・多次元固定長配列に必要なlogical aggregate layout、
+16-bit offset portal、任意のactivationからの`abort`を追加する。sourceのmethod call、macro、
+文字列、`len`はfrontendで消費されるためABI機能を追加しない。version 1を実装するまでは
+version 0の既存layoutと検証結果を基準とする。
 
 ## 目的
 
@@ -18,7 +24,7 @@ local/globalに共通のportal accessorを使用する。独立した低水準�
 - 関数ごとにコンパイル時に確定する大きさのframeを一括確保する。
 - callerのローカル値を個別に`push`せず、caller frameへ残す。
 - globalは静的位置に保ち、任意の再帰深度から到達できるようにする。
-- global配列とローカル配列に同じchunk内添字変換を使う。
+- global/local aggregateに同じchunk内logical offset変換を使う。
 - BFデータポインタが動的位置にあっても、ABI境界で位置を一意に解釈できるように
   する。
 
@@ -48,7 +54,7 @@ P = DISPATCH_PORTAL_CHUNKS = ceil(R / D)
 - version 0でbackendが受け付ける値は8または16とする。
 - `R = 16`とする。
 - `R`は各配列regionと各frame contextの先頭に置くcompiler-owned protocol cell数である。
-- `R`の先頭cellはarray load/storeの`VALUE_PORT`である。
+- `R`の先頭cellはversion 0 array、version 1 aggregate load/storeの`VALUE_PORT`である。
 - `P`は`D = 16`で1 chunk、`D = 8`で2 chunkになる。
 
 `D`はBFCソースから観測できる値ではない。変更すると物理配置と生成BFは変わるが、
@@ -235,7 +241,8 @@ function entry continuation
 frame chunk count K
 parameter locations
 local scalar locations
-dynamic-index local array regions
+dynamic-index local array regions (v0)
+dynamic-projection local aggregate regions (v1)
 expression temporary locations
 common header locations
 aggregate return outbox size and locations
@@ -262,8 +269,8 @@ frame_address(F, K, q)
       + (q mod D)
 ```
 
-したがって、現在のframeにあるscalarと、通常の`FrameSlot`へscalarizeした定数添字
-local配列要素は、frontierからの負のコンパイル時定数offsetとしてアクセスできる。
+したがって、現在のframeにあるscalarと、通常の`FrameSlot`へscalarizeした定数projectionの
+aggregate leafは、frontierからの負のコンパイル時定数offsetとしてアクセスできる。
 
 frame内の大分類は低addressから次の順とする。
 
@@ -353,7 +360,7 @@ scalar関数の戻り値と、calleeからcallerへscalar値を渡すinboxを兼
 - return処理はcalleeの`VALUE`をcallerの`VALUE`へ移す。
 - callerのreturn continuationは自身の`VALUE`から結果を読む。
 - `void`関数はcallerの`VALUE`を0にする。
-- 配列や将来のstructなど、複数cellのaggregate戻り値には`VALUE`を使用しない。
+- 配列やstructなど、複数cellのaggregate戻り値には`VALUE`を使用しない。
 
 ### ABI work cells
 
@@ -493,17 +500,119 @@ version 0ではsource-level pointer/referenceを導入せず、共有array acces
 256要素では生成codeが大きいため、将来はmoving-index方式などへ置換してよいが、これは
 array portal ABIを変更しないbackend最適化とする。
 
+## Version 1 aggregate region
+
+version 1はversion 0のaligned array regionを、flatten済みaggregate payloadを持つregionへ
+一般化する。source型のlogical layoutは次である。
+
+```text
+cells(cell)       = 1
+cells(enum E)     = 1
+cells(struct S)   = declaration orderでのfield cell数の合計
+cells(T[N])       = N * cells(T)
+```
+
+structはfield宣言順、配列はrow-majorでflattenする。`T[N][M]`は長さ`N`のouter arrayであり、
+各要素は長さ`M`のinner arrayになる。enumのnominal identityとstruct field型はfrontendで検査し、
+ABIはscalar leaf列と総cell数だけを扱う。
+
+aggregate rootの先頭headを`A`、flatten済みpayload offsetを`o`とする。物理位置はversion 0の
+式を長さ256より大きいpayloadへそのまま拡張する。
+
+```text
+slot(o)    = R + o
+chunk(o)   = floor(slot(o) / D)
+within(o)  = slot(o) mod D
+
+address(A, o) = A + chunk(o) * S + 1 + within(o)
+```
+
+protocol prefix、chunk head、paddingはpayload cell数に含めず、aggregate copyでも読み書き
+しない。zero-size aggregateはregionを確保せず、copyも行わない。動的indexを一度も使わない
+local aggregateはversion 0と同様にscalarizeしてよい。動的projectionへ渡すrootだけをchunk headへ
+alignし、1個のrootにつき1個のprotocol prefixを置く。nested arrayごとにprefixを重ねない。
+
+### Flat logical offset
+
+sourceの各array indexは1 cellのままとする。frontendがindexを左から右に一度ずつ評価した後、
+backendは次の式をcompiler temporaryで計算する。
+
+```text
+o = constant field/subobject offset
+for each dynamic array projection from outer to inner:
+    o += index * cells(indexed element type)
+```
+
+実体化できるaggregateは30,000-cell tapeより小さいため、`o`はlittle-endianの2 cellで十分である。
+この2 cell値はsourceから構築、保存、比較、returnできる整数型ではなく、portal呼出しの間だけ存在
+するcompiler-owned値である。
+
+version 1では共通contextのlogical fieldを次のように解釈する。
+
+```text
+j=9   OFFSET_LOW       // version 0 INDEXと同じ位置
+j=12  OFFSET_HIGH      // version 0 SCRATCH_0と同じ位置
+j=13  SCRATCH_1
+j=14  SCRATCH_2
+j=15  SCRATCH_3
+```
+
+offset計算中に追加scratchが必要ならanchor scratchまたはfunction temporaryを使用する。
+通常continuationへ制御を戻す前に`OFFSET_LOW`、`OFFSET_HIGH`、scratchを0へ戻す。
+version 0の1次元`cell[N]` accessは`OFFSET_HIGH = 0`、`OFFSET_LOW = INDEX`として表せる。
+
+### Aggregate accessor contract
+
+portalのprimitive operationは、region payload内の1 logical cellを16-bit offsetでload/storeする。
+
+```text
+load_cell(region, o):
+    VALUE_PORT = copy(payload[o])
+
+store_cell(region, o, VALUE_PORT):
+    payload[o] = move(VALUE_PORT)
+```
+
+複数cell subobjectのload/storeは、call siteがbase offsetを一度計算し、offsetをincrementしながら
+logical leaf順にprimitive operationを繰り返す。RHSは最初のstoreより前にcaller-owned temporaryへ
+完全にsnapshotする。load/store列の途中ではuser continuation、function call、別regionのportalを
+実行しない。このnon-reentrant規則により、sourceからはaggregate accessを一回の不可分な値copy
+として観測する。
+
+継続するleaf copyのoffsetはcaller frameの2 cell temporaryへ保持する。各primitive callでその値を
+region prefixの`OFFSET_LOW/HIGH`へcopyし、portalがprefix側を消費・clearした後、resume continuationが
+caller側offsetをincrementする。portal contextへ次回用offsetをliveなまま残さない。
+
+accessorはさらに次を満たす。
+
+- `0 <= o < payload_cells`のとき対応するpayload cellだけを読み書きする。
+- sourceの範囲外indexは未定義動作だが、有効offsetでprotocol、head、paddingへ触れない。
+- global `aux`とlocal stack flagを保存する。
+- offset値、`VALUE_PORT`、使用したscratchをresume時に0へ戻す。
+- global/local regionからcurrent frame frontierへversion 0と同じ規則でnormalizeする。
+
+version 0の全要素を列挙するstatic accessorは256要素を前提にしているため、そのまま大きな
+aggregateへ拡張しない。version 1 accessorは16-bit logical offsetを消費するcountdown、moving-index、
+または同じcontractを満たす別実装を使用する。これはsource-level pointerを導入しない。
+
+### Arrays of struct and alternative layout
+
+canonical ABI layoutはrow-majorのarray-of-structである。例えば`Node[N]`のlogical offsetは
+`index * cells(Node) + field_offset`になる。backendはprogram全体を同時に変換し、全access/copyの
+意味を保てる場合に限りstruct-of-arraysなど別の物理layoutを最適化として選んでよい。その選択を
+sourceから観測したり、異なるlayoutのaggregateを同じportal contractで混同したりしてはならない。
+
 ## Source-level referenceを持たない規則
 
-version 0のBFCは、次を持たない。
+version 0とversion 1のBFCは、次を持たない。
 
 - address-of演算子`&`
 - dereference演算子`*`
 - pointer型
 - reference型
-- 配列やlocalのaddressを整数へ変換する操作
+- aggregateやlocalのaddressを整数へ変換する操作
 
-したがって、local配列またはscalar localのaddressをcalleeへ渡したり、returnしたり、
+したがって、local aggregateまたはscalar localのaddressをcalleeへ渡したり、returnしたり、
 globalへ保存したりできない。
 
 異なるlocal `a`と`b`を同じ関数へ参照渡しするために、関数本体を複製する必要が必ず
@@ -531,7 +640,7 @@ ReferenceHandle {
 これらは実装可能だが、初期BFCの目的に対して大きすぎる。関数間のaggregate受け渡しは
 参照ではなく値渡しと値返しを標準とする。
 
-将来、参照に似た呼出構文が必要になっても、addressを言語値にする必要はない。
+参照に似た呼出構文が将来必要になっても、addressを言語値にする必要はない。
 non-escapingかつ重複しない`inout`引数だけを認め、次のcopy-in/copy-outへloweringできる。
 
 ```text
@@ -539,15 +648,16 @@ update(inout a)       // source sugar
 a = update(a)         // ABI上の意味
 ```
 
-複数の`inout`引数は将来のstructまたは複数cell aggregateとしてまとめて返し、call siteが
+複数の`inout`引数はstructまたは複数cell aggregateとしてまとめて返し、call siteが
 元の変数へwritebackする。writeback先はcall siteごとに静的に既知なので、callee本体の
 複製もruntime referenceも要らない。同じ変数を複数の`inout`引数へ渡すalias、参照の
-保存、calleeからの再返却はこの変換では認めない。version 0ではこの糖衣自体を導入せず、
-明示的な値返しだけを仕様とする。
+保存、calleeからの再返却はこの変換では認めない。version 0とセルフホスト拡張version 1は
+この糖衣を導入せず、method callも含めて明示的な値返しと代入だけを仕様とする。
 
 ## Aggregate value
 
-固定長配列と将来のstructを、複数cellからなるaggregate valueとして扱う。
+固定長配列とstructを、複数cellからなるaggregate valueとして扱う。version 0実装は
+`cell[N]`、version 1はenum leaf、struct、任意要素型・多次元配列へ一般化する。
 
 ```text
 AggregateType {
@@ -561,7 +671,7 @@ source-levelな意味はcopy semanticsとする。
 - aggregate引数はcalleeが所有するparameter領域へcopyする。
 - aggregate戻り値はcallerが所有するresult領域へ値として返す。
 - calleeがparameterを変更してもcallerの元の値は変更しない。
-- callerの配列を書き換えたい関数は、変更後の配列をreturnし、callerが代入する。
+- callerのaggregateを書き換えたい関数は、変更後の値をreturnし、callerが代入する。
 - compilerは観測可能な意味を変えない範囲でcopy elisionまたはmoveを行ってよい。
 - aggregateの`==`、順序比較、暗黙のscalar変換は別途定義しない限り認めない。
 
@@ -577,9 +687,9 @@ cell[100] transform(cell[100] source) {
 buffer = transform(buffer);
 ```
 
-version 0の関数拡張では上記のC風宣言・return・call構文を採用する。同じ固定長配列型
-同士の全体代入を認め、右辺を完全に評価してからcopyする意味とする。compilerは同じ
-意味になるmoveとcopy elisionを行ってよい。配列初期化子は関数実装とは別段階とする。
+同じnominal aggregate型同士の全体代入を認め、右辺を完全に評価してからcopyする意味とする。
+compilerは同じ意味になるmoveとcopy elisionを行ってよい。文字列は`cell[N]`のaggregate
+initializerであり、末尾NULや専用runtime metadataを追加しない。
 
 ## Aggregate return outbox
 
@@ -644,7 +754,7 @@ callee aggregate return:
 
 ### Copy elision
 
-calleeは、return対象の一時配列を自身のframeへ作ってからcopyする代わりに、最初から
+calleeは、return対象の一時aggregateを自身のframeへ作ってからcopyする代わりに、最初から
 parent outboxをreturn objectのstorageとして使用してよい。
 
 caller continuationはoutboxから最終destinationへcopyする。ただしdestinationの
@@ -758,7 +868,7 @@ BFへ生成する。
 ```text
 Continuation:
     body instructions
-    terminator = Goto | Branch | Call | Return | Halt
+    terminator = Goto | Branch | Call | Return | Abort(v1) | Halt
 ```
 
 初期dispatcherは、現在contextの16 bit `PC`を各continuation IDと照合して対象を選ぶ。
@@ -824,6 +934,21 @@ stackのrootとなるmain frameとして扱う。`main`はcallerを持たず、�
 
 program終了時はmain frameの`ACTIVE`を0にする。テープの他の値をclearする義務はない。
 
+### Version 1 `abort`
+
+正常な`Halt`はmain activationだけが生成する。`abort();`は任意のuser continuationから
+`Terminator::Abort`へloweringし、次を行う。
+
+```text
+current_context.ACTIVE = 0
+pointer = current_context.ACTIVE
+```
+
+trampoline loopの継続判定cellは反復ごとのcurrent contextにあるため、calleeの`ACTIVE`をclear
+すればancestor frameへreturnせず、その場で外側のBF loopを終了できる。allocated frame、flag、
+global、outbox、protocol cellをclearする義務はない。`Abort`はarray accessor内部には生成せず、
+portalからuser continuationへ戻った後に実行する。
+
 ## 容量と効率
 
 stack領域におけるdata cell比率は次である。
@@ -854,11 +979,15 @@ global aligned regionではheadを`aux`として利用できるため、padding�
 - 一つのfunction frameの静的サイズが利用可能テープ領域より大きい。
 - continuation数が内部PC表現の上限を越える。
 - compilerが有効なframe-relative配置を作れない。
+- version 1 aggregateのflatten、field offset、stride、outbox size計算がoverflowする。
+- version 1 aggregate payloadまたは必要なportal temporaryを含む静的配置・最低main frameが
+  30,000-cell tapeへ収まらない。
 
 少なくとも次を実行時未定義動作とする。
 
 - 再帰またはcall深度によりfrontierがテープ右端を越える。
 - 実行時添字による配列範囲外アクセス。
+- version 1の多段projectionで、いずれかのindexが対応する次元の範囲を外れる。
 - 生成BFまたは外部BFがanchor、stack flag、frame headerを破壊する。
 
 debug loweringはguard flagやframe patternを検査して停止してよい。
@@ -930,6 +1059,7 @@ enum Terminator {
         value: Address,
         return_to: ContinuationId,
     },
+    Abort,
     Halt,
 }
 ```
@@ -939,7 +1069,25 @@ typed HIRからのloweringがframe slotとcontinuation IDを割り当て、ABI b
 生成する。validatorは`void main()`、mainのcall禁止、frame/global/array範囲、callの
 arityと型、outbox容量、continuation ownership、return型、portal successorなどを検査する。
 配列引数はcalleeのframe arrayへcopyし、aggregate returnはcaller activation固有のoutboxへ
-書き戻す。
+書き戻す。version 1では`ArrayRegion`と`ArrayLoad/Store`を前節の`AggregateRegion`、
+`AggregateLoad/Store`へ一般化し、enumは`Cell`、struct/arrayはflattenしたcell数で検証する。
+`Abort`は全functionで有効、`Halt`はmainだけで有効とする。
+
+## Version 1適合条件
+
+version 1実装は少なくとも次を`D = 8`と`D = 16`の両方で検証する。
+
+- struct field、array-of-struct、struct内array、多次元arrayの定数projectionが同じlogical
+  layoutへ解決される。
+- dynamic offsetのlow byteが255から0へwrapするとhigh byteへcarryし、offset 255、256、
+  chunk境界、payload最終cellを正しくload/storeする。
+- 複数の動的indexを左から右に1回だけ評価し、RHS snapshot後にLHS indexを評価する。
+- dynamic aggregate load/storeがprotocol、head、paddingをcopyせず、sourceとdestinationが同じ
+  root内で重なる場合もsource-level value semanticsを保つ。
+- zero-size aggregateの引数、return、代入がstorageを要求せず正常に完了する。
+- embedded NULを含む文字列aggregateが末尾追加なしで宣言byte数どおり初期化される。
+- 直接・相互再帰中の深いactivationから`Abort`するとcallerへ戻らずtrampolineを終了する。
+- version 0の`cell[N]` programがversion 1 backendでも同じbinary outputを生成する。
 
 ## 実験結果とversion 0の決定
 
@@ -988,4 +1136,5 @@ moving-index方式や別のdispatchへ後から交換する。
 - tail call optimization。
 - debug専用のstack overflow guard。
 
-これらを除く項目は机上の未確定事項ではなく、version 0の実装基準とする。
+これらを除くversion 0の項目は現在の実装基準であり、version 1の節は次段階のnormativeな
+実装仕様とする。
