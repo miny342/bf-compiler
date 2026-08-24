@@ -2,12 +2,49 @@ use std::error::Error;
 use std::fmt;
 
 use crate::continuation_lowering::lower_hir;
+use crate::lexer::{Token, TokenKind};
 use crate::{AbiCodegenError, ContinuationProgram, compile_continuations, lexer, parser, semantic};
+
+/// A named BFC source file that belongs to a compilation unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceFile<'a> {
+    pub name: &'a str,
+    pub source: &'a str,
+}
+
+impl<'a> SourceFile<'a> {
+    pub const fn new(name: &'a str, source: &'a str) -> Self {
+        Self { name, source }
+    }
+}
+
+/// A location in a named source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocation {
+    source_name: String,
+    line: usize,
+    column: usize,
+}
+
+impl SourceLocation {
+    pub fn source_name(&self) -> &str {
+        &self.source_name
+    }
+
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    pub const fn column(&self) -> usize {
+        self.column
+    }
+}
 
 /// A source-level compilation error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontendError {
     offset: Option<usize>,
+    location: Option<SourceLocation>,
     message: String,
 }
 
@@ -15,6 +52,7 @@ impl FrontendError {
     pub(crate) fn at(offset: usize, message: impl Into<String>) -> Self {
         Self {
             offset: Some(offset),
+            location: None,
             message: message.into(),
         }
     }
@@ -22,6 +60,7 @@ impl FrontendError {
     fn without_offset(message: impl Into<String>) -> Self {
         Self {
             offset: None,
+            location: None,
             message: message.into(),
         }
     }
@@ -30,14 +69,47 @@ impl FrontendError {
         self.offset
     }
 
+    pub const fn location(&self) -> Option<&SourceLocation> {
+        self.location.as_ref()
+    }
+
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    fn in_source(mut self, source: SourceFile<'_>, base_offset: usize) -> Self {
+        let Some(offset) = self.offset else {
+            return self;
+        };
+        let local_offset = offset.saturating_sub(base_offset).min(source.source.len());
+        let before = &source.source[..local_offset];
+        let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = before
+            .rsplit('\n')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .count()
+            + 1;
+        self.offset = Some(local_offset);
+        self.location = Some(SourceLocation {
+            source_name: source.name.to_owned(),
+            line,
+            column,
+        });
+        self
     }
 }
 
 impl fmt::Display for FrontendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(offset) = self.offset {
+        if let Some(location) = &self.location {
+            write!(
+                f,
+                "{}:{}:{}: {}",
+                location.source_name, location.line, location.column, self.message
+            )
+        } else if let Some(offset) = self.offset {
             write!(f, "{} at byte offset {offset}", self.message)
         } else {
             f.write_str(&self.message)
@@ -87,15 +159,79 @@ impl From<AbiCodegenError> for SourceCompileError {
 /// Parse and lower BFC source to validated continuation IR.
 pub fn lower_source(source: &str) -> Result<ContinuationProgram, FrontendError> {
     let tokens = lexer::lex(source)?;
+    lower_tokens(tokens)
+}
+
+/// Parse and lower several named BFC files as one compilation unit.
+///
+/// Files are processed in the given order. Lexical constructs cannot cross a
+/// file boundary, while top-level declarations are shared by the whole unit.
+pub fn lower_sources(sources: &[SourceFile<'_>]) -> Result<ContinuationProgram, FrontendError> {
+    let mut tokens = Vec::new();
+    let mut ranges = Vec::with_capacity(sources.len());
+    let mut next_offset = 0usize;
+
+    for &source in sources {
+        let base_offset = next_offset;
+        let mut source_tokens = lexer::lex(source.source).map_err(|error| {
+            // Lexer offsets are local because each file is lexed independently.
+            error.in_source(source, 0)
+        })?;
+        source_tokens.pop();
+        for token in &mut source_tokens {
+            token.offset = token.offset.checked_add(base_offset).ok_or_else(|| {
+                FrontendError::without_offset("combined source byte offsets overflow")
+            })?;
+        }
+        tokens.extend(source_tokens);
+        ranges.push((source, base_offset));
+        next_offset = base_offset
+            .checked_add(source.source.len())
+            .and_then(|offset| offset.checked_add(1))
+            .ok_or_else(|| FrontendError::without_offset("combined source is too large"))?;
+    }
+
+    let eof_offset = ranges
+        .last()
+        .map_or(0, |(source, base)| base + source.source.len());
+    tokens.push(Token {
+        kind: TokenKind::Eof,
+        offset: eof_offset,
+    });
+
+    lower_tokens(tokens).map_err(|error| annotate_error(error, &ranges))
+}
+
+fn lower_tokens(tokens: Vec<Token>) -> Result<ContinuationProgram, FrontendError> {
     let ast = parser::parse(tokens)?;
     let ast = crate::macro_expansion::expand(ast)?;
     let hir = semantic::analyze(&ast)?;
     lower_hir(&hir).map_err(|error| FrontendError::without_offset(error.to_string()))
 }
 
+fn annotate_error(error: FrontendError, ranges: &[(SourceFile<'_>, usize)]) -> FrontendError {
+    let Some(offset) = error.offset() else {
+        return error;
+    };
+    let source = ranges
+        .iter()
+        .rev()
+        .find(|(source, base)| offset >= *base && offset <= *base + source.source.len());
+    match source {
+        Some(&(source, base_offset)) => error.in_source(source, base_offset),
+        None => error,
+    }
+}
+
 /// Compile BFC source directly to Brainfuck source.
 pub fn compile_source(source: &str) -> Result<String, SourceCompileError> {
     let program = lower_source(source)?;
+    Ok(compile_continuations(&program)?)
+}
+
+/// Compile several named BFC files as one compilation unit.
+pub fn compile_sources(sources: &[SourceFile<'_>]) -> Result<String, SourceCompileError> {
+    let program = lower_sources(sources)?;
     Ok(compile_continuations(&program)?)
 }
 
@@ -277,6 +413,58 @@ mod tests {
                 .message()
                 .contains("only allowed inside comments")
         );
+    }
+
+    #[test]
+    fn named_sources_form_one_compilation_unit() {
+        let sources = [
+            SourceFile::new("helpers.bfc", "cell next(cell value) { return value + 1; }"),
+            SourceFile::new("main.bfc", "void main() { output(next('A')); }"),
+        ];
+        let brainfuck = compile_sources(&sources).unwrap();
+        assert_eq!(run(brainfuck.as_bytes(), b"").unwrap(), b"B");
+    }
+
+    #[test]
+    fn named_source_errors_report_the_original_file_line_and_column() {
+        let sources = [
+            SourceFile::new("helpers.bfc", "cell identity(cell x) { return x; }"),
+            SourceFile::new("main.bfc", "void main() {\n    output(undefined);\n}\n"),
+        ];
+        let error = lower_sources(&sources).unwrap_err();
+        let location = error.location().unwrap();
+        assert_eq!(location.source_name(), "main.bfc");
+        assert_eq!(location.line(), 2);
+        assert_eq!(location.column(), 12);
+        assert_eq!(error.offset(), Some(25));
+        assert_eq!(
+            error.to_string(),
+            "main.bfc:2:12: undefined variable \"undefined\""
+        );
+    }
+
+    #[test]
+    fn lexical_constructs_do_not_cross_named_source_boundaries() {
+        let sources = [
+            SourceFile::new("broken.bfc", "/* unterminated"),
+            SourceFile::new("main.bfc", "*/ void main() {}"),
+        ];
+        let error = lower_sources(&sources).unwrap_err();
+        let location = error.location().unwrap();
+        assert_eq!(location.source_name(), "broken.bfc");
+        assert_eq!(location.line(), 1);
+        assert_eq!(location.column(), 1);
+        assert!(error.message().contains("unterminated block comment"));
+    }
+
+    #[test]
+    fn named_source_columns_count_characters_in_utf8_comments() {
+        let source = "void main() { /* 日本語 */ output(missing); }";
+        let error = lower_sources(&[SourceFile::new("main.bfc", source)]).unwrap_err();
+        let location = error.location().unwrap();
+        assert_eq!(location.line(), 1);
+        assert_eq!(location.column(), 32);
+        assert_eq!(error.offset(), source.find("missing"));
     }
 
     #[test]

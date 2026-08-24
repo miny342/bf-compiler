@@ -39,6 +39,9 @@ pub use frame_layout::{
     AbiConfig, AbiField, DEFAULT_CHUNK_CELLS, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,
     TAPE_CELLS,
 };
-pub use frontend::{FrontendError, SourceCompileError, compile_source, lower_source};
+pub use frontend::{
+    FrontendError, SourceCompileError, SourceFile, SourceLocation, compile_source, compile_sources,
+    lower_source, lower_sources,
+};
 pub use ir::{CellId, Instruction, IrError, Program, TransferTarget};
 pub use static_layout::{StaticLayout, StaticLayoutError};
