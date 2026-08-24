@@ -1,6 +1,6 @@
 use crate::ast::{
     AssignmentOperator, AstProgram, BinaryOperator, Expression, ExpressionKind, Function, Name,
-    Parameter, Statement, StatementKind, Type, UnaryOperator,
+    Parameter, Place, Statement, StatementKind, Type, UnaryOperator,
 };
 use crate::frontend::FrontendError;
 use crate::lexer::{Token, TokenKind};
@@ -31,19 +31,14 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Result<Function, FrontendError> {
-        let return_type = match self.current().kind {
+        let (return_type, array_length) = match self.current().kind {
             TokenKind::Cell => {
                 self.advance();
-                if self.at(&TokenKind::LeftBracket) {
-                    return Err(
-                        self.error_here("arrays are not implemented in this compiler stage")
-                    );
-                }
-                Type::Cell
+                (Type::Cell, self.parse_optional_array_length()?)
             }
             TokenKind::Void => {
                 self.advance();
-                Type::Void
+                (Type::Void, None)
             }
             _ => {
                 return Err(self.error_here(
@@ -54,11 +49,18 @@ impl Parser {
 
         let name = self.parse_name("expected a function name")?;
         if self.at(&TokenKind::LeftBracket) {
-            return Err(self.error_here("arrays are not implemented in this compiler stage"));
+            return Err(
+                self.error_here("array length must appear after 'cell' and before the name")
+            );
         }
         if !self.at(&TokenKind::LeftParen) {
             return Err(
                 self.error_here("global variables are not implemented in this compiler stage")
+            );
+        }
+        if array_length.is_some() {
+            return Err(
+                self.error_here("array return types are not implemented in this compiler stage")
             );
         }
         self.advance();
@@ -70,16 +72,18 @@ impl Parser {
                     return Err(self.error_here("function parameters must have type 'cell'"));
                 }
                 self.expect(TokenKind::Cell, "expected parameter type 'cell'")?;
-                if self.at(&TokenKind::LeftBracket) {
-                    return Err(
-                        self.error_here("arrays are not implemented in this compiler stage")
-                    );
-                }
+                let array_length = self.parse_optional_array_length()?;
                 let name = self.parse_name("expected a parameter name")?;
                 if self.at(&TokenKind::LeftBracket) {
-                    return Err(
-                        self.error_here("arrays are not implemented in this compiler stage")
-                    );
+                    return Err(self.error_here(
+                        "array length must appear after 'cell' and before the parameter name",
+                    ));
+                }
+                if array_length.is_some() {
+                    return Err(FrontendError::at(
+                        name.offset,
+                        "array parameters are not implemented in this compiler stage",
+                    ));
                 }
                 parameters.push(Parameter { name });
                 if !self.at(&TokenKind::Comma) {
@@ -160,17 +164,20 @@ impl Parser {
     fn parse_declaration(&mut self) -> Result<Statement, FrontendError> {
         let offset = self.current().offset;
         self.advance();
-        if self.at(&TokenKind::LeftBracket) {
-            return Err(self.error_here("arrays are not implemented in this compiler stage"));
-        }
+        let array_length = self.parse_optional_array_length()?;
         let name = self.parse_name("expected a variable name after 'cell'")?;
         if self.at(&TokenKind::LeftParen) {
             return Err(self.error_here("nested functions are not allowed"));
         }
         if self.at(&TokenKind::LeftBracket) {
-            return Err(self.error_here("arrays are not implemented in this compiler stage"));
+            return Err(
+                self.error_here("array length must appear after 'cell' and before the name")
+            );
         }
         let initializer = if self.at(&TokenKind::Assign) {
+            if array_length.is_some() {
+                return Err(self.error_here("array declarations cannot have initializers"));
+            }
             self.advance();
             Some(self.parse_expression()?)
         } else {
@@ -178,7 +185,11 @@ impl Parser {
         };
         self.expect(TokenKind::Semicolon, "expected ';' after declaration")?;
         Ok(Statement {
-            kind: StatementKind::Declaration { name, initializer },
+            kind: StatementKind::Declaration {
+                name,
+                array_length,
+                initializer,
+            },
             offset,
         })
     }
@@ -194,9 +205,14 @@ impl Parser {
                 offset,
             });
         }
-        if self.at(&TokenKind::LeftBracket) {
-            return Err(self.error_here("arrays are not implemented in this compiler stage"));
-        }
+        let index = if self.at(&TokenKind::LeftBracket) {
+            self.advance();
+            let index = self.parse_expression()?;
+            self.expect(TokenKind::RightBracket, "expected ']' after array index")?;
+            Some(index)
+        } else {
+            None
+        };
         let operator = match self.current().kind {
             TokenKind::Assign => AssignmentOperator::Set,
             TokenKind::PlusAssign => AssignmentOperator::Add,
@@ -208,7 +224,7 @@ impl Parser {
         self.expect(TokenKind::Semicolon, "expected ';' after assignment")?;
         Ok(Statement {
             kind: StatementKind::Assignment {
-                name,
+                target: Place { name, index },
                 operator,
                 value,
             },
@@ -380,6 +396,16 @@ impl Parser {
         match token.kind {
             TokenKind::Number(value) => {
                 self.advance();
+                let value = u8::try_from(value).map_err(|_| {
+                    FrontendError::at(token.offset, "integer literal must be between 0 and 255")
+                })?;
+                Ok(Expression {
+                    kind: ExpressionKind::Literal(value),
+                    offset: token.offset,
+                })
+            }
+            TokenKind::Character(value) => {
+                self.advance();
                 Ok(Expression {
                     kind: ExpressionKind::Literal(value),
                     offset: token.offset,
@@ -399,9 +425,16 @@ impl Parser {
                     });
                 }
                 if self.at(&TokenKind::LeftBracket) {
-                    return Err(
-                        self.error_here("arrays are not implemented in this compiler stage")
-                    );
+                    self.advance();
+                    let index = self.parse_expression()?;
+                    self.expect(TokenKind::RightBracket, "expected ']' after array index")?;
+                    return Ok(Expression {
+                        kind: ExpressionKind::ArrayElement {
+                            array: name,
+                            index: Box::new(index),
+                        },
+                        offset: token.offset,
+                    });
                 }
                 Ok(Expression {
                     kind: ExpressionKind::Variable(name),
@@ -441,6 +474,29 @@ impl Parser {
         }
         self.expect(TokenKind::RightParen, "expected ')' after arguments")?;
         Ok(arguments)
+    }
+
+    fn parse_optional_array_length(&mut self) -> Result<Option<usize>, FrontendError> {
+        if !self.at(&TokenKind::LeftBracket) {
+            return Ok(None);
+        }
+        self.advance();
+        let token = self.current().clone();
+        let TokenKind::Number(length) = token.kind else {
+            return Err(FrontendError::at(
+                token.offset,
+                "array length must be an integer between 1 and 256",
+            ));
+        };
+        if !(1..=256).contains(&length) {
+            return Err(FrontendError::at(
+                token.offset,
+                "array length must be between 1 and 256",
+            ));
+        }
+        self.advance();
+        self.expect(TokenKind::RightBracket, "expected ']' after array length")?;
+        Ok(Some(usize::from(length)))
     }
 
     fn cell_starts_function(&self) -> bool {
@@ -513,7 +569,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_globals_arrays_and_nested_functions_explicitly() {
+    fn parses_local_arrays_and_rejects_unsupported_array_positions() {
+        let program = parse_source("void main() { cell[256] values; values[1 + 2] = 4; }").unwrap();
+        let StatementKind::Block { statements, .. } = &program.functions[0].body.kind else {
+            panic!("expected function block")
+        };
+        assert!(matches!(
+            statements[0].kind,
+            StatementKind::Declaration {
+                array_length: Some(256),
+                ..
+            }
+        ));
+        assert!(matches!(
+            statements[1].kind,
+            StatementKind::Assignment {
+                target: Place { index: Some(_), .. },
+                ..
+            }
+        ));
+
         assert!(
             parse_source("cell global;")
                 .unwrap_err()
@@ -524,13 +599,59 @@ mod tests {
             parse_source("cell[4] values;")
                 .unwrap_err()
                 .message()
-                .contains("arrays")
+                .contains("global")
+        );
+        assert!(
+            parse_source("cell[4] make() { return 0; } void main() {}")
+                .unwrap_err()
+                .message()
+                .contains("return")
+        );
+        assert!(
+            parse_source("void take(cell[4] values) {} void main() {}")
+                .unwrap_err()
+                .message()
+                .contains("parameters")
+        );
+        assert!(
+            parse_source("void main() { cell[4] values = 0; }")
+                .unwrap_err()
+                .message()
+                .contains("initializers")
         );
         assert!(
             parse_source("void main() { cell nested() {} }")
                 .unwrap_err()
                 .message()
                 .contains("nested")
+        );
+    }
+
+    #[test]
+    fn validates_array_lengths_and_scalar_literal_range_separately() {
+        for source in [
+            "void main() { cell[0] values; }",
+            "void main() { cell[257] values; }",
+        ] {
+            assert!(
+                parse_source(source)
+                    .unwrap_err()
+                    .message()
+                    .contains("between 1 and 256")
+            );
+        }
+
+        assert!(
+            parse_source("void main() { output(256); }")
+                .unwrap_err()
+                .message()
+                .contains("between 0 and 255")
+        );
+        assert!(
+            parse_source("void main() { cell['A'] values; }")
+                .unwrap_err()
+                .message()
+                .contains("must be an integer")
         );
     }
 }

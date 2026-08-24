@@ -4,8 +4,9 @@
 実験的な実行時ABIを定義する。
 
 ABI version 0の設計仕様である。現在の`bf-compiler`はscalar関数のframe、continuation
-dispatch、call/return、直接・相互再帰にこのABIを適用している。global、配列、array
-portal、aggregate argument/returnはまだcompiler本体へ接続しておらず、それらを含む
+dispatch、call/return、直接・相互再帰にこのABIを適用している。定数添字だけを使うlocal
+配列は各要素を通常のframe slotへscalarizeし、array portalを使用しない。global、動的添字の
+array portal、aggregate argument/returnはまだcompiler本体へ接続しておらず、それらを含む
 検証コードは`bf-frame-experiment` crateに置く。
 
 ## 目的
@@ -234,7 +235,7 @@ function entry continuation
 frame chunk count K
 parameter locations
 local scalar locations
-local array regions
+dynamic-index local array regions
 expression temporary locations
 common header locations
 aggregate return outbox size and locations
@@ -261,8 +262,8 @@ frame_address(F, K, q)
       + (q mod D)
 ```
 
-したがって、現在のframeにあるscalarと定数添字配列要素は、frontierからの負の
-コンパイル時定数offsetとしてアクセスできる。
+したがって、現在のframeにあるscalarと、通常の`FrameSlot`へscalarizeした定数添字
+local配列要素は、frontierからの負のコンパイル時定数offsetとしてアクセスできる。
 
 frame内の大分類は低addressから次の順とする。
 
@@ -362,10 +363,15 @@ array accessor中の`INDEX`とscratchは例外で、resume continuationが回収
 
 parameter、local、temporaryをこの16 cellsへ割り当ててはならない。
 
-## Frame内の配列
+## Frame内の動的添字配列region
 
-ローカル配列のbase headは必ずchunk headへalignする。base head直後の`R`個はglobal
-配列と同じ予約prefixとし、配列の最初の要素はその後へ置く。
+定数添字だけを使うlocal配列は、各要素を通常の`FrameSlot`へscalarizeできる。この
+場合は配列固有のbase head、head alignment、`R`個のreserved prefixを持たず、各要素を
+frontier-relativeなコンパイル時定数offsetで直接読み書きする。
+
+以下のregion layoutは、第7段階で動的添字のarray accessorに渡すlocal配列に対する
+規約である。そのようなlocal配列のbase headは必ずchunk headへalignする。base head
+直後の`R`個はglobal配列と同じ予約prefixとし、配列の最初の要素はその後へ置く。
 
 ```text
 base flag=1 | reserved prefix | local_array...
@@ -907,9 +913,9 @@ typed HIRからのloweringがframe slotとcontinuation IDを割り当て、ABI b
 生成する。validatorは`void main()`、mainのcall禁止、frame slot範囲、call arity、
 continuation ownership、return型などを検査する。
 
-globalと配列をcompiler本体へ接続する段階では、global address space、array portal、
-aggregate return outboxをこのIRへ追加する。これらは将来拡張であり、現在の公開scalar IRの
-一部ではない。
+globalと動的添字配列をcompiler本体へ接続する段階では、global address space、
+array portal、aggregate return outboxをこのIRへ追加する。定数添字だけのlocal配列はそれより
+前に`FrameSlot`へscalarizeされるため、配列用の公開IR拡張を必要としない。
 
 ## 実験結果とversion 0の決定
 

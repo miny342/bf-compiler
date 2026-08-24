@@ -44,10 +44,11 @@ pub(crate) enum StatementKind {
     },
     Declaration {
         name: Name,
+        array_length: Option<usize>,
         initializer: Option<Expression>,
     },
     Assignment {
-        name: Name,
+        target: Place,
         operator: AssignmentOperator,
         value: Expression,
     },
@@ -68,6 +69,12 @@ pub(crate) enum StatementKind {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Place {
+    pub(crate) name: Name,
+    pub(crate) index: Option<Expression>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssignmentOperator {
     Set,
@@ -85,6 +92,10 @@ pub(crate) struct Expression {
 pub(crate) enum ExpressionKind {
     Literal(u8),
     Variable(Name),
+    ArrayElement {
+        array: Name,
+        index: Box<Expression>,
+    },
     Input,
     Call {
         name: Name,

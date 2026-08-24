@@ -85,8 +85,14 @@ fn validate_main(
 struct FunctionAnalyzer<'a> {
     signatures: &'a HashMap<String, RegisteredFunction>,
     return_type: hir::Type,
-    scopes: Vec<HashMap<String, LocalId>>,
+    scopes: Vec<HashMap<String, LocalBinding>>,
     next_local: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalBinding {
+    Cell(LocalId),
+    Array { base: LocalId, length: usize },
 }
 
 impl<'a> FunctionAnalyzer<'a> {
@@ -106,7 +112,7 @@ impl<'a> FunctionAnalyzer<'a> {
     ) -> Result<HirFunction, FrontendError> {
         let mut parameters = Vec::with_capacity(function.parameters.len());
         for parameter in &function.parameters {
-            let local = self.declare(&parameter.name)?;
+            let local = self.declare_cell(&parameter.name)?;
             parameters.push(HirParameter {
                 local,
                 offset: parameter.name.offset,
@@ -205,7 +211,11 @@ impl<'a> FunctionAnalyzer<'a> {
                 let (statements, flow) = result?;
                 (HirStatementKind::Block(statements), flow)
             }
-            ast::StatementKind::Declaration { name, initializer } => {
+            ast::StatementKind::Declaration {
+                name,
+                array_length,
+                initializer,
+            } => {
                 if self.scopes.last().unwrap().contains_key(&name.text) {
                     return Err(already_declared(name));
                 }
@@ -214,19 +224,34 @@ impl<'a> FunctionAnalyzer<'a> {
                     .as_ref()
                     .map(|expression| self.analyze_expression(expression))
                     .transpose()?;
-                let local = self.declare(name)?;
-                (
-                    HirStatementKind::Declaration { local, initializer },
-                    Flow::FallsThrough,
-                )
+                if let Some(length) = array_length {
+                    debug_assert!(initializer.is_none());
+                    let base = self.declare_array(name, *length)?;
+                    let declarations = (0..*length)
+                        .map(|index| HirStatement {
+                            kind: HirStatementKind::Declaration {
+                                local: LocalId::new(base.index() + index),
+                                initializer: None,
+                            },
+                            offset: statement.offset,
+                        })
+                        .collect();
+                    (HirStatementKind::Block(declarations), Flow::FallsThrough)
+                } else {
+                    let local = self.declare_cell(name)?;
+                    (
+                        HirStatementKind::Declaration { local, initializer },
+                        Flow::FallsThrough,
+                    )
+                }
             }
             ast::StatementKind::Assignment {
-                name,
+                target,
                 operator,
                 value,
             } => {
-                let local = self.resolve_local(name)?;
                 let value = self.analyze_expression(value)?;
+                let local = self.resolve_place(target)?;
                 (
                     HirStatementKind::Assignment {
                         local,
@@ -346,7 +371,10 @@ impl<'a> FunctionAnalyzer<'a> {
         let kind = match &expression.kind {
             ast::ExpressionKind::Literal(value) => HirExpressionKind::Literal(*value),
             ast::ExpressionKind::Variable(name) => {
-                HirExpressionKind::Local(self.resolve_local(name)?)
+                HirExpressionKind::Local(self.resolve_cell(name)?)
+            }
+            ast::ExpressionKind::ArrayElement { array, index } => {
+                HirExpressionKind::Local(self.resolve_indexed(array, index)?)
             }
             ast::ExpressionKind::Input => HirExpressionKind::Input,
             ast::ExpressionKind::Call { name, arguments } => {
@@ -415,7 +443,7 @@ impl<'a> FunctionAnalyzer<'a> {
         Ok((signature.id, signature.return_type, arguments))
     }
 
-    fn declare(&mut self, name: &ast::Name) -> Result<LocalId, FrontendError> {
+    fn declare_cell(&mut self, name: &ast::Name) -> Result<LocalId, FrontendError> {
         if self.scopes.last().unwrap().contains_key(&name.text) {
             return Err(already_declared(name));
         }
@@ -424,11 +452,24 @@ impl<'a> FunctionAnalyzer<'a> {
         self.scopes
             .last_mut()
             .unwrap()
-            .insert(name.text.clone(), local);
+            .insert(name.text.clone(), LocalBinding::Cell(local));
         Ok(local)
     }
 
-    fn resolve_local(&self, name: &ast::Name) -> Result<LocalId, FrontendError> {
+    fn declare_array(&mut self, name: &ast::Name, length: usize) -> Result<LocalId, FrontendError> {
+        if self.scopes.last().unwrap().contains_key(&name.text) {
+            return Err(already_declared(name));
+        }
+        let base = LocalId::new(self.next_local);
+        self.next_local += length;
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(name.text.clone(), LocalBinding::Array { base, length });
+        Ok(base)
+    }
+
+    fn resolve_binding(&self, name: &ast::Name) -> Result<LocalBinding, FrontendError> {
         self.scopes
             .iter()
             .rev()
@@ -436,6 +477,67 @@ impl<'a> FunctionAnalyzer<'a> {
             .ok_or_else(|| {
                 FrontendError::at(name.offset, format!("undefined variable {:?}", name.text))
             })
+    }
+
+    fn resolve_cell(&self, name: &ast::Name) -> Result<LocalId, FrontendError> {
+        match self.resolve_binding(name)? {
+            LocalBinding::Cell(local) => Ok(local),
+            LocalBinding::Array { .. } => Err(FrontendError::at(
+                name.offset,
+                format!(
+                    "array {:?} cannot be used as a cell value; whole-array operations are not implemented",
+                    name.text
+                ),
+            )),
+        }
+    }
+
+    fn resolve_place(&mut self, place: &ast::Place) -> Result<LocalId, FrontendError> {
+        match &place.index {
+            Some(index) => self.resolve_indexed(&place.name, index),
+            None => match self.resolve_binding(&place.name)? {
+                LocalBinding::Cell(local) => Ok(local),
+                LocalBinding::Array { .. } => Err(FrontendError::at(
+                    place.name.offset,
+                    format!(
+                        "whole-array assignment to {:?} is not implemented",
+                        place.name.text
+                    ),
+                )),
+            },
+        }
+    }
+
+    fn resolve_indexed(
+        &mut self,
+        name: &ast::Name,
+        index: &ast::Expression,
+    ) -> Result<LocalId, FrontendError> {
+        let binding = self.resolve_binding(name)?;
+        let LocalBinding::Array { base, length } = binding else {
+            return Err(FrontendError::at(
+                name.offset,
+                format!("cell variable {:?} cannot be indexed", name.text),
+            ));
+        };
+        let index_expression = self.analyze_expression(index)?;
+        let Some(index_value) = hir::constant_cell_value(&index_expression) else {
+            return Err(FrontendError::at(
+                index.offset,
+                "dynamic array indices are not implemented in this compiler stage",
+            ));
+        };
+        let index_value = usize::from(index_value);
+        if index_value >= length {
+            return Err(FrontendError::at(
+                index.offset,
+                format!(
+                    "array index {index_value} is out of bounds for {:?} with length {length}",
+                    name.text
+                ),
+            ));
+        }
+        Ok(LocalId::new(base.index() + index_value))
     }
 }
 
@@ -609,5 +711,97 @@ mod tests {
                 .message()
                 .contains("cannot be called")
         );
+    }
+
+    #[test]
+    fn flattens_local_arrays_and_resolves_constant_expression_indices() {
+        let program = analyze_source(
+            "void main() { cell before; cell[4] values; values[1 + 2] = 7; output(values[3]); }",
+        )
+        .unwrap();
+        let main = &program.functions[0];
+        assert_eq!(main.local_count, 5);
+        let HirStatementKind::Block(statements) = &main.body.kind else {
+            panic!("expected function body block")
+        };
+        let HirStatementKind::Block(array_declarations) = &statements[1].kind else {
+            panic!("expected flattened array declarations")
+        };
+        assert_eq!(array_declarations.len(), 4);
+        for (index, declaration) in array_declarations.iter().enumerate() {
+            assert!(matches!(
+                declaration.kind,
+                HirStatementKind::Declaration {
+                    local,
+                    initializer: None
+                } if local == LocalId::new(index + 1)
+            ));
+        }
+        assert!(matches!(
+            statements[2].kind,
+            HirStatementKind::Assignment {
+                local,
+                operator: hir::AssignmentOperator::Set,
+                ..
+            } if local == LocalId::new(4)
+        ));
+        assert!(matches!(
+            statements[3].kind,
+            HirStatementKind::Output(HirExpression {
+                kind: HirExpressionKind::Local(local),
+                ..
+            }) if local == LocalId::new(4)
+        ));
+    }
+
+    #[test]
+    fn array_bindings_shadow_and_obey_scope_rules() {
+        let program = analyze_source(
+            "void main() { cell value; { cell[2] value; value[1] = 3; } value = 4; }",
+        )
+        .unwrap();
+        assert_eq!(program.functions[0].local_count, 3);
+
+        let duplicate = analyze_source("void main() { cell[2] values; cell values; }").unwrap_err();
+        assert!(duplicate.message().contains("already declared"));
+    }
+
+    #[test]
+    fn rejects_dynamic_out_of_bounds_and_invalid_array_uses() {
+        let cases = [
+            (
+                "void main() { cell[4] values; cell i; output(values[i]); }",
+                "dynamic array indices",
+            ),
+            (
+                "void main() { cell[4] values; output(values[4]); }",
+                "out of bounds",
+            ),
+            (
+                "void main() { cell[4] values; output(values); }",
+                "whole-array operations",
+            ),
+            (
+                "void main() { cell[4] values; values = 0; }",
+                "whole-array assignment",
+            ),
+            (
+                "void main() { cell value; output(value[0]); }",
+                "cannot be indexed",
+            ),
+            (
+                "void consume(cell value) {} void main() { cell[4] values; consume(values); }",
+                "whole-array operations",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let error = analyze_source(source).unwrap_err();
+            assert!(
+                error.message().contains(expected),
+                "expected {expected:?} in {:?}",
+                error.message()
+            );
+        }
     }
 }

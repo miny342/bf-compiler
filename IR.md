@@ -258,8 +258,10 @@ Add(0)            → 削除
 
 ## 配列
 
-動的添字によるアクセスは通常の`CellId`参照として扱えない。物理表現とcontrol flowは
-[ABI.md](ABI.md)の16-cell array portalへloweringする。
+source frontendで実装済みの定数添字local配列と、将来の動的添字および独立した
+low-level Cell IRの配列設計は区別する。動的添字によるアクセスは通常の論理cell参照として
+扱えないため、その物理表現とcontrol flowは[ABI.md](ABI.md)の16-cell array portalへ
+loweringする。
 
 ### 定数添字
 
@@ -267,9 +269,19 @@ Add(0)            → 削除
 array[3]
 ```
 
-定数添字は実行時命令にせず、セル配置時に論理セルへ解決する。配列要素間へ
-作業セルを挟むレイアウトを採用する可能性があるため、単純な
-`array_top + index`とは限らない。
+現在のsource frontendは、local配列の各要素を名前解決中に連続する論理`LocalId`へ
+scalarizeする。定数式添字は範囲検査後に対応する`LocalId`へ解決し、typed HIRには
+通常のscalar localとして渡す。HIRからContinuation IRへのloweringでその`LocalId`を
+`FrameSlot`へ変換するため、実行時の配列命令、array portal、配列用reserved prefixは発生
+しない。
+
+各要素の`FrameSlot`は論理的に連続するが、chunkのallocation flagを挟む場合があるため
+Brainfuckテープ上で物理的に連続するとは限らない。ABI backendが各`FrameSlot`の相対offsetを
+個別に決定する。この表現では配列の識別情報をtyped HIRより後ろへ残さない。
+
+一方、独立したlow-level Cell IRまたは将来の配列identityを保持するIRでは、定数添字を
+実行時命令にせず、セル配置時に論理セルへ解決する。配列要素間へ作業セルを挟む
+レイアウトを採用する可能性があるため、単純な`array_top + index`とは限らない。
 
 概念的には、名前解決中に次のような場所を扱う。
 
@@ -283,7 +295,8 @@ enum Place {
 }
 ```
 
-セルIRが確定するまでに、定数添字の`ArrayElement`は`CellId`へ変換する。
+この概念モデルでは、セルIRが確定するまでに定数添字の`ArrayElement`を`CellId`へ
+変換する。これは現在のsource frontendが直接`LocalId`へscalarizeするpipelineの説明ではない。
 
 ### 動的添字
 
@@ -387,8 +400,8 @@ struct Layout {
 1. 現在のセルIR、BF IR、BF文字列化を基準実装として安定させる。（完了）
 2. `main`をroot activationとするContinuation IRとABI frame layoutを導入する。（完了）
 3. scalar function call、return、直接・相互再帰をfrontendとbackendへ接続する。（完了）
-4. global scalarとstatic領域の初期化を接続する。
-5. 定数添字配列を論理layoutへ接続する。
+4. localの定数添字配列を`LocalId`/`FrameSlot`へscalarizeする。（完了）
+5. global scalarとstatic領域の初期化を接続する。
 6. array portalと動的配列命令を追加する。
 7. 配列の値渡し、aggregate return outboxを接続する。
 8. 必要性を測定してから、BF IRの最適化を別パスとして追加する。

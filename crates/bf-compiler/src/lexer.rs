@@ -17,7 +17,8 @@ pub(crate) enum TokenKind {
     Input,
     Output,
     Identifier(String),
-    Number(u8),
+    Number(u16),
+    Character(u8),
     LeftBrace,
     RightBrace,
     LeftParen,
@@ -121,9 +122,6 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 let digits = &source[digits_start..position];
                 let value = u16::from_str_radix(digits, radix)
                     .map_err(|_| FrontendError::at(start, "integer literal is too large"))?;
-                let value = u8::try_from(value).map_err(|_| {
-                    FrontendError::at(start, "integer literal must be between 0 and 255")
-                })?;
                 tokens.push(Token {
                     kind: TokenKind::Number(value),
                     offset: start,
@@ -134,7 +132,7 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
                 let (value, next) = lex_character(bytes, position)?;
                 position = next;
                 tokens.push(Token {
-                    kind: TokenKind::Number(value),
+                    kind: TokenKind::Character(value),
                     offset: start,
                 });
             }
@@ -278,4 +276,21 @@ fn is_identifier_start(byte: u8) -> bool {
 
 fn is_identifier_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_256_for_array_length_parsing() {
+        let tokens = lex("cell[256] values;").unwrap();
+        assert!(matches!(tokens[2].kind, TokenKind::Number(256)));
+    }
+
+    #[test]
+    fn still_rejects_integer_tokens_larger_than_u16() {
+        let error = lex("65536").unwrap_err();
+        assert!(error.message().contains("too large"));
+    }
 }

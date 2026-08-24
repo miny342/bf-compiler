@@ -94,6 +94,25 @@ cell[16] small;
 - 定数添字の範囲外アクセスはコンパイルエラーとする。
 - 実行時添字の範囲外アクセスは未定義動作とする。
 
+定数添字とは、実行時の値を読まずに`cell`値を決定できる式である。
+整数・文字リテラルと、それらに対する単項、加減算、比較、論理演算は定数式に
+なりうる。加減算は通常の`cell`式と同じくmod 256で評価する。`&&`と`||`で
+短絡するoperandは評価されないため、そのoperandが実行時の値を含んでいても式全体の
+値が決まる場合は定数添字とみなす。
+
+ただし、動的配列アクセスなど現在の実装段階で未対応のoperationは、短絡される
+operand内にあってもコンパイルエラーとして診断する。短絡によって未実装機能そのものが
+受理されるわけではない。
+
+```c
+buffer[1 + 2]       // 3
+buffer[255 + 1]     // 0
+buffer[1 || input()] // 1; input()は評価しない
+```
+
+変数の読み出し、`input()`、function callなどが値の決定に必要な添字は動的添字で
+ある。
+
 添字も`cell`である。
 
 ```c
@@ -560,7 +579,8 @@ arguments        = expression { "," expression } ;
 - 同じスコープで識別子を再定義する。
 - 配列を算術、比較、論理、`output`など`cell`を要求する位置で使用する。
 - 定数添字が配列の範囲外である。
-- 整数リテラルが`0..=255`の範囲外である。
+- 式中の整数リテラルが`0..=255`の範囲外である。
+- 配列の宣言長が`1..=256`の範囲外である。
 - `input`、`output`を仕様と異なる形で使用する。
 - function callの引数型・個数、代入先、return型が宣言と一致しない。
 - `void`関数の値を使用する。
@@ -590,8 +610,8 @@ call深度によるBFテープ右端超過とする。
 3. `if`、`while`、`expression != 0`、`!`
 4. その他の比較、`&&`、`||`
 5. Continuation IR、scalar関数、call、return、再帰
-6. 定数添字の配列
-7. array portalと動的添字の配列
+6. local配列と定数式添字による要素の読み書き
+7. static global領域、array portal、動的添字の配列
 8. 配列の値渡し、全体代入、aggregate return
 9. BFCで記述するVMまたはセルフホスト用コンパイラ
 
@@ -600,12 +620,16 @@ call深度によるBFテープ右端超過とする。
 
 ### 現在の実装状況
 
-第5段階まで実装している。parameterなしの`void main()`をentry pointとし、scalarの
+第6段階まで実装している。parameterなしの`void main()`をentry pointとし、scalarの
 `cell`/`void`関数、parameter、call、return、forward call、直接再帰、相互再帰を使用
 できる。callの引数は左から右に評価し、callerのlocalはcalleeの実行中も保存する。
 すべての比較演算と、callを含む場合にも短絡評価する論理`&&`および`||`を使用できる。
 
-global変数と配列は、実装済みになるまで明示的なコンパイルエラーとして拒否する。
-scalar関数には[ABI.md](ABI.md)のframe stackとContinuation dispatcherを使用する。配列、
-array portal、aggregate argument/returnは独立experimentで検証済みだが、compiler本体には
-まだ接続していない。
+function内で固定長local配列を宣言し、上記の定数式添字で要素を読み書きできる。
+各要素はactivation frameの通常のscalar slotへコンパイル時に展開する。
+
+global変数とglobal配列、動的添字、配列全体の代入、配列parameter、配列returnは、
+実装済みになるまで明示的なコンパイルエラーとして拒否する。scalar関数には
+[ABI.md](ABI.md)のframe stackとContinuation dispatcherを使用する。array portalと
+aggregate argument/returnは独立experimentで検証済みだが、compiler本体にはまだ接続して
+いない。

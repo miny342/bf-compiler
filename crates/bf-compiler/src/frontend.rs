@@ -260,8 +260,13 @@ mod tests {
         let undefined_function = lower_source(&main_source("future_function(1);")).unwrap_err();
         assert!(undefined_function.message().contains("undefined function"));
 
-        let future_array = lower_source(&main_source("cell[16] values;")).unwrap_err();
-        assert!(future_array.message().contains("arrays"));
+        let future_dynamic_array =
+            lower_source(&main_source("cell[16] values; cell i; output(values[i]);")).unwrap_err();
+        assert!(
+            future_dynamic_array
+                .message()
+                .contains("dynamic array indices")
+        );
 
         let future_definition = lower_source("void helper() {}").unwrap_err();
         assert!(future_definition.message().contains("must define"));
@@ -337,6 +342,99 @@ mod tests {
         "#;
         let brainfuck = compile_source(source).unwrap();
         assert_eq!(run(brainfuck.as_bytes(), &[4]).unwrap(), vec![5, 4]);
+    }
+
+    #[test]
+    fn constant_index_local_arrays_work_end_to_end() {
+        let source = r#"
+            cell use_array(cell seed) {
+                cell[4] values;
+                values[1 + 1] = seed;
+                values[2] += 3;
+                values[!1] = 9;
+                values[0] -= 2;
+                return values[2] + values[0];
+            }
+
+            cell recursive_array(cell depth) {
+                cell[2] values;
+                values[0] = depth;
+                if (depth) {
+                    return recursive_array(depth - 1) + values[0];
+                }
+                return values[1];
+            }
+
+            void main() {
+                cell[2] zeroed;
+                output(zeroed[1]);
+                output(use_array(4));
+                output(use_array(1));
+                output(recursive_array(3));
+                zeroed[1] = 'X';
+                output(zeroed[1 || input()]);
+                output(input());
+            }
+        "#;
+        let brainfuck = compile_source(source).unwrap();
+        assert_eq!(
+            run(brainfuck.as_bytes(), b"Q").unwrap(),
+            vec![0, 14, 11, 6, b'X', b'Q'],
+        );
+    }
+
+    #[test]
+    fn local_arrays_cross_chunks_with_both_abi_geometries() {
+        let source = r#"
+            void main() {
+                cell[18] values;
+                values[0] = 'A';
+                values[7] = 'B';
+                values[8] = 'C';
+                values[15] = 'D';
+                values[16] = 'E';
+                values[17] = 'F';
+                output(values[0]);
+                output(values[7]);
+                output(values[8]);
+                output(values[15]);
+                output(values[16]);
+                output(values[17]);
+            }
+        "#;
+        let program = lower_source(source).unwrap();
+
+        for chunk_cells in [8, 16] {
+            let config = crate::AbiConfig::new(chunk_cells).unwrap();
+            let brainfuck = crate::lower_continuations_with_config(&program, config)
+                .unwrap()
+                .to_source();
+            assert_eq!(
+                run(brainfuck.as_bytes(), b"").unwrap(),
+                b"ABCDEF",
+                "chunk size {chunk_cells}",
+            );
+        }
+    }
+
+    #[test]
+    fn maximum_length_local_array_runs_with_both_abi_geometries() {
+        let program = lower_source(
+            "void main() { cell[256] values; values[255] = 'Z'; output(values[255]); }",
+        )
+        .unwrap();
+
+        for chunk_cells in [8, 16] {
+            let config = crate::AbiConfig::new(chunk_cells).unwrap();
+            let brainfuck = crate::lower_continuations_with_config(&program, config)
+                .unwrap()
+                .to_source();
+            assert_eq!(
+                run(brainfuck.as_bytes(), b"").unwrap(),
+                b"Z",
+                "chunk size {chunk_cells}",
+            );
+        }
     }
 
     #[test]
