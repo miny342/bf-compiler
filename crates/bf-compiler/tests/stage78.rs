@@ -21,6 +21,15 @@ fn assert_executes_for_both_chunk_sizes(source: &str, input: &[u8], expected: &[
 }
 
 #[test]
+fn repository_self_test_program_reports_all_ok() {
+    assert_executes_for_both_chunk_sizes(
+        include_str!("../../../test.bfc"),
+        &[],
+        b"ok\nok\nok\nok\n",
+    );
+}
+
+#[test]
 fn globals_initialize_in_declaration_order_and_survive_recursion() {
     let source = r#"
         cell first = input();

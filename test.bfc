@@ -1,0 +1,144 @@
+// Repository-level compiler self-test.
+// Expected output:
+// ok
+// ok
+// ok
+// ok
+
+cell expected_collatz_steps = collatz_steps(13);
+cell[6] shared_values;
+
+cell is_even(cell value) {
+    while (value >= 2) {
+        value -= 2;
+    }
+    return value == 0;
+}
+
+cell half(cell value) {
+    cell result;
+    while (value >= 2) {
+        value -= 2;
+        result += 1;
+    }
+    return result;
+}
+
+cell collatz_steps(cell value) {
+    cell steps;
+    while (value != 1) {
+        if (is_even(value)) {
+            value = half(value);
+        } else {
+            // Inputs used by this test stay below 89, so 3n + 1 does not wrap.
+            value = value + value + value + 1;
+        }
+        steps += 1;
+    }
+    return steps;
+}
+
+cell fibonacci(cell value) {
+    if (value <= 1) {
+        return value;
+    }
+    return fibonacci(value - 1) + fibonacci(value - 2);
+}
+
+cell greatest_common_divisor(cell left, cell right) {
+    if (right == 0) {
+        return left;
+    }
+    while (left >= right) {
+        left -= right;
+    }
+    return greatest_common_divisor(right, left);
+}
+
+cell[8] recursively_accumulate(cell depth, cell[8] values) {
+    if (depth == 0) {
+        return values;
+    }
+    values[depth] += depth;
+    return recursively_accumulate(depth - 1, values);
+}
+
+cell[6] bubble_sort(cell[6] values) {
+    cell pass = 5;
+    while (pass != 0) {
+        cell index;
+        while (index < pass) {
+            cell next = index + 1;
+            if (values[index] > values[next]) {
+                cell temporary = values[index];
+                values[index] = values[next];
+                values[next] = temporary;
+            }
+            index += 1;
+        }
+        pass -= 1;
+    }
+    return values;
+}
+
+cell test1() {
+    // Iteration, nested branches, forward global initialization, and calls.
+    return expected_collatz_steps == 9 && collatz_steps(19) == 20;
+}
+
+cell test2() {
+    // Recursive calls with two different frame shapes.
+    return fibonacci(8) == 21 && greatest_common_divisor(84, 30) == 6;
+}
+
+cell test3() {
+    // Recursive aggregate arguments/returns must not modify the caller value.
+    cell[8] original;
+    cell[8] result;
+    original[0] = 10;
+    original[4] = 1;
+    result = recursively_accumulate(4, original);
+    return original[4] == 1 && result[0] == 10 && result[1] == 1
+        && result[2] == 2 && result[3] == 3 && result[4] == 5;
+}
+
+cell test4() {
+    // Dynamic global/local portals plus aggregate pass-by-value and sorting.
+    cell index;
+    shared_values[index] = 4;
+    index += 1;
+    shared_values[index] = 1;
+    index += 1;
+    shared_values[index] = 5;
+    index += 1;
+    shared_values[index] = 0;
+    index += 1;
+    shared_values[index] = 3;
+    index += 1;
+    shared_values[index] = 2;
+
+    cell[6] sorted;
+    sorted = bubble_sort(shared_values);
+    cell probe = 3;
+    return shared_values[probe] == 0 && shared_values[0] == 4
+        && sorted[0] == 0 && sorted[1] == 1 && sorted[2] == 2
+        && sorted[3] == 3 && sorted[4] == 4 && sorted[5] == 5;
+}
+
+void report(cell passed) {
+    if (passed) {
+        output('o');
+        output('k');
+    } else {
+        output('n');
+        output('g');
+    }
+    output(10);
+}
+
+void main() {
+    report(test1());
+    report(test2());
+    report(test3());
+    report(test4());
+}
