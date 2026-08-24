@@ -1,8 +1,34 @@
 # Brainfuck backend最適化メモ
 
-この文書は、version 0の言語仕様やABIを変更しない、将来のbackend最適化候補を記録する。
-ここに載せた手法は未採用であり、実装時には生成BFの長さ、実行step、追加cell数を現在の
-loweringと比較してから選ぶ。
+この文書は、version 0の言語仕様やABIを変更しないbackend最適化と今後の候補を記録する。
+隣接する移動・加算の統合、zero命令の除去、clear loopの標準化など、意味を局所的に判定できる
+BF IR peephole最適化は採用済みである。以下の高度なlowering手法は未採用であり、実装時には
+生成BFの長さ、実行step、追加cell数を現在のloweringと比較してから選ぶ。
+
+## 現在のpeephole最適化と基準値
+
+`compile`と`compile_continuations`は、未最適化BF IRへ`optimize_bf`を適用してから文字列化する。
+未加工のIRは`lower`または`lower_continuations`で取得できる。次のコマンドは標準入力をprogramへ
+渡し、最適化前後の出力が一致することを検査したうえで、静的・動的な指標を表示する。
+
+```console
+cargo run -p bf-compiler --example profile_bf_ir -- test.bfc
+```
+
+2026-08-24、default ABI (`D = 16`)、入力なしでの基準値は次のとおりである。
+
+| program | 指標 | 最適化前 | 最適化後 | 削減率 |
+|---|---:|---:|---:|---:|
+| `test.bfc` | BF source bytes | 868,629 | 275,975 | 68.23% |
+|  | 実行BF命令数 | 309,078,573 | 247,137,037 | 20.04% |
+|  | RLE型推定命令数 | 162,438,386 | 157,037,145 | 3.33% |
+| `fizzbuzz.bfc` | BF source bytes | 121,746 | 39,516 | 67.54% |
+|  | 実行BF命令数 | 2,644,141,255 | 1,770,938,111 | 33.02% |
+|  | RLE型推定命令数 | 1,515,754,326 | 1,456,578,134 | 3.90% |
+
+両programとも最大tape位置は変化しない（`test.bfc`: 1,241、`fizzbuzz.bfc`: 203）。このpassは
+生成サイズと1文字ずつ解釈する処理系には大きく効く一方、同種命令をまとめるRLE型targetへの
+実行時効果は小さい。今後のtemplate最適化ではRLE型推定命令数も主要な判断材料にする。
 
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の

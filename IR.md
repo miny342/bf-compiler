@@ -10,10 +10,10 @@
 
 ```text
 source frontend:
-  BFC source → AST → typed HIR → Continuation IR → ABI backend → BF IR → Brainfuck
+  BFC source → AST → typed HIR → Continuation IR → ABI backend → BF IR → optimize → Brainfuck
 
 low-level API:
-  Cell IR → static-cell backend → BF IR → Brainfuck
+  Cell IR → static-cell backend → BF IR → optimize → Brainfuck
 ```
 
 scalar関数、再帰、frame-relativeなローカル変数には、typed HIRとContinuation IRを
@@ -225,9 +225,28 @@ enum BfInstruction {
 `Add`は現在セルへのmod 256の加算である。例えば`Add(255)`は1減算と等価で、
 BF文字列へ変換するときは`-`として出力する。
 
-現時点では最適化パスを持たない。セルIRの各命令を機械的にBF IRへloweringし、
-隣接する`Move`や`Add`も統合せず、そのまま保持する。`Move(0)`や`Add(0)`も
-BF IR上では有効であるが、文字列化した結果は空文字列になる。
+lowering自体は最適化を行わず、セルIRの各命令を機械的にBF IRへ変換する。
+したがって公開APIの`lower`と`lower_continuations`は、隣接する`Move`や`Add`、
+`Move(0)`や`Add(0)`もそのまま保持する。未加工の結果を検査・計測できるようにするためである。
+`Move(0)`と`Add(0)`を文字列化した結果は空文字列になる。
+
+`compile`と`compile_continuations`はlowering後に独立したBF IR最適化パスを実行する。
+`optimize_bf`を直接呼び、手動で構築した`BfProgram`へ同じパスを適用することもできる。
+現在のパスはループbodyを再帰的に処理し、次の局所変換を行う。
+
+```text
+Move(a), Move(b)       → Move(a + b)
+Add(a), Add(b)         → Add((a + b) mod 256)
+Move(0), Add(0)        → 削除
+Add(...), [Add(odd)]   → [-]
+[Add(odd)], [-]        → [-]
+Add(...), [Add(odd)], Input → Input
+```
+
+加算・移動を統合した結果が0なら、その命令も削除する。奇数を加える単一命令loopは8-bit
+wrapping cellを必ず0にするため、`[+]`や`[-]`も含めて短い標準形`[-]`へ統一する。
+I/Oや一般のloopを越えた並べ替えは行わない。
+相殺するポインタ移動の削除は、最適化前の実行がテープ境界を越えないことを前提とする。
 
 セルIRの各命令をBF IRへ変換する際に、コード生成器は次を担当する。
 
@@ -238,18 +257,10 @@ BF IR上では有効であるが、文字列化した結果は空文字列にな
 - 命令終了時のデータポインタ位置の追跡
 - 30,000セルの範囲内に収まることの検査
 
-### 将来BF IRで行える最適化
+### BF IR最適化の今後の候補
 
-以下は将来の候補であり、現在は実装しない。
 BF固有の分岐、比較、divmod、moving-indexなどのlowering候補とcost modelは
 [BF_OPTIMIZATION_NOTES.md](BF_OPTIMIZATION_NOTES.md)にまとめる。
-
-```text
-Move(3), Move(-1) → Move(2)
-Add(10), Add(-3)  → Add(7)
-Move(0)           → 削除
-Add(0)            → 削除
-```
 
 さらに、ループを解析してセルIR相当の操作へ戻せる場合には、最適なBF表現へ
 再構成できる。ただし、コンパイラ自身が生成したコードではセルIRの段階ですでに
@@ -404,4 +415,5 @@ struct Layout {
 5. global scalarとstatic領域の初期化を接続する。（完了）
 6. array portalと動的配列命令を追加する。（完了）
 7. 配列の値渡し、aggregate return outboxを接続する。（完了）
-8. 必要性を測定してから、BF IRの最適化を別パスとして追加する。
+8. BF IRの局所最適化を別パスとして追加する。（完了）
+9. profileに基づき、BF固有templateとcost modelを段階的に追加する。

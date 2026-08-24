@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
+use crate::bf_optimizer::optimize_bf;
 use crate::continuation_ir::{
     Address, ArrayRegion, Continuation, ContinuationId, ContinuationProgram, FrameInstruction,
     FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId, ParameterLocation, Terminator,
@@ -13,7 +14,7 @@ use crate::{BfInstruction, BfProgram};
 
 /// Compile continuation IR with the default ABI configuration.
 pub fn compile_continuations(program: &ContinuationProgram) -> Result<String, AbiCodegenError> {
-    Ok(lower_continuations(program)?.to_source())
+    Ok(optimize_bf(&lower_continuations(program)?).to_source())
 }
 
 /// Lower continuation IR to BF IR with the default ABI configuration.

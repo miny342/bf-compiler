@@ -6,6 +6,7 @@
 mod abi_codegen;
 mod ast;
 mod bf_ir;
+mod bf_optimizer;
 mod codegen;
 #[cfg(test)]
 mod continuation_adapter;
@@ -24,6 +25,7 @@ pub use abi_codegen::{
     AbiCodegenError, compile_continuations, lower_continuations, lower_continuations_with_config,
 };
 pub use bf_ir::{BfInstruction, BfProgram};
+pub use bf_optimizer::{BfOptimizationStats, optimize_bf, optimize_bf_with_stats};
 pub use codegen::{CodegenError, compile, lower};
 pub use continuation_ir::{
     Address, ArrayRegion, Continuation, ContinuationId, ContinuationIrError, ContinuationProgram,

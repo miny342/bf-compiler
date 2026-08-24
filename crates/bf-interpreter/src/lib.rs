@@ -12,6 +12,9 @@ pub const TAPE_LEN: usize = 30_000;
 pub struct RunStats {
     /// Number of parsed Brainfuck instructions executed, including jumps.
     pub executed_instructions: u64,
+    /// Estimated instructions executed by a target that groups adjacent,
+    /// identical `+`, `-`, `<`, and `>` instructions into one operation.
+    pub executed_rle_instructions: u64,
     /// Largest tape index reached by the data pointer.
     pub max_pointer: usize,
 }
@@ -67,6 +70,26 @@ enum Op {
     Input,
     JumpIfZero(usize),
     JumpIfNonZero(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RleOp {
+    Right,
+    Left,
+    Increment,
+    Decrement,
+}
+
+impl Op {
+    const fn rle_op(self) -> Option<RleOp> {
+        match self {
+            Self::Right => Some(RleOp::Right),
+            Self::Left => Some(RleOp::Left),
+            Self::Increment => Some(RleOp::Increment),
+            Self::Decrement => Some(RleOp::Decrement),
+            Self::Output | Self::Input | Self::JumpIfZero(_) | Self::JumpIfNonZero(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -146,9 +169,23 @@ fn execute(instructions: &[Instruction], input: &[u8]) -> Result<RunResult, Erro
     let mut input_position = 0_usize;
     let mut output = Vec::new();
     let mut executed_instructions = 0_u64;
+    let mut executed_rle_instructions = 0_u64;
+    let mut previous_rle_op: Option<(usize, RleOp)> = None;
 
     while let Some(instruction) = instructions.get(program_counter) {
         executed_instructions += 1;
+        let rle_op = instruction.op.rle_op();
+        let continues_previous_run = matches!(
+            (previous_rle_op, rle_op),
+            (Some((previous_counter, previous_op)), Some(current_op))
+                if previous_counter.checked_add(1) == Some(program_counter)
+                    && previous_op == current_op
+        );
+        if !continues_previous_run {
+            executed_rle_instructions += 1;
+        }
+        previous_rle_op = rle_op.map(|op| (program_counter, op));
+
         match instruction.op {
             Op::Right => {
                 if pointer + 1 == TAPE_LEN {
@@ -207,6 +244,7 @@ fn execute(instructions: &[Instruction], input: &[u8]) -> Result<RunResult, Erro
         output,
         stats: RunStats {
             executed_instructions,
+            executed_rle_instructions,
             max_pointer,
         },
     })
@@ -237,6 +275,7 @@ mod tests {
         let result = run_with_stats(b"++[>++<-]>.", b"").unwrap();
         assert_eq!(result.output, vec![4]);
         assert_eq!(result.stats.executed_instructions, 17);
+        assert_eq!(result.stats.executed_rle_instructions, 14);
         assert_eq!(result.stats.max_pointer, 1);
     }
 

@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::bf_optimizer::optimize_bf;
 use crate::{BfInstruction, BfProgram, CellId, Instruction, Program, TransferTarget};
 
 /// Tape size defined by the project's Brainfuck execution specification.
@@ -29,7 +30,7 @@ impl Error for CodegenError {}
 
 /// Compile a validated IR program to Brainfuck source.
 pub fn compile(program: &Program) -> Result<String, CodegenError> {
-    Ok(lower(program)?.to_source())
+    Ok(optimize_bf(&lower(program)?).to_source())
 }
 
 /// Lower a validated cell IR program to unoptimized BF IR.
@@ -241,6 +242,27 @@ mod tests {
                 BfInstruction::Add(2),
             ]
         );
+    }
+
+    #[test]
+    fn compilation_optimizes_bf_ir_before_serialization() {
+        let cell = CellId::new(0);
+        let program = Program::new(
+            1,
+            vec![
+                Instruction::AddConst {
+                    dst: cell,
+                    value: 1,
+                },
+                Instruction::AddConst {
+                    dst: cell,
+                    value: 2,
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(compile(&program).unwrap(), "+++");
     }
 
     #[test]
