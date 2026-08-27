@@ -1,8 +1,8 @@
-# 第3段階bootstrap compiler
+# 第4段階bootstrap compiler
 
 このディレクトリには、最初に実行可能になったセルフホスト用の小さなコンパイラを置く。
 まずRust版コンパイラでBFC製コンパイラをBrainfuckへ変換し、そのBrainfuckプログラムで
-初期実装第1〜3段階のBFCをBrainfuckへ変換する。
+初期実装第1〜4段階のBFCをBrainfuckへ変換する。
 
 ## ファイル構成
 
@@ -47,21 +47,22 @@ production実装を変えずに次をBF上で検証できる。
 
 ## 対応する入力
 
-`LANGUAGE.md`の初期実装第1〜3段階から、次を受理する。
+`LANGUAGE.md`の初期実装第1〜4段階から、次を受理する。
 
 - ちょうど1つの`void main()`定義
 - nested block、空文、scalar `cell`宣言
 - 10進・16進整数リテラルと文字リテラル
 - `input()`、`output`、`=`、`+=`、`-=`
 - 単項および二項の`+`、`-`
-- 単項`!`と`expression != 0`
+- 単項`!`、`==`、`!=`、`<`、`<=`、`>`、`>=`
+- 短絡評価する`&&`と`||`
 - `if`、`else`、`while`
 - ASCII空白、行コメント、blockコメント
 
 現在のbootstrapには、同時に生存する変数は16個まで、block nestingは16段まで、識別子は
 16 byteまで、式temporaryはtarget cell 63未満、制御構文のnestingは31段まで、という明示的な
 制限がある。制御用target cellには64〜125を使用する。制限超過または後段階の構文を検出すると
-`BFC_STAGE3_ERROR`を出力して停止する。runtime演算は通常のBFCと同じくmod 256でwrapする。
+`BFC_STAGE4_ERROR`を出力して停止する。runtime演算は通常のBFCと同じくmod 256でwrapする。
 
 ## 検証
 

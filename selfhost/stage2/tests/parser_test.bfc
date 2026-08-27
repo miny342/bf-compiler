@@ -1,4 +1,4 @@
-cell[] parser_test_source = "void main(){cell value=input();if(!value){output(0x41);}else value+=1;while(value!=0){value-=1;}}";
+cell[] parser_test_source = "void main(){cell value=input();if(!value||value>=0x80){output(0x41);}else value+=1;while(value!=0&&value<=0xff){value-=1;}output(value==0);}";
 
 void test_parser() {
     reset_test_input(2);

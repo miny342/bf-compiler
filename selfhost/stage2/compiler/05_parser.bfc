@@ -1,4 +1,4 @@
-// 第1〜3段階の式、宣言、代入、制御構文を解析しながらBFを生成する。
+// 第1〜4段階の式、宣言、代入、制御構文を解析しながらBFを生成する。
 
 void parse_primary(cell destination) {
     check_scratch(destination);
@@ -44,7 +44,7 @@ void parse_unary(cell destination) {
     }
 }
 
-void parse_expression(cell destination) {
+void parse_additive(cell destination) {
     parse_unary(destination);
     while (token_kind == TokenKind::Plus || token_kind == TokenKind::Minus) {
         TokenKind operator = token_kind;
@@ -56,13 +56,82 @@ void parse_expression(cell destination) {
             operator == TokenKind::Minus
         );
     }
-    if (token_kind == TokenKind::BangEqual) {
+}
+
+void parse_comparison(cell destination) {
+    parse_additive(destination);
+    while (token_kind == TokenKind::Less
+        || token_kind == TokenKind::LessEqual
+        || token_kind == TokenKind::Greater
+        || token_kind == TokenKind::GreaterEqual) {
+        TokenKind operator = token_kind;
         next_token();
-        if (token_kind != TokenKind::Number || token_value != 0) {
-            fail();
+        parse_additive(destination + 1);
+        if (operator == TokenKind::Less || operator == TokenKind::GreaterEqual) {
+            emit_less(destination, destination + 1);
+        } else {
+            emit_swap(destination, destination + 1);
+            emit_less(destination, destination + 1);
         }
+        if (operator == TokenKind::LessEqual
+            || operator == TokenKind::GreaterEqual) {
+            emit_not(destination);
+        }
+    }
+}
+
+void parse_equality(cell destination) {
+    parse_comparison(destination);
+    while (token_kind == TokenKind::EqualEqual
+        || token_kind == TokenKind::BangEqual) {
+        TokenKind operator = token_kind;
+        next_token();
+        parse_comparison(destination + 1);
+        emit_transfer(destination + 1, destination, 1);
+        if (operator == TokenKind::EqualEqual) {
+            emit_not(destination);
+        } else {
+            emit_booleanize(destination);
+        }
+    }
+}
+
+void parse_logical_and(cell destination) {
+    parse_equality(destination);
+    while (token_kind == TokenKind::AmpAmp) {
         next_token();
         emit_booleanize(destination);
+        cell guard = allocate_control_pair();
+        emit_clear(guard);
+        emit_transfer(destination, guard, 0);
+        emit_loop_open(guard);
+        emit_clear(guard);
+        parse_equality(destination);
+        emit_booleanize(destination);
+        emit_loop_close(guard);
+        release_control_pair();
+    }
+}
+
+void parse_expression(cell destination) {
+    parse_logical_and(destination);
+    while (token_kind == TokenKind::PipePipe) {
+        next_token();
+        emit_booleanize(destination);
+        cell guard = allocate_control_pair();
+        cell otherwise = guard + 1;
+        emit_copy(destination, guard);
+        emit_constant(otherwise, 1);
+        emit_loop_open(guard);
+        emit_clear(guard);
+        emit_clear(otherwise);
+        emit_loop_close(guard);
+        emit_loop_open(otherwise);
+        emit_clear(otherwise);
+        parse_logical_and(destination);
+        emit_booleanize(destination);
+        emit_loop_close(otherwise);
+        release_control_pair();
     }
 }
 

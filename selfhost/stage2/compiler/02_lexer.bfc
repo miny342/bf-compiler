@@ -181,8 +181,13 @@ void next_token() {
         token_kind = TokenKind::Semicolon;
         read_character();
     } else if (current_char == '=') {
-        token_kind = TokenKind::Assign;
         read_character();
+        if (current_char == '=') {
+            token_kind = TokenKind::EqualEqual;
+            read_character();
+        } else {
+            token_kind = TokenKind::Assign;
+        }
     } else if (current_char == '!') {
         read_character();
         if (current_char == '=') {
@@ -207,6 +212,36 @@ void next_token() {
         } else {
             token_kind = TokenKind::Minus;
         }
+    } else if (current_char == '<') {
+        read_character();
+        if (current_char == '=') {
+            token_kind = TokenKind::LessEqual;
+            read_character();
+        } else {
+            token_kind = TokenKind::Less;
+        }
+    } else if (current_char == '>') {
+        read_character();
+        if (current_char == '=') {
+            token_kind = TokenKind::GreaterEqual;
+            read_character();
+        } else {
+            token_kind = TokenKind::Greater;
+        }
+    } else if (current_char == '&') {
+        read_character();
+        if (current_char != '&') {
+            fail();
+        }
+        token_kind = TokenKind::AmpAmp;
+        read_character();
+    } else if (current_char == '|') {
+        read_character();
+        if (current_char != '|') {
+            fail();
+        }
+        token_kind = TokenKind::PipePipe;
+        read_character();
     } else {
         fail();
     }

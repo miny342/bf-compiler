@@ -1,6 +1,7 @@
 cell[] lexer_test_source =
     " \t/* skip */ cell name=0x2A; output('\\x21'); // tail\n";
 cell[] lexer_stage3_source = "if(!value!=0)while(value){}else";
+cell[] lexer_stage4_source = "a==b<=c>=d<e>f&&g||h";
 
 void test_lexer() {
     reset_test_input(1);
@@ -65,4 +66,41 @@ void test_lexer_stage3() {
     expect_test(token_kind == TokenKind::Identifier && token_is_else(), '$');
     next_token();
     expect_test(token_kind == TokenKind::Eof, '%');
+}
+
+void test_lexer_stage4() {
+    reset_test_input(4);
+    read_character();
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, 'Q');
+    next_token();
+    expect_test(token_kind == TokenKind::EqualEqual, 'R');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, 'S');
+    next_token();
+    expect_test(token_kind == TokenKind::LessEqual, 'T');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, 'U');
+    next_token();
+    expect_test(token_kind == TokenKind::GreaterEqual, 'V');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, 'W');
+    next_token();
+    expect_test(token_kind == TokenKind::Less, 'X');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, 'Y');
+    next_token();
+    expect_test(token_kind == TokenKind::Greater, 'Z');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, '[');
+    next_token();
+    expect_test(token_kind == TokenKind::AmpAmp, ']');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, '^');
+    next_token();
+    expect_test(token_kind == TokenKind::PipePipe, '_');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, '`');
+    next_token();
+    expect_test(token_kind == TokenKind::Eof, '{');
 }

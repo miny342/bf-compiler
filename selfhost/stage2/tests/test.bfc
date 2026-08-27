@@ -17,6 +17,11 @@ void read_character() {
             current_char = lexer_stage3_source[test_input_position];
             test_input_position += 1;
         }
+    } else if (test_input_kind == 4) {
+        if (test_input_position < len(lexer_stage4_source)) {
+            current_char = lexer_stage4_source[test_input_position];
+            test_input_position += 1;
+        }
     }
 }
 
@@ -53,6 +58,7 @@ void main() {
     test_common();
     test_lexer();
     test_lexer_stage3();
+    test_lexer_stage4();
     test_symbols();
     test_codegen();
     test_parser();

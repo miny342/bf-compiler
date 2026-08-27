@@ -25,12 +25,12 @@ cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-compiler --bin bfc -- \
     "$compiler_source" >"$compiler_bf"
 
-printf 'void main(){cell value;if(value!=1);}' | \
+printf 'void main(){cell value;if(value&1);}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- "$compiler_bf" \
-        >"$work_dir/invalid-stage3.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE3_ERROR' "$work_dir/invalid-stage3.actual"; then
-    echo "stage-3 compiler accepted a nonzero != operand" >&2
+        >"$work_dir/invalid-stage4.actual"
+if ! LC_ALL=C grep -q 'BFC_STAGE4_ERROR' "$work_dir/invalid-stage4.actual"; then
+    echo "stage-4 compiler accepted a single ampersand" >&2
     exit 1
 fi
 
@@ -41,12 +41,12 @@ compile_example() {
         -p bf-interpreter --bin bf-interpreter -- "$compiler_bf" \
         <"$repo_dir/selfhost/stage2/examples/$name.bfc" >"$generated"
 
-    if LC_ALL=C grep -q 'BFC_STAGE3_ERROR' "$generated"; then
-        echo "stage-3 compiler rejected $name.bfc" >&2
+    if LC_ALL=C grep -q 'BFC_STAGE4_ERROR' "$generated"; then
+        echo "stage-4 compiler rejected $name.bfc" >&2
         return 1
     fi
     if LC_ALL=C grep -q '[^][<>+.,-]' "$generated"; then
-        echo "stage-3 compiler emitted a non-Brainfuck byte for $name.bfc" >&2
+        echo "stage-4 compiler emitted a non-Brainfuck byte for $name.bfc" >&2
         return 1
     fi
 }
@@ -57,6 +57,7 @@ compile_example scopes
 compile_example hexadecimal
 compile_example control_flow
 compile_example stage3_logic
+compile_example stage4_logic
 compile_example condition_input
 
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
@@ -111,4 +112,12 @@ printf '\002\001\000' | cargo run --quiet --release \
 printf 'xx' >"$work_dir/condition-input.expected"
 cmp "$work_dir/condition-input.expected" "$work_dir/condition-input.actual"
 
-echo "stage-3 self-host verification passed"
+printf 'AB' | cargo run --quiet --release \
+    --manifest-path "$repo_dir/Cargo.toml" \
+    -p bf-interpreter --bin bf-interpreter -- "$work_dir/stage4_logic.bf" \
+    >"$work_dir/stage4-logic.actual"
+printf '\001\000\001\001\001\001\000\001A\000\001B' \
+    >"$work_dir/stage4-logic.expected"
+cmp "$work_dir/stage4-logic.expected" "$work_dir/stage4-logic.actual"
+
+echo "stage-4 self-host verification passed"
