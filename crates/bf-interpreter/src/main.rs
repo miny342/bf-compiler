@@ -16,18 +16,55 @@ fn main() -> ExitCode {
 fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os();
     let executable = arguments.next().unwrap_or_default();
-    let Some(program_path) = arguments.next() else {
-        return Err(format!("usage: {} <program.bf>", executable.to_string_lossy()).into());
+    let Some(first) = arguments.next() else {
+        return Err(usage(&executable).into());
+    };
+    let (print_stats, program_path) = if first == "--stats" {
+        let Some(program_path) = arguments.next() else {
+            return Err(usage(&executable).into());
+        };
+        (true, program_path)
+    } else {
+        (false, first)
     };
     if arguments.next().is_some() {
-        return Err(format!("usage: {} <program.bf>", executable.to_string_lossy()).into());
+        return Err(usage(&executable).into());
     }
 
     let source = fs::read(program_path)?;
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
 
-    let output = bf_interpreter::run(&source, &input)?;
-    io::stdout().write_all(&output)?;
+    let result = bf_interpreter::run_with_stats(&source, &input)?;
+    io::stdout().write_all(&result.output)?;
+    if print_stats {
+        let stats = result.stats;
+        eprintln!("executed_instructions={}", stats.executed_instructions);
+        eprintln!(
+            "executed_rle_instructions={}",
+            stats.executed_rle_instructions
+        );
+        eprintln!("max_pointer={}", stats.max_pointer);
+        eprintln!(
+            "native_operations={}",
+            stats.optimization.executed_native_operations
+        );
+        eprintln!("rle_operations={}", stats.optimization.rle_operations);
+        eprintln!("clear_loops={}", stats.optimization.clear_loops);
+        eprintln!("scan_loops={}", stats.optimization.scan_loops);
+        eprintln!("scan_steps={}", stats.optimization.scan_steps);
+        eprintln!("transfer_loops={}", stats.optimization.transfer_loops);
+        eprintln!(
+            "transfer_iterations={}",
+            stats.optimization.transfer_iterations
+        );
+    }
     Ok(())
+}
+
+fn usage(executable: &std::ffi::OsStr) -> String {
+    format!(
+        "usage: {} [--stats] <program.bf>",
+        executable.to_string_lossy()
+    )
 }

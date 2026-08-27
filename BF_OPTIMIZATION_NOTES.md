@@ -5,6 +5,42 @@
 BF IR peephole最適化は採用済みである。以下の高度なlowering手法は未採用であり、実装時には
 生成BFの長さ、実行step、追加cell数を現在のloweringと比較してから選ぶ。
 
+## Repository interpreterのfast IR
+
+セルフホスト開発中はcompilerが生成するBF自体を変更せず、`bf-interpreter`側で別のfast IRへ
+変換して実行する。現在は次をnative operationとして認識する。
+
+- 連続する同種の`+`、`-`、`<`、`>`を1回の加算またはpointer移動へまとめる。
+- `[-]`、`[+]`を含む、奇数を加える単一run loopをcellのclearへ変換する。
+- `[>>>]`や`[<<<]`をzero cellまで進むnative scanへ変換する。
+- `[->>>++>+<<<<]`のように元のcellを1ずつ消費し、pointerが元へ戻るlinear loopを
+  複数targetへのwrapping transferへ変換する。
+
+fast IRはraw BF命令数と1反復あたりのRLE group数をmetadataとして保持する。このため、実行は
+まとめても`RunStats::executed_instructions`と`executed_rle_instructions`には従来VMと同じ値を
+加算する。移動runには元source offsetも保持し、tape underflow/overflowの診断位置を変えない。
+最適化できないnested loop、I/Oを含むloop、境界を越えうるlinear transferは通常実行へfallbackする。
+
+2026-08-27時点のstage 2 production compiler BFでは、1,115,639個のBF命令に対しleaf loopは
+28,905個あり、clear 22,897個、linear transfer 4,442個、scan 1,566個だった。これら3形で
+leaf loopをすべて分類でき、全命令の約94%はRLE対象文字だった。
+
+stage 2のBFC内部test BFをrelease buildで実行した結果は次のとおりである。
+
+| interpreter | wall time | raw換算実行命令数 | RLE換算実行命令数 |
+|---|---:|---:|---:|
+| 逐次VM | 47.51 s | 35,607,963,239 | 20,162,353,151 |
+| fast IR | 1.84 s | 35,607,963,239 | 20,162,353,151 |
+
+同じ環境で約25.8倍高速になった。動的なnative hit数は次で確認できる。
+
+```console
+bf-interpreter --stats program.bf < input
+```
+
+これはセルフホスト検証を高速化するinterpreter実装であり、compiler backendのcost modelや生成BFを
+変更するものではない。
+
 ## 現在のpeephole最適化と基準値
 
 `compile`と`compile_continuations`は、未最適化BF IRへ`optimize_bf`を適用してから文字列化する。
