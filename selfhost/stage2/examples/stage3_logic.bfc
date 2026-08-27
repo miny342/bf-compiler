@@ -1,0 +1,26 @@
+void main() {
+    cell zero;
+    cell two = 2;
+    output(!zero);
+    output(!two);
+    output(zero != 0);
+    output(two != 0);
+
+    if (two) {
+        output('T');
+    } else {
+        output('X');
+    }
+    if (zero) {
+        output('X');
+    } else {
+        output('E');
+    }
+
+    while (two != 0) {
+        if (!zero) {
+            output('0' + two);
+        }
+        two -= 1;
+    }
+}

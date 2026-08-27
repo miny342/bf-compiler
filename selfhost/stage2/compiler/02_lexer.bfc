@@ -36,7 +36,7 @@ void skip_trivia() {
                 }
                 again = 1;
             } else {
-                // Division is not part of stages 1 or 2.
+                // Division is not part of stages 1 through 3.
                 fail();
             }
         }
@@ -183,6 +183,14 @@ void next_token() {
     } else if (current_char == '=') {
         token_kind = TokenKind::Assign;
         read_character();
+    } else if (current_char == '!') {
+        read_character();
+        if (current_char == '=') {
+            token_kind = TokenKind::BangEqual;
+            read_character();
+        } else {
+            token_kind = TokenKind::Bang;
+        }
     } else if (current_char == '+') {
         read_character();
         if (current_char == '=') {

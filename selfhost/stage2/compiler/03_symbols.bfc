@@ -32,9 +32,28 @@ cell token_is_output() {
         && token_text[4] == 'u' && token_text[5] == 't';
 }
 
+cell token_is_if() {
+    return token_length == 2
+        && token_text[0] == 'i' && token_text[1] == 'f';
+}
+
+cell token_is_else() {
+    return token_length == 4
+        && token_text[0] == 'e' && token_text[1] == 'l'
+        && token_text[2] == 's' && token_text[3] == 'e';
+}
+
+cell token_is_while() {
+    return token_length == 5
+        && token_text[0] == 'w' && token_text[1] == 'h'
+        && token_text[2] == 'i' && token_text[3] == 'l'
+        && token_text[4] == 'e';
+}
+
 cell token_is_reserved() {
     return token_is_cell() || token_is_void()
-        || token_is_input() || token_is_output();
+        || token_is_input() || token_is_output()
+        || token_is_if() || token_is_else() || token_is_while();
 }
 
 void consume(TokenKind expected) {

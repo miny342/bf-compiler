@@ -1,4 +1,4 @@
-// 第1・2段階の式、宣言、代入、blockを解析しながらBFを生成する。
+// 第1〜3段階の式、宣言、代入、制御構文を解析しながらBFを生成する。
 
 void parse_primary(cell destination) {
     check_scratch(destination);
@@ -27,7 +27,11 @@ void parse_primary(cell destination) {
 
 void parse_unary(cell destination) {
     check_scratch(destination);
-    if (token_kind == TokenKind::Plus) {
+    if (token_kind == TokenKind::Bang) {
+        next_token();
+        parse_unary(destination);
+        emit_not(destination);
+    } else if (token_kind == TokenKind::Plus) {
         next_token();
         parse_unary(destination);
     } else if (token_kind == TokenKind::Minus) {
@@ -51,6 +55,14 @@ void parse_expression(cell destination) {
             destination,
             operator == TokenKind::Minus
         );
+    }
+    if (token_kind == TokenKind::BangEqual) {
+        next_token();
+        if (token_kind != TokenKind::Number || token_value != 0) {
+            fail();
+        }
+        next_token();
+        emit_booleanize(destination);
     }
 }
 
@@ -82,7 +94,7 @@ void parse_output_statement() {
     consume(TokenKind::RightParen);
     consume(TokenKind::Semicolon);
     emit_move_to(SCRATCH_BASE);
-    output('.');
+    compiler_output!('.');
 }
 
 void parse_assignment() {
@@ -110,6 +122,60 @@ void parse_assignment() {
     }
 }
 
+void parse_if_statement() {
+    next_token();
+    consume(TokenKind::LeftParen);
+    parse_expression(SCRATCH_BASE);
+    consume(TokenKind::RightParen);
+
+    emit_booleanize(SCRATCH_BASE);
+    cell condition = allocate_control_pair();
+    cell otherwise = condition + 1;
+    emit_clear(condition);
+    emit_transfer(SCRATCH_BASE, condition, 0);
+    emit_constant(otherwise, 1);
+
+    emit_loop_open(condition);
+    emit_clear(condition);
+    emit_clear(otherwise);
+    parse_statement();
+    emit_loop_close(condition);
+
+    emit_loop_open(otherwise);
+    emit_clear(otherwise);
+    if (token_kind == TokenKind::Identifier && token_is_else()) {
+        next_token();
+        parse_statement();
+    }
+    emit_loop_close(otherwise);
+    release_control_pair();
+}
+
+void parse_while_statement() {
+    next_token();
+    consume(TokenKind::LeftParen);
+
+    cell running = allocate_control_pair();
+    cell condition = running + 1;
+    emit_constant(running, 1);
+    emit_loop_open(running);
+    emit_clear(running);
+
+    parse_expression(SCRATCH_BASE);
+    consume(TokenKind::RightParen);
+    emit_booleanize(SCRATCH_BASE);
+    emit_clear(condition);
+    emit_transfer(SCRATCH_BASE, condition, 0);
+
+    emit_loop_open(condition);
+    emit_clear(condition);
+    emit_constant(running, 1);
+    parse_statement();
+    emit_loop_close(condition);
+    emit_loop_close(running);
+    release_control_pair();
+}
+
 void parse_block() {
     consume(TokenKind::LeftBrace);
     if (scope_depth == MAX_SCOPES) {
@@ -122,7 +188,11 @@ void parse_block() {
         if (token_kind == TokenKind::Eof) {
             fail();
         }
-        parse_statement();
+        if (token_kind == TokenKind::Identifier && token_is_cell()) {
+            parse_declaration();
+        } else {
+            parse_statement();
+        }
     }
 
     consume(TokenKind::RightBrace);
@@ -136,10 +206,12 @@ void parse_statement() {
     } else if (token_kind == TokenKind::LeftBrace) {
         parse_block();
     } else if (token_kind == TokenKind::Identifier) {
-        if (token_is_cell()) {
-            parse_declaration();
-        } else if (token_is_output()) {
+        if (token_is_output()) {
             parse_output_statement();
+        } else if (token_is_if()) {
+            parse_if_statement();
+        } else if (token_is_while()) {
+            parse_while_statement();
         } else {
             parse_assignment();
         }
@@ -149,6 +221,7 @@ void parse_statement() {
 }
 
 void compile_program() {
+    control_depth = 0;
     read_character();
     next_token();
 

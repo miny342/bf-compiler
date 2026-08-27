@@ -5,6 +5,10 @@ cell test_input_kind;
 cell test_input_position;
 cell[256] test_capture;
 cell test_capture_length;
+cell test_capture_overflow;
+cell test_output_valid;
+cell test_bracket_depth;
+cell test_bracket_invalid;
 
 void expect_test(cell condition, cell code) {
     if (!condition) {
@@ -22,30 +26,15 @@ void reset_test_input(cell kind) {
 
 void reset_capture() {
     test_capture_length = 0;
+    test_capture_overflow = 0;
+    test_output_valid = 1;
+    test_bracket_depth = 0;
+    test_bracket_invalid = 0;
     target_position = 0;
 }
 
 cell capture_is_brainfuck() {
-    cell index;
-    cell depth;
-    while (index < test_capture_length) {
-        cell value = test_capture[index];
-        cell valid = value == '>' || value == '<'
-            || value == '+' || value == '-'
-            || value == '.' || value == ','
-            || value == '[' || value == ']';
-        if (!valid) {
-            return 0;
-        }
-        if (value == '[') {
-            depth += 1;
-        } else if (value == ']') {
-            if (depth == 0) {
-                return 0;
-            }
-            depth -= 1;
-        }
-        index += 1;
-    }
-    return depth == 0;
+    return test_output_valid
+        && !test_bracket_invalid
+        && test_bracket_depth == 0;
 }

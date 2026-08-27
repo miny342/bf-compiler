@@ -1,0 +1,5 @@
+void main() {
+    while (input() != 0) {
+        output('x');
+    }
+}

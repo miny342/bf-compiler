@@ -81,3 +81,49 @@ void check_scratch(cell destination) {
         fail();
     }
 }
+
+cell allocate_control_pair() {
+    if (control_depth == MAX_CONTROL_DEPTH) {
+        fail();
+    }
+    cell first = CONTROL_BASE + control_depth + control_depth;
+    control_depth += 1;
+    return first;
+}
+
+void release_control_pair() {
+    control_depth -= 1;
+}
+
+void emit_loop_open(cell condition) {
+    emit_move_to(condition);
+    compiler_output!('[');
+}
+
+void emit_loop_close(cell condition) {
+    emit_move_to(condition);
+    compiler_output!(']');
+}
+
+void emit_booleanize(cell destination) {
+    cell temporary = destination + 1;
+    check_scratch(temporary);
+    emit_clear(temporary);
+    emit_loop_open(destination);
+    emit_clear(destination);
+    emit_move_to(temporary);
+    compiler_output!('+');
+    emit_loop_close(destination);
+    emit_transfer(temporary, destination, 0);
+}
+
+void emit_not(cell destination) {
+    cell flag = destination + 1;
+    check_scratch(flag);
+    emit_constant(flag, 1);
+    emit_loop_open(destination);
+    emit_clear(destination);
+    emit_clear(flag);
+    emit_loop_close(destination);
+    emit_transfer(flag, destination, 0);
+}

@@ -1,6 +1,6 @@
-// LANGUAGE.mdの初期実装第1・2段階を対象にするbootstrap BFC compiler。
+// LANGUAGE.mdの初期実装第1〜3段階を対象にするbootstrap BFC compiler。
 //
-// compiler自体は実装済みのversion 1 BFCで記述する。第2段階sourceをinputから
+// compiler自体は実装済みのversion 1 BFCで記述する。第3段階sourceをinputから
 // 読み、Brainfuckを出力する。BFCのinput()仕様に従い、NULを入力終端とする。
 
 const cell MAX_NAME = 16;
@@ -8,6 +8,8 @@ const cell MAX_SYMBOLS = 16;
 const cell MAX_SCOPES = 16;
 const cell SCRATCH_BASE = 32;
 const cell RESTORE_CELL = 63;
+const cell CONTROL_BASE = 64;
+const cell MAX_CONTROL_DEPTH = 31;
 
 enum TokenKind {
     Eof,
@@ -22,7 +24,9 @@ enum TokenKind {
     Plus,
     Minus,
     PlusAssign,
-    MinusAssign
+    MinusAssign,
+    Bang,
+    BangEqual
 }
 
 cell current_char;
@@ -38,6 +42,7 @@ cell[MAX_SYMBOLS] symbol_cell;
 cell symbol_count;
 cell[MAX_SCOPES] scope_base;
 cell scope_depth;
+cell control_depth;
 
 // Position of the data pointer in the Brainfuck program being emitted.
 cell target_position;
