@@ -1,0 +1,10 @@
+void test_common() {
+    expect_test(is_space(' ') && is_space('\n') && !is_space('x'), 'a');
+    expect_test(is_digit('0') && is_digit('9') && !is_digit('a'), 'b');
+    expect_test(is_hex_digit('f') && is_hex_digit('A')
+        && !is_hex_digit('g'), 'c');
+    expect_test(hex_digit_value('0') == 0
+        && hex_digit_value('a') == 10
+        && hex_digit_value('F') == 15, 'd');
+    expect_test(times_ten(25) == 250 && times_sixteen(15) == 240, 'e');
+}

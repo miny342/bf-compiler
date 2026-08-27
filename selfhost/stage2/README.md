@@ -1,0 +1,83 @@
+# 第2段階bootstrap compiler
+
+このディレクトリには、最初に実行可能になったセルフホスト用の小さなコンパイラを置く。
+まずRust版コンパイラでBFC製コンパイラをBrainfuckへ変換し、そのBrainfuckプログラムで
+初期実装第1・2段階のBFCをBrainfuckへ変換する。
+
+## ファイル構成
+
+コンパイラ本体は役割ごとに分割している。
+
+- `compiler/00_definitions.bfc`: 定数、token型、global状態
+- `compiler/01_common.bfc`: エラー終了、文字分類、小さな算術補助
+- `compiler/02_lexer.bfc`: streaming字句解析
+- `compiler/03_symbols.bfc`: 識別子とblock scopeの管理
+- `compiler/04_codegen.bfc`: Brainfuckのcell移動、copy、加減算の生成
+- `compiler/05_parser.bfc`: 式、宣言、代入、blockの構文解析
+- `compiler/main.bfc`: production標準入出力とentry point
+
+Rust版`bfc`へは、これらを番号順に複数sourceとして直接渡してもよい。BF上で動くBFC製
+コンパイラの入力は1本のbyte streamなので、セルフコンパイル時は単純に連結して渡す。
+`scripts/concat-stage2-compiler.sh main`がその連結を行い、各ファイル境界へ改行を補う。
+
+## BFCで記述した内部テスト
+
+productionの`main.bfc`を結合せず、代わりに`tests/test.bfc`と各`*_test.bfc`を結合すると、
+BFC製コンパイラ自身の内部テストprogramになる。`test.bfc`の`main`には、各ファイルで定義した
+test関数の呼出しだけを手動で列挙する。test登録用のmacroや新しい言語機能は追加しない。
+
+```console
+scripts/concat-stage2-compiler.sh test > stage2-tests.bfc
+bfc stage2-tests.bfc > stage2-tests.bf
+bf-interpreter stage2-tests.bf
+```
+
+`main.bfc`は`read_character`と`compiler_output!`を実際の`input()`と`output()`へ接続する。
+`test.bfc`は同じ名前の入力関数と出力macroを埋め込みsourceとcapture bufferへ接続するため、
+production実装を変えずに次をBF上で検証できる。
+
+- 文字分類と16進digit変換
+- comment、keyword、`0x2A`、`'\x21'`を含むstreaming lexer
+- block scopeとshadowingを扱うsymbol table
+- 定数設定や破壊的transferを出力するBF codegen
+- `void main(){cell value=0xFF;}`を使ったparserとcodegenの統合
+
+内部testの追加時は任意の`*_test.bfc`へtest関数を定義し、`tests/test.bfc`の`main`から明示的に
+呼び出す。
+
+## 対応する入力
+
+`LANGUAGE.md`の初期実装第1・2段階から、次を受理する。
+
+- ちょうど1つの`void main()`定義
+- nested block、空文、scalar `cell`宣言
+- 10進・16進整数リテラルと文字リテラル
+- `input()`、`output`、`=`、`+=`、`-=`
+- 単項および二項の`+`、`-`
+- ASCII空白、行コメント、blockコメント
+
+現在のbootstrapには、同時に生存する変数は16個まで、block nestingは16段まで、識別子は
+16 byteまで、式temporaryはtarget cell 63未満、という明示的な制限がある。制限超過または
+後段階の構文を検出すると`BFC_STAGE2_ERROR`を出力して停止する。runtime演算は通常のBFCと
+同じくmod 256でwrapする。
+
+## 検証
+
+repository rootで次を実行する。
+
+```console
+scripts/verify-stage2-selfhost.sh
+```
+
+検証scriptは最初に`test.bfc`版をBFへ変換して内部testの`ok`を確認する。続いて`main.bfc`版を
+連結して二段階のコンパイルを実行する。生成結果にエラーmarkerやBrainfuck以外のbyteがないことを
+調べた後、入出力、加減算、scope、ゼロ初期化、`0x41`や`0xFF`などの16進リテラルを含む生成
+programを実行し、期待するbinary出力と比較する。
+
+## セルフホスト時のテープ容量
+
+通常targetとの互換性確認には30,000 cellを使う。ただし、完全なセルフホストcompilerの
+開発・bootstrap・検証で不足する場合は、BF interpreterとcompiler backendのテープ上限を
+動的拡張または実質無制限にしてよい。30,000 cellへ収めるためだけに言語機能を大幅に削ったり、
+compilerを過度にmemory tuningしたりすることは目標にしない。セルフホスト経路が成立した後、
+必要なら別途profileを取り、有限target向けの現実的な構成を検討する。

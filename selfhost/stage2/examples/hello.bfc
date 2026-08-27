@@ -1,0 +1,8 @@
+// A stage-2 program: declarations, literals, addition, and output.
+void main() {
+    cell letter = 'A';
+    cell punctuation = 1 + 32;
+    output(letter);
+    output(punctuation);
+    output('\n');
+}

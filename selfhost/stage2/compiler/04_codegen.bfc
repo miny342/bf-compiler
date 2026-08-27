@@ -1,0 +1,83 @@
+// target Brainfuckのdata pointer位置を追跡しながらprimitiveを出力する。
+
+void emit_move_to(cell destination) {
+    while (target_position < destination) {
+        compiler_output!('>');
+        target_position += 1;
+    }
+    while (target_position > destination) {
+        compiler_output!('<');
+        target_position -= 1;
+    }
+}
+
+void emit_clear(cell destination) {
+    emit_move_to(destination);
+    compiler_output!('[');
+    compiler_output!('-');
+    compiler_output!(']');
+}
+
+void emit_constant(cell destination, cell value) {
+    emit_clear(destination);
+    emit_move_to(destination);
+    if (value <= 128) {
+        while (value != 0) {
+            compiler_output!('+');
+            value -= 1;
+        }
+    } else {
+        while (value != 0) {
+            compiler_output!('-');
+            value += 1;
+        }
+    }
+}
+
+void emit_input(cell destination) {
+    emit_move_to(destination);
+    compiler_output!(',');
+}
+
+void emit_transfer(cell source, cell destination, cell subtract) {
+    emit_move_to(source);
+    compiler_output!('[');
+    compiler_output!('-');
+    emit_move_to(destination);
+    if (subtract) {
+        compiler_output!('-');
+    } else {
+        compiler_output!('+');
+    }
+    emit_move_to(source);
+    compiler_output!(']');
+}
+
+void emit_copy(cell source, cell destination) {
+    emit_clear(destination);
+    emit_clear(RESTORE_CELL);
+
+    emit_move_to(source);
+    compiler_output!('[');
+    compiler_output!('-');
+    emit_move_to(destination);
+    compiler_output!('+');
+    emit_move_to(RESTORE_CELL);
+    compiler_output!('+');
+    emit_move_to(source);
+    compiler_output!(']');
+
+    emit_move_to(RESTORE_CELL);
+    compiler_output!('[');
+    compiler_output!('-');
+    emit_move_to(source);
+    compiler_output!('+');
+    emit_move_to(RESTORE_CELL);
+    compiler_output!(']');
+}
+
+void check_scratch(cell destination) {
+    if (destination >= RESTORE_CELL) {
+        fail();
+    }
+}

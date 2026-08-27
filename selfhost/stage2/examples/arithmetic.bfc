@@ -1,0 +1,11 @@
+void main() {
+    cell left = input();
+    cell right = input();
+    cell sum = left + right - 1;
+    output(sum);
+
+    left += 2;
+    output(left);
+    right = -right;
+    output(right);
+}

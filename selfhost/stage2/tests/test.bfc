@@ -1,0 +1,44 @@
+// productionのmain.bfcと差し替えるtest entry。
+
+void read_character() {
+    current_char = 0;
+    if (test_input_kind == 1) {
+        if (test_input_position < len(lexer_test_source)) {
+            current_char = lexer_test_source[test_input_position];
+            test_input_position += 1;
+        }
+    } else if (test_input_kind == 2) {
+        if (test_input_position < len(parser_test_source)) {
+            current_char = parser_test_source[test_input_position];
+            test_input_position += 1;
+        }
+    }
+}
+
+macro compiler_output(value) {
+    if (test_capture_length == 255) {
+        output('X');
+        output('\n');
+        abort();
+    }
+    test_capture[test_capture_length] = value;
+    test_capture_length += 1;
+}
+
+void main() {
+    test_common();
+    test_lexer();
+    test_symbols();
+    test_codegen();
+    test_parser();
+
+    if (test_failures == 0) {
+        output('o');
+        output('k');
+        output('\n');
+    } else {
+        output('n');
+        output('g');
+        output('\n');
+    }
+}

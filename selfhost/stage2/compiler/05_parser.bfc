@@ -1,0 +1,170 @@
+// 第1・2段階の式、宣言、代入、blockを解析しながらBFを生成する。
+
+void parse_primary(cell destination) {
+    check_scratch(destination);
+    if (token_kind == TokenKind::Number) {
+        emit_constant(destination, token_value);
+        next_token();
+    } else if (token_kind == TokenKind::Identifier) {
+        if (token_is_input()) {
+            next_token();
+            consume(TokenKind::LeftParen);
+            consume(TokenKind::RightParen);
+            emit_input(destination);
+        } else {
+            cell source = find_symbol();
+            next_token();
+            emit_copy(source, destination);
+        }
+    } else if (token_kind == TokenKind::LeftParen) {
+        next_token();
+        parse_expression(destination);
+        consume(TokenKind::RightParen);
+    } else {
+        fail();
+    }
+}
+
+void parse_unary(cell destination) {
+    check_scratch(destination);
+    if (token_kind == TokenKind::Plus) {
+        next_token();
+        parse_unary(destination);
+    } else if (token_kind == TokenKind::Minus) {
+        next_token();
+        emit_clear(destination);
+        parse_unary(destination + 1);
+        emit_transfer(destination + 1, destination, 1);
+    } else {
+        parse_primary(destination);
+    }
+}
+
+void parse_expression(cell destination) {
+    parse_unary(destination);
+    while (token_kind == TokenKind::Plus || token_kind == TokenKind::Minus) {
+        TokenKind operator = token_kind;
+        next_token();
+        parse_unary(destination + 1);
+        emit_transfer(
+            destination + 1,
+            destination,
+            operator == TokenKind::Minus
+        );
+    }
+}
+
+void parse_declaration() {
+    // The current token is "cell".
+    next_token();
+    if (token_kind != TokenKind::Identifier) {
+        fail();
+    }
+    cell destination = add_symbol();
+    next_token();
+
+    // A declaration executes zero initialization even when its tape cell was
+    // previously used by a local from a completed nested block.
+    emit_clear(destination);
+    if (token_kind == TokenKind::Assign) {
+        next_token();
+        parse_expression(SCRATCH_BASE);
+        emit_clear(destination);
+        emit_transfer(SCRATCH_BASE, destination, 0);
+    }
+    consume(TokenKind::Semicolon);
+}
+
+void parse_output_statement() {
+    next_token();
+    consume(TokenKind::LeftParen);
+    parse_expression(SCRATCH_BASE);
+    consume(TokenKind::RightParen);
+    consume(TokenKind::Semicolon);
+    emit_move_to(SCRATCH_BASE);
+    output('.');
+}
+
+void parse_assignment() {
+    cell destination = find_symbol();
+    next_token();
+    TokenKind operator = token_kind;
+    if (operator != TokenKind::Assign
+        && operator != TokenKind::PlusAssign
+        && operator != TokenKind::MinusAssign) {
+        fail();
+    }
+    next_token();
+    parse_expression(SCRATCH_BASE);
+    consume(TokenKind::Semicolon);
+
+    if (operator == TokenKind::Assign) {
+        emit_clear(destination);
+        emit_transfer(SCRATCH_BASE, destination, 0);
+    } else {
+        emit_transfer(
+            SCRATCH_BASE,
+            destination,
+            operator == TokenKind::MinusAssign
+        );
+    }
+}
+
+void parse_block() {
+    consume(TokenKind::LeftBrace);
+    if (scope_depth == MAX_SCOPES) {
+        fail();
+    }
+    scope_base[scope_depth] = symbol_count;
+    scope_depth += 1;
+
+    while (token_kind != TokenKind::RightBrace) {
+        if (token_kind == TokenKind::Eof) {
+            fail();
+        }
+        parse_statement();
+    }
+
+    consume(TokenKind::RightBrace);
+    scope_depth -= 1;
+    symbol_count = scope_base[scope_depth];
+}
+
+void parse_statement() {
+    if (token_kind == TokenKind::Semicolon) {
+        next_token();
+    } else if (token_kind == TokenKind::LeftBrace) {
+        parse_block();
+    } else if (token_kind == TokenKind::Identifier) {
+        if (token_is_cell()) {
+            parse_declaration();
+        } else if (token_is_output()) {
+            parse_output_statement();
+        } else {
+            parse_assignment();
+        }
+    } else {
+        fail();
+    }
+}
+
+void compile_program() {
+    read_character();
+    next_token();
+
+    if (token_kind != TokenKind::Identifier || !token_is_void()) {
+        fail();
+    }
+    next_token();
+    if (token_kind != TokenKind::Identifier || !token_is_main()) {
+        fail();
+    }
+    next_token();
+    consume(TokenKind::LeftParen);
+    consume(TokenKind::RightParen);
+    parse_block();
+
+    if (token_kind != TokenKind::Eof) {
+        fail();
+    }
+}

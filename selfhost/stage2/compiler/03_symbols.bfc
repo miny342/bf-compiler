@@ -1,0 +1,107 @@
+// keyword判定と、block scopeを持つscalar symbol table。
+
+cell token_is_cell() {
+    return token_length == 4
+        && token_text[0] == 'c' && token_text[1] == 'e'
+        && token_text[2] == 'l' && token_text[3] == 'l';
+}
+
+cell token_is_void() {
+    return token_length == 4
+        && token_text[0] == 'v' && token_text[1] == 'o'
+        && token_text[2] == 'i' && token_text[3] == 'd';
+}
+
+cell token_is_main() {
+    return token_length == 4
+        && token_text[0] == 'm' && token_text[1] == 'a'
+        && token_text[2] == 'i' && token_text[3] == 'n';
+}
+
+cell token_is_input() {
+    return token_length == 5
+        && token_text[0] == 'i' && token_text[1] == 'n'
+        && token_text[2] == 'p' && token_text[3] == 'u'
+        && token_text[4] == 't';
+}
+
+cell token_is_output() {
+    return token_length == 6
+        && token_text[0] == 'o' && token_text[1] == 'u'
+        && token_text[2] == 't' && token_text[3] == 'p'
+        && token_text[4] == 'u' && token_text[5] == 't';
+}
+
+cell token_is_reserved() {
+    return token_is_cell() || token_is_void()
+        || token_is_input() || token_is_output();
+}
+
+void consume(TokenKind expected) {
+    if (token_kind != expected) {
+        fail();
+    }
+    next_token();
+}
+
+cell symbol_text_index(cell symbol, cell offset) {
+    cell result = offset;
+    while (symbol != 0) {
+        result += MAX_NAME;
+        symbol -= 1;
+    }
+    return result;
+}
+
+cell token_matches_symbol(cell symbol) {
+    if (token_length != symbol_length[symbol]) {
+        return 0;
+    }
+    cell index;
+    while (index < token_length) {
+        if (token_text[index]
+            != symbol_text[symbol_text_index(symbol, index)]) {
+            return 0;
+        }
+        index += 1;
+    }
+    return 1;
+}
+
+cell find_symbol() {
+    cell index = symbol_count;
+    while (index != 0) {
+        index -= 1;
+        if (token_matches_symbol(index)) {
+            return symbol_cell[index];
+        }
+    }
+    fail();
+    return 0;
+}
+
+cell add_symbol() {
+    if (token_is_reserved() || symbol_count == MAX_SYMBOLS) {
+        fail();
+    }
+
+    cell first = scope_base[scope_depth - 1];
+    cell probe = first;
+    while (probe < symbol_count) {
+        if (token_matches_symbol(probe)) {
+            fail();
+        }
+        probe += 1;
+    }
+
+    cell symbol = symbol_count;
+    symbol_length[symbol] = token_length;
+    symbol_cell[symbol] = symbol;
+    cell index;
+    while (index < token_length) {
+        symbol_text[symbol_text_index(symbol, index)] = token_text[index];
+        index += 1;
+    }
+    symbol_count += 1;
+    return symbol;
+}

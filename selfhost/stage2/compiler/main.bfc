@@ -1,0 +1,13 @@
+// productionでは実際の標準入出力を使って1 compile unitを変換する。
+
+void read_character() {
+    current_char = input();
+}
+
+macro compiler_output(value) {
+    output(value);
+}
+
+void main() {
+    compile_program();
+}

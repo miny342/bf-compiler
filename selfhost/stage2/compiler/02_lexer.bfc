@@ -1,0 +1,205 @@
+// input()から1 byteずつ読み進めるstreaming lexer。
+
+void skip_trivia() {
+    cell again = 1;
+    while (again) {
+        again = 0;
+        while (is_space(current_char)) {
+            read_character();
+        }
+
+        if (current_char == '/') {
+            read_character();
+            if (current_char == '/') {
+                while (current_char != 0
+                    && current_char != '\n'
+                    && current_char != '\r') {
+                    read_character();
+                }
+                again = 1;
+            } else if (current_char == '*') {
+                read_character();
+                cell closed;
+                while (!closed) {
+                    if (current_char == 0) {
+                        fail();
+                    }
+                    if (current_char == '*') {
+                        read_character();
+                        if (current_char == '/') {
+                            read_character();
+                            closed = 1;
+                        }
+                    } else {
+                        read_character();
+                    }
+                }
+                again = 1;
+            } else {
+                // Division is not part of stages 1 or 2.
+                fail();
+            }
+        }
+    }
+}
+
+void read_name() {
+    token_length = 0;
+    while (is_name_continue(current_char)) {
+        if (token_length == MAX_NAME) {
+            fail();
+        }
+        token_text[token_length] = current_char;
+        token_length += 1;
+        read_character();
+    }
+    token_kind = TokenKind::Identifier;
+}
+
+void read_number() {
+    token_value = 0;
+    if (current_char == '0') {
+        read_character();
+        if (current_char == 'x' || current_char == 'X') {
+            read_character();
+            if (!is_hex_digit(current_char)) {
+                fail();
+            }
+            while (is_hex_digit(current_char)) {
+                // A further hexadecimal digit would exceed one cell.
+                if (token_value > 15) {
+                    fail();
+                }
+                token_value = times_sixteen(token_value)
+                    + hex_digit_value(current_char);
+                read_character();
+            }
+            if (is_name_continue(current_char)) {
+                fail();
+            }
+            token_kind = TokenKind::Number;
+            return;
+        }
+    }
+
+    while (is_digit(current_char)) {
+        cell digit = current_char - '0';
+        if (token_value > 25 || (token_value == 25 && digit > 5)) {
+            fail();
+        }
+        token_value = times_ten(token_value) + digit;
+        read_character();
+    }
+    if (is_name_continue(current_char)) {
+        fail();
+    }
+    token_kind = TokenKind::Number;
+}
+
+cell read_escape() {
+    cell value;
+    if (current_char == 'n') {
+        value = '\n';
+    } else if (current_char == 'r') {
+        value = '\r';
+    } else if (current_char == 't') {
+        value = '\t';
+    } else if (current_char == '0') {
+        value = 0;
+    } else if (current_char == '\\') {
+        value = '\\';
+    } else if (current_char == '\'') {
+        value = '\'';
+    } else if (current_char == 'x') {
+        read_character();
+        if (!is_hex_digit(current_char)) {
+            fail();
+        }
+        value = times_sixteen(hex_digit_value(current_char));
+        read_character();
+        if (!is_hex_digit(current_char)) {
+            fail();
+        }
+        value += hex_digit_value(current_char);
+        return value;
+    } else {
+        fail();
+    }
+    return value;
+}
+
+void read_character_literal() {
+    // Consume the opening quote.
+    read_character();
+    if (current_char == 0 || current_char == '\n' || current_char == '\r') {
+        fail();
+    }
+
+    if (current_char == '\\') {
+        read_character();
+        token_value = read_escape();
+    } else {
+        if (current_char < 32 || current_char > 126 || current_char == '\'') {
+            fail();
+        }
+        token_value = current_char;
+    }
+
+    read_character();
+    if (current_char != '\'') {
+        fail();
+    }
+    read_character();
+    token_kind = TokenKind::Number;
+}
+
+void next_token() {
+    skip_trivia();
+    token_length = 0;
+
+    if (current_char == 0) {
+        token_kind = TokenKind::Eof;
+    } else if (is_name_start(current_char)) {
+        read_name();
+    } else if (is_digit(current_char)) {
+        read_number();
+    } else if (current_char == '\'') {
+        read_character_literal();
+    } else if (current_char == '(') {
+        token_kind = TokenKind::LeftParen;
+        read_character();
+    } else if (current_char == ')') {
+        token_kind = TokenKind::RightParen;
+        read_character();
+    } else if (current_char == '{') {
+        token_kind = TokenKind::LeftBrace;
+        read_character();
+    } else if (current_char == '}') {
+        token_kind = TokenKind::RightBrace;
+        read_character();
+    } else if (current_char == ';') {
+        token_kind = TokenKind::Semicolon;
+        read_character();
+    } else if (current_char == '=') {
+        token_kind = TokenKind::Assign;
+        read_character();
+    } else if (current_char == '+') {
+        read_character();
+        if (current_char == '=') {
+            token_kind = TokenKind::PlusAssign;
+            read_character();
+        } else {
+            token_kind = TokenKind::Plus;
+        }
+    } else if (current_char == '-') {
+        read_character();
+        if (current_char == '=') {
+            token_kind = TokenKind::MinusAssign;
+            read_character();
+        } else {
+            token_kind = TokenKind::Minus;
+        }
+    } else {
+        fail();
+    }
+}

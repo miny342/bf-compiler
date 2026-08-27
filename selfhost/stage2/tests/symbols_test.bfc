@@ -1,0 +1,31 @@
+void set_item_token() {
+    token_kind = TokenKind::Identifier;
+    token_length = 4;
+    token_text[0] = 'i';
+    token_text[1] = 't';
+    token_text[2] = 'e';
+    token_text[3] = 'm';
+}
+
+void test_symbols() {
+    symbol_count = 0;
+    scope_depth = 1;
+    scope_base[0] = 0;
+    set_item_token();
+
+    expect_test(add_symbol() == 0, 'q');
+    set_item_token();
+    expect_test(find_symbol() == 0, 'r');
+
+    scope_base[1] = symbol_count;
+    scope_depth = 2;
+    set_item_token();
+    expect_test(add_symbol() == 1, 's');
+    set_item_token();
+    expect_test(find_symbol() == 1, 't');
+
+    scope_depth = 1;
+    symbol_count = scope_base[1];
+    set_item_token();
+    expect_test(find_symbol() == 0, 'u');
+}

@@ -1,0 +1,74 @@
+// エラー終了、文字分類、lexerで使う小さな算術補助。
+
+void fail() {
+    // None of these bytes are Brainfuck instructions.  The verification
+    // harness treats this marker as a compilation error.
+    compiler_output!('B');
+    compiler_output!('F');
+    compiler_output!('C');
+    compiler_output!('_');
+    compiler_output!('S');
+    compiler_output!('T');
+    compiler_output!('A');
+    compiler_output!('G');
+    compiler_output!('E');
+    compiler_output!('2');
+    compiler_output!('_');
+    compiler_output!('E');
+    compiler_output!('R');
+    compiler_output!('R');
+    compiler_output!('O');
+    compiler_output!('R');
+    compiler_output!('\n');
+    abort();
+}
+
+cell is_space(cell value) {
+    return value == ' ' || value == '\t' || value == '\n' || value == '\r';
+}
+
+cell is_digit(cell value) {
+    return value >= '0' && value <= '9';
+}
+
+cell is_hex_digit(cell value) {
+    return is_digit(value)
+        || (value >= 'a' && value <= 'f')
+        || (value >= 'A' && value <= 'F');
+}
+
+cell is_name_start(cell value) {
+    return (value >= 'a' && value <= 'z')
+        || (value >= 'A' && value <= 'Z')
+        || value == '_';
+}
+
+cell is_name_continue(cell value) {
+    return is_name_start(value) || is_digit(value);
+}
+
+cell hex_digit_value(cell value) {
+    if (is_digit(value)) {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    fail();
+    return 0;
+}
+
+cell times_ten(cell value) {
+    return value + value + value + value + value
+        + value + value + value + value + value;
+}
+
+cell times_sixteen(cell value) {
+    cell doubled = value + value;
+    cell quadrupled = doubled + doubled;
+    cell octupled = quadrupled + quadrupled;
+    return octupled + octupled;
+}

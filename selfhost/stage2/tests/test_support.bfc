@@ -1,0 +1,51 @@
+// BFC内部テスト用の最小harness。失敗時だけcase codeを出力する。
+
+cell test_failures;
+cell test_input_kind;
+cell test_input_position;
+cell[256] test_capture;
+cell test_capture_length;
+
+void expect_test(cell condition, cell code) {
+    if (!condition) {
+        output('F');
+        output(code);
+        output('\n');
+        test_failures += 1;
+    }
+}
+
+void reset_test_input(cell kind) {
+    test_input_kind = kind;
+    test_input_position = 0;
+}
+
+void reset_capture() {
+    test_capture_length = 0;
+    target_position = 0;
+}
+
+cell capture_is_brainfuck() {
+    cell index;
+    cell depth;
+    while (index < test_capture_length) {
+        cell value = test_capture[index];
+        cell valid = value == '>' || value == '<'
+            || value == '+' || value == '-'
+            || value == '.' || value == ','
+            || value == '[' || value == ']';
+        if (!valid) {
+            return 0;
+        }
+        if (value == '[') {
+            depth += 1;
+        } else if (value == ']') {
+            if (depth == 0) {
+                return 0;
+            }
+            depth -= 1;
+        }
+        index += 1;
+    }
+    return depth == 0;
+}

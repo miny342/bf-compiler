@@ -1,0 +1,32 @@
+cell[] lexer_test_source =
+    " \t/* skip */ cell name=0x2A; output('\\x21'); // tail\n";
+
+void test_lexer() {
+    reset_test_input(1);
+    read_character();
+    next_token();
+
+    expect_test(token_kind == TokenKind::Identifier && token_is_cell(), 'f');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier
+        && token_length == 4
+        && token_text[0] == 'n' && token_text[3] == 'e', 'g');
+    next_token();
+    expect_test(token_kind == TokenKind::Assign, 'h');
+    next_token();
+    expect_test(token_kind == TokenKind::Number && token_value == 0x2A, 'i');
+    next_token();
+    expect_test(token_kind == TokenKind::Semicolon, 'j');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier && token_is_output(), 'k');
+    next_token();
+    expect_test(token_kind == TokenKind::LeftParen, 'l');
+    next_token();
+    expect_test(token_kind == TokenKind::Number && token_value == 0x21, 'm');
+    next_token();
+    expect_test(token_kind == TokenKind::RightParen, 'n');
+    next_token();
+    expect_test(token_kind == TokenKind::Semicolon, 'o');
+    next_token();
+    expect_test(token_kind == TokenKind::Eof, 'p');
+}

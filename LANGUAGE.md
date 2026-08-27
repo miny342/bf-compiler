@@ -979,4 +979,14 @@ typed HIR、Continuation IR、activation固有outboxで保持する。
 
 globalは宣言順に初期化し、local/global aggregateの動的projectionには16-bit logical offsetの
 aggregate portalを使用する。[ABI.md](ABI.md)のbackendは`D = 8`と`D = 16`の両chunk geometryを
-サポートする。第13段階のself-host compiler自体は未実装である。
+サポートする。第13段階には着手しており、`selfhost/stage2/compiler/`のbootstrap compilerが
+初期実装第1・2段階のsubsetをBF上でコンパイルできる。全version 1を入力として自身を再生成する
+完全なself-host compilerは未実装である。
+
+### セルフホスト用targetのテープ容量
+
+通常の互換targetは30,000 cellのテープを使用する。一方、第13段階のcompiler開発、bootstrap、
+セルフコンパイル検証では、30,000 cellで不足する場合にbackendとBF interpreterの上限を外し、
+動的に拡張するテープまたは実質無制限のテープを使用してよい。この開発用targetでは、固定容量へ
+収めるためだけにversion 1の言語仕様を削ったり、セルフホストcompilerへ過度なmemory tuningを
+要求したりしない。有限テープとの互換性とセルフホストの成立確認は、別のtarget条件として扱う。

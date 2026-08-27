@@ -1,0 +1,10 @@
+void main() {
+    cell upper = 0x41;
+    cell lower = 0x61;
+    cell wrapped = 0xFF + 0x02;
+    cell punctuation = '\x21';
+    output(upper);
+    output(lower);
+    output(wrapped);
+    output(punctuation);
+}
