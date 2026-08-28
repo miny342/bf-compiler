@@ -679,13 +679,40 @@ impl<'a> AbiEmitter<'a> {
                     .or_default()
                     .push(DispatchEntry::PortalResume(site));
             }
-            for (high, mut entries) in pages {
-                // A dispatched body can migrate to a fresh context whose PcLow
-                // is zero until the end of this dispatcher cycle. Keeping the
-                // zero case first prevents that fresh context from being
-                // mistaken for continuation xx00 later in the same page.
-                entries.sort_by_key(|entry| entry.id().get() as u8);
-                emitter.emit_dispatch_page(high, &entries)?;
+            let pages = pages
+                .into_iter()
+                .map(|(high, mut entries)| {
+                    // A dispatched body can migrate to a fresh context whose PcLow
+                    // is zero until the end of this dispatcher cycle. Keeping the
+                    // zero case first prevents that fresh context from being
+                    // mistaken for continuation xx00 later in the same page.
+                    entries.sort_by_key(|entry| entry.id().get() as u8);
+                    (high, entries)
+                })
+                .collect::<Vec<_>>();
+            let high_span = usize::from(
+                pages.last().expect("nonempty dispatcher").0
+                    - pages.first().expect("nonempty dispatcher").0,
+            ) + 1;
+            if high_span == pages.len() {
+                emitter.with_profile_site(
+                    "abi",
+                    "abi.dispatch.pages.countdown",
+                    "dispatch page countdown",
+                    |emitter| emitter.emit_page_countdown(&pages),
+                )?;
+            } else {
+                emitter.with_profile_site(
+                    "abi",
+                    "abi.dispatch.pages.compare",
+                    "dispatch page equality scan",
+                    |emitter| {
+                        for (high, entries) in &pages {
+                            emitter.emit_dispatch_page(*high, entries)?;
+                        }
+                        Ok(())
+                    },
+                )?;
             }
             emitter.move_abi_field(AbiField::NextPcLow, AbiField::PcLow);
             emitter.move_abi_field(AbiField::NextPcHigh, AbiField::PcHigh);
@@ -715,21 +742,98 @@ impl<'a> AbiEmitter<'a> {
         high: u8,
         entries: &[DispatchEntry<'a>],
     ) -> Result<(), AbiCodegenError> {
-        self.copy_abi_field(AbiField::PcHigh, AbiField::Condition)?;
-        self.add_abi_field(AbiField::Condition, 0_u8.wrapping_sub(high))?;
-        self.set_abi_field(AbiField::Branch, 1)?;
-        self.clear_branch_on_nonzero(AbiField::Condition)?;
+        self.with_profile_site(
+            "abi",
+            "abi.dispatch.page.select",
+            "dispatch page selector",
+            |emitter| {
+                emitter.copy_abi_field(AbiField::PcHigh, AbiField::Condition)?;
+                emitter.add_abi_field(AbiField::Condition, 0_u8.wrapping_sub(high))?;
+                emitter.set_abi_field(AbiField::Branch, 1)?;
+                emitter.clear_branch_on_nonzero(AbiField::Condition)
+            },
+        )?;
 
         let branch = self.current_abi_offset(AbiField::Branch)?;
         self.move_to(branch);
         let body = self.capture(|emitter| {
             emitter.adjust(255);
             emitter.move_to(0);
-            // Once a page matches, make every later page fail. PcLow is kept
-            // until the matching low-byte case consumes it.
+            // Once a page matches, make every later equality page fail.
             emitter.clear_abi_field(AbiField::PcHigh)?;
-            for &entry in entries {
-                emitter.emit_dispatch_entry(entry)?;
+            emitter.emit_dispatch_page_body(entries)?;
+            let branch = emitter.current_abi_offset(AbiField::Branch)?;
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn emit_page_countdown(
+        &mut self,
+        pages: &[(u8, Vec<DispatchEntry<'a>>)],
+    ) -> Result<(), AbiCodegenError> {
+        let minimum = pages.first().expect("nonempty dispatcher").0;
+        let maximum = pages.last().expect("nonempty dispatcher").0;
+        let mut cases = [None; 256];
+        for (index, (high, _)) in pages.iter().enumerate() {
+            cases[usize::from(high.wrapping_sub(minimum))] = Some(index);
+        }
+        self.add_abi_field(AbiField::PcHigh, 0_u8.wrapping_sub(minimum))?;
+        self.set_abi_field(AbiField::Branch, 1)?;
+        self.emit_page_countdown_level(0, maximum - minimum, &cases, pages)
+    }
+
+    fn emit_page_countdown_level(
+        &mut self,
+        level: u8,
+        maximum: u8,
+        cases: &[Option<usize>; 256],
+        pages: &[(u8, Vec<DispatchEntry<'a>>)],
+    ) -> Result<(), AbiCodegenError> {
+        let pc = self.current_abi_offset(AbiField::PcHigh)?;
+        self.move_to(pc);
+        let nonzero = self.capture(|emitter| {
+            if level == maximum {
+                emitter.clear_current();
+                emitter.clear_abi_field(AbiField::Branch)?;
+            } else {
+                emitter.adjust(255);
+                emitter.move_to(0);
+                emitter.emit_page_countdown_level(level + 1, maximum, cases, pages)?;
+            }
+            emitter.move_to(pc);
+            Ok(())
+        })?;
+        self.emit_loop(nonzero);
+        self.move_to(0);
+
+        if let Some(index) = cases[usize::from(level)] {
+            let (high, entries) = &pages[index];
+            self.with_profile_site(
+                "abi",
+                format!("abi.dispatch.page.{high}"),
+                format!("dispatch page {high}"),
+                |emitter| emitter.emit_page_countdown_case(Some(entries)),
+            )
+        } else {
+            self.emit_page_countdown_case(None)
+        }
+    }
+
+    fn emit_page_countdown_case(
+        &mut self,
+        entries: Option<&[DispatchEntry<'a>]>,
+    ) -> Result<(), AbiCodegenError> {
+        let branch = self.current_abi_offset(AbiField::Branch)?;
+        self.move_to(branch);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            if let Some(entries) = entries {
+                emitter.emit_dispatch_page_body(entries)?;
             }
             let branch = emitter.current_abi_offset(AbiField::Branch)?;
             emitter.move_to(branch);
@@ -740,19 +844,166 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    fn emit_dispatch_entry(&mut self, entry: DispatchEntry<'a>) -> Result<(), AbiCodegenError> {
-        self.emit_hidden_dispatch_case(entry.id(), |emitter| match entry {
-            DispatchEntry::Continuation(continuation) => {
-                emitter.emit_continuation_body(continuation)
+    fn emit_dispatch_page_body(
+        &mut self,
+        entries: &[DispatchEntry<'a>],
+    ) -> Result<(), AbiCodegenError> {
+        let low_span = usize::from(
+            (entries.last().expect("nonempty dispatch page").id().get() as u8)
+                - (entries.first().expect("nonempty dispatch page").id().get() as u8),
+        ) + 1;
+        if low_span == entries.len() {
+            self.with_profile_site(
+                "abi",
+                "abi.dispatch.page.countdown",
+                "dispatch page countdown",
+                |emitter| emitter.emit_countdown_dispatch(entries),
+            )
+        } else {
+            self.with_profile_site(
+                "abi",
+                "abi.dispatch.page.compare",
+                "dispatch page equality scan",
+                |emitter| emitter.emit_equality_dispatch(entries),
+            )
+        }
+    }
+
+    fn emit_countdown_dispatch(
+        &mut self,
+        entries: &[DispatchEntry<'a>],
+    ) -> Result<(), AbiCodegenError> {
+        let minimum = entries
+            .first()
+            .map(|entry| entry.id().get() as u8)
+            .expect("every dispatch page contains at least one entry");
+        let maximum = entries
+            .last()
+            .map(|entry| entry.id().get() as u8)
+            .expect("every dispatch page contains at least one entry");
+        let mut cases = [None; 256];
+        for &entry in entries {
+            let relative = (entry.id().get() as u8).wrapping_sub(minimum);
+            cases[usize::from(relative)] = Some(entry);
+        }
+        // Normalize the page's occupied low-byte range to zero. Values below
+        // `minimum` wrap above the range, so sparse or invalid PCs still reach
+        // the no-match path rather than aliasing a case.
+        self.add_abi_field(AbiField::PcLow, 0_u8.wrapping_sub(minimum))?;
+        self.set_abi_field(AbiField::Branch, 1)?;
+        self.emit_countdown_level(0, maximum - minimum, &cases)
+    }
+
+    fn emit_equality_dispatch(
+        &mut self,
+        entries: &[DispatchEntry<'a>],
+    ) -> Result<(), AbiCodegenError> {
+        for &entry in entries {
+            self.with_profile_site(
+                "abi",
+                format!("abi.dispatch.case.{}", entry.id().get()),
+                format!("dispatch case {}", entry.id().get()),
+                |emitter| emitter.emit_equality_case(entry),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn emit_equality_case(&mut self, entry: DispatchEntry<'a>) -> Result<(), AbiCodegenError> {
+        let id = entry.id().get();
+        self.copy_abi_field(AbiField::PcLow, AbiField::Condition)?;
+        self.add_abi_field(AbiField::Condition, 0_u8.wrapping_sub(id as u8))?;
+        self.set_abi_field(AbiField::Branch, 1)?;
+        self.clear_branch_on_nonzero(AbiField::Condition)?;
+
+        let branch = self.current_abi_offset(AbiField::Branch)?;
+        self.move_to(branch);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.clear_abi_field(AbiField::PcLow)?;
+            emitter.emit_dispatch_entry_body(entry)?;
+            let branch = emitter.current_abi_offset(AbiField::Branch)?;
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn emit_countdown_level(
+        &mut self,
+        level: u8,
+        maximum: u8,
+        cases: &[Option<DispatchEntry<'a>>; 256],
+    ) -> Result<(), AbiCodegenError> {
+        let pc = self.current_abi_offset(AbiField::PcLow)?;
+        self.move_to(pc);
+        let nonzero = self.capture(|emitter| {
+            if level == maximum {
+                // No case can match above the last low byte in this page.
+                emitter.clear_current();
+                emitter.clear_abi_field(AbiField::Branch)?;
+            } else {
+                emitter.adjust(255);
+                emitter.move_to(0);
+                emitter.emit_countdown_level(level + 1, maximum, cases)?;
             }
+            emitter.move_to(pc);
+            Ok(())
+        })?;
+        self.emit_loop(nonzero);
+        self.move_to(0);
+
+        let entry = cases[usize::from(level)];
+        if let Some(entry) = entry {
+            self.with_profile_site(
+                "abi",
+                format!("abi.dispatch.case.{}", entry.id().get()),
+                format!("dispatch case {}", entry.id().get()),
+                |emitter| emitter.emit_countdown_case(Some(entry)),
+            )
+        } else {
+            self.emit_countdown_case(None)
+        }
+    }
+
+    fn emit_countdown_case(
+        &mut self,
+        entry: Option<DispatchEntry<'a>>,
+    ) -> Result<(), AbiCodegenError> {
+        let branch = self.current_abi_offset(AbiField::Branch)?;
+        self.move_to(branch);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            if let Some(entry) = entry {
+                emitter.emit_dispatch_entry_body(entry)?;
+            }
+            let branch = emitter.current_abi_offset(AbiField::Branch)?;
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn emit_dispatch_entry_body(
+        &mut self,
+        entry: DispatchEntry<'a>,
+    ) -> Result<(), AbiCodegenError> {
+        match entry {
+            DispatchEntry::Continuation(continuation) => self.emit_continuation_body(continuation),
             DispatchEntry::PortalAccessor(accessor) => {
-                emitter.emit_aggregate_accessor(accessor)?;
-                emitter.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
-                emitter.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
+                self.emit_aggregate_accessor(accessor)?;
+                self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
+                self.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
                 Ok(())
             }
-            DispatchEntry::PortalResume(site) => emitter.emit_portal_resume(site),
-        })
+            DispatchEntry::PortalResume(site) => self.emit_portal_resume(site),
+        }
     }
 
     fn emit_continuation_body(
@@ -787,46 +1038,6 @@ impl<'a> AbiEmitter<'a> {
         self.branch_temporary_depth = 0;
         self.emit_all(continuation.body(), continuation.function())?;
         self.emit_terminator(continuation)
-    }
-
-    fn emit_hidden_dispatch_case(
-        &mut self,
-        continuation: ContinuationId,
-        body_emitter: impl FnOnce(&mut Self) -> Result<(), AbiCodegenError>,
-    ) -> Result<(), AbiCodegenError> {
-        self.with_profile_site(
-            "abi",
-            format!("abi.dispatch.case.{}", continuation.get()),
-            format!("dispatch case {}", continuation.get()),
-            |emitter| emitter.emit_hidden_dispatch_case_inner(continuation, body_emitter),
-        )
-    }
-
-    fn emit_hidden_dispatch_case_inner(
-        &mut self,
-        continuation: ContinuationId,
-        body_emitter: impl FnOnce(&mut Self) -> Result<(), AbiCodegenError>,
-    ) -> Result<(), AbiCodegenError> {
-        let id = continuation.get();
-        self.copy_abi_field(AbiField::PcLow, AbiField::Condition)?;
-        self.add_abi_field(AbiField::Condition, 0_u8.wrapping_sub(id as u8))?;
-        self.set_abi_field(AbiField::Branch, 1)?;
-        self.clear_branch_on_nonzero(AbiField::Condition)?;
-
-        let branch = self.current_abi_offset(AbiField::Branch)?;
-        self.move_to(branch);
-        let body = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.clear_abi_field(AbiField::PcLow)?;
-            body_emitter(emitter)?;
-            let next_branch = emitter.current_abi_offset(AbiField::Branch)?;
-            emitter.move_to(next_branch);
-            Ok(())
-        })?;
-        self.emit_loop(body);
-        self.move_to(0);
-        Ok(())
     }
 
     fn clear_branch_on_nonzero(&mut self, condition: AbiField) -> Result<(), AbiCodegenError> {
@@ -2616,7 +2827,11 @@ mod tests {
             .map
             .sites
             .iter()
-            .filter(|site| site.stable_key.starts_with("abi.dispatch.page."))
+            .filter(|site| {
+                site.stable_key
+                    .strip_prefix("abi.dispatch.page.")
+                    .is_some_and(|suffix| suffix.parse::<u8>().is_ok())
+            })
             .map(|site| site.stable_key.as_str())
             .collect::<Vec<_>>();
         assert_eq!(
@@ -2628,6 +2843,18 @@ mod tests {
                 "abi.dispatch.page.255"
             ]
         );
+        for key in ["abi.dispatch.page.select", "abi.dispatch.page.countdown"] {
+            assert_eq!(
+                artifact
+                    .map
+                    .sites
+                    .iter()
+                    .filter(|site| site.stable_key == key)
+                    .count(),
+                4,
+                "each dispatch page should expose {key}",
+            );
+        }
     }
 
     #[test]
@@ -2695,6 +2922,156 @@ mod tests {
         for chunk_cells in [8, 16] {
             assert_eq!(execute_continuations(&program, chunk_cells), b"A");
         }
+    }
+
+    #[test]
+    fn dispatcher_uses_equality_scan_for_a_sparse_page() {
+        let main = FunctionId::new(0);
+        let first = id(0x0101);
+        let last = id(0x01ff);
+        let function = FunctionDescriptor::new(main, vec![], 1, crate::ValueType::Void, first);
+        let program = ContinuationProgram::new(
+            main,
+            vec![function],
+            vec![
+                Continuation::new(first, main, vec![], Terminator::Goto { target: last }),
+                Continuation::new(
+                    last,
+                    main,
+                    vec![
+                        FrameInstruction::Set {
+                            dst: Address::Frame(FrameSlot::new(0)),
+                            value: b'S',
+                        },
+                        FrameInstruction::Output {
+                            src: Address::Frame(FrameSlot::new(0)),
+                        },
+                    ],
+                    Terminator::Halt,
+                ),
+            ],
+        )
+        .unwrap();
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"S");
+        }
+        let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
+            .expect("sparse profiled dispatcher should compile");
+        assert!(
+            artifact
+                .map
+                .sites
+                .iter()
+                .any(|site| site.stable_key == "abi.dispatch.page.compare")
+        );
+        assert!(
+            artifact
+                .map
+                .sites
+                .iter()
+                .all(|site| site.stable_key != "abi.dispatch.page.countdown")
+        );
+    }
+
+    #[test]
+    fn dispatcher_counts_down_contiguous_high_byte_pages() {
+        let main = FunctionId::new(0);
+        let first = id(0x0101);
+        let second = id(0x0201);
+        let third = id(0x0301);
+        let function = FunctionDescriptor::new(main, vec![], 1, crate::ValueType::Void, first);
+        let output = |continuation, byte, target| {
+            Continuation::new(
+                continuation,
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::Frame(FrameSlot::new(0)),
+                        value: byte,
+                    },
+                    FrameInstruction::Output {
+                        src: Address::Frame(FrameSlot::new(0)),
+                    },
+                ],
+                target,
+            )
+        };
+        let program = ContinuationProgram::new(
+            main,
+            vec![function],
+            vec![
+                output(first, b'A', Terminator::Goto { target: second }),
+                output(second, b'B', Terminator::Goto { target: third }),
+                output(third, b'C', Terminator::Halt),
+            ],
+        )
+        .unwrap();
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"ABC");
+        }
+        let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
+            .expect("profiled high-byte countdown should compile");
+        let keys = artifact
+            .map
+            .sites
+            .iter()
+            .map(|site| site.stable_key.as_str())
+            .collect::<Vec<_>>();
+        assert!(keys.contains(&"abi.dispatch.pages.countdown"));
+        assert!(!keys.contains(&"abi.dispatch.pages.compare"));
+        assert!(!keys.contains(&"abi.dispatch.page.select"));
+    }
+
+    #[test]
+    fn dispatcher_uses_equality_scan_for_sparse_high_byte_pages() {
+        let main = FunctionId::new(0);
+        let first = id(0x0101);
+        let last = id(0xff01);
+        let function = FunctionDescriptor::new(main, vec![], 1, crate::ValueType::Void, first);
+        let program = ContinuationProgram::new(
+            main,
+            vec![function],
+            vec![
+                Continuation::new(first, main, vec![], Terminator::Goto { target: last }),
+                Continuation::new(
+                    last,
+                    main,
+                    vec![
+                        FrameInstruction::Set {
+                            dst: Address::Frame(FrameSlot::new(0)),
+                            value: b'H',
+                        },
+                        FrameInstruction::Output {
+                            src: Address::Frame(FrameSlot::new(0)),
+                        },
+                    ],
+                    Terminator::Halt,
+                ),
+            ],
+        )
+        .unwrap();
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"H");
+        }
+        let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
+            .expect("profiled sparse high-byte dispatcher should compile");
+        let keys = artifact
+            .map
+            .sites
+            .iter()
+            .map(|site| site.stable_key.as_str())
+            .collect::<Vec<_>>();
+        assert!(keys.contains(&"abi.dispatch.pages.compare"));
+        assert!(!keys.contains(&"abi.dispatch.pages.countdown"));
+        assert_eq!(
+            keys.iter()
+                .filter(|key| **key == "abi.dispatch.page.select")
+                .count(),
+            2
+        );
     }
 
     #[test]

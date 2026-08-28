@@ -541,6 +541,8 @@ mixed/unknown provenance counts
 - estimatedまたはexact exclusive time。
 - inclusive time。
 - total execute timeに対する割合。
+- exact modeでclock readなどの計測overheadを除いて比較するため、siteへ帰属できたexclusive time合計に
+  対する割合。
 - samplesまたはclock reads。
 - fast/raw/RLE operation数。
 - call countに相当するprofile block entry数。
@@ -549,7 +551,8 @@ mixed/unknown provenance counts
 ### JSON report
 
 JSON reportにはraw counter、duration nanoseconds、sample count、site table、phase timings、artifact identity、
-interpreter build情報を含める。割合や表示用丸め値だけを保存せず、再集計可能な整数値を正とする。
+interpreter build情報を含める。wall time基準と帰属時間基準の割合も便宜上含めるが、割合や表示用丸め値
+だけを保存せず、再集計可能な整数値を正とする。
 
 compile間比較toolは`stable_key`とkindで集計し、site IDをjoin keyに使用しない。
 

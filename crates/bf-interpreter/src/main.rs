@@ -446,7 +446,7 @@ fn render_text_report(
     ));
     output.push_str("site tree\n");
     let inclusive = inclusive_durations(profile, map);
-    render_site_children(None, 0, profile, map, &inclusive, &mut output);
+    render_site_children(None, 0, profile, map, &inclusive, duration_sum, &mut output);
     output
 }
 
@@ -458,6 +458,11 @@ fn render_json_report(
 ) -> Result<String, serde_json::Error> {
     let timings = result.timings.unwrap_or_default();
     let inclusive = inclusive_durations(profile, map);
+    let attributed_duration_ns = profile
+        .sites
+        .iter()
+        .map(|site| site.exclusive_time.as_nanos())
+        .sum::<u128>();
     let sites = profile
         .sites
         .iter()
@@ -477,6 +482,14 @@ fn render_json_report(
                 "attributes": metadata.attributes,
                 "exclusive_duration_ns": duration_json(site.exclusive_time),
                 "inclusive_duration_ns": duration_json(inclusive[&site.site.0]),
+                "wall_percent": duration_percent(
+                    inclusive[&site.site.0].as_nanos(),
+                    profile.measured_execute_time.as_nanos(),
+                ),
+                "attributed_percent": duration_percent(
+                    inclusive[&site.site.0].as_nanos(),
+                    attributed_duration_ns,
+                ),
                 "samples": site.samples,
                 "low_confidence": profile.sampling_interval.is_some() && site.samples < 20,
                 "profile_block_executions": site.profile_block_executions,
@@ -524,11 +537,9 @@ fn render_json_report(
             "clock_reads": profile.clock_reads,
             "profile_block_executions": profile.profile_block_executions,
             "measured_execute_time_ns": duration_json(profile.measured_execute_time),
-            "exclusive_duration_sum_ns": duration_u128_json(
-                profile.sites.iter().map(|site| site.exclusive_time.as_nanos()).sum()
-            ),
+            "exclusive_duration_sum_ns": duration_u128_json(attributed_duration_ns),
             "execute_duration_difference_ns": timings.execute.as_nanos() as i128
-                - profile.sites.iter().map(|site| site.exclusive_time.as_nanos()).sum::<u128>() as i128,
+                - attributed_duration_ns as i128,
             "mixed_provenance_native_operations": profile.mixed_provenance_native_operations,
             "sites": sites,
         }
@@ -565,6 +576,7 @@ fn render_site_children(
     profile: &ProfileResult,
     map: &ProfileMap,
     inclusive: &BTreeMap<u32, Duration>,
+    attributed_duration_ns: u128,
     output: &mut String,
 ) {
     let mut children = map
@@ -579,19 +591,19 @@ fn render_site_children(
             .iter()
             .find(|profile| profile.site == metadata.id)
             .expect("validated map contains every profiled site");
-        let percent = if profile.measured_execute_time.is_zero() {
-            0.0
-        } else {
-            inclusive[&site.site.0].as_secs_f64() / profile.measured_execute_time.as_secs_f64()
-                * 100.0
-        };
+        let percent = duration_percent(
+            inclusive[&site.site.0].as_nanos(),
+            profile.measured_execute_time.as_nanos(),
+        );
+        let attributed_percent =
+            duration_percent(inclusive[&site.site.0].as_nanos(), attributed_duration_ns);
         let confidence = if profile.sampling_interval.is_some() && site.samples < 20 {
             " low_confidence"
         } else {
             ""
         };
         output.push_str(&format!(
-            "{}{} [{}] inclusive_ns={} exclusive_ns={} percent={percent:.2} samples={} fast={} raw={} rle={} entries={}{}\n",
+            "{}{} [{}] inclusive_ns={} exclusive_ns={} percent={percent:.2} attributed_percent={attributed_percent:.2} samples={} fast={} raw={} rle={} entries={}{}\n",
             "  ".repeat(depth),
             metadata.stable_key,
             metadata.kind,
@@ -610,6 +622,7 @@ fn render_site_children(
             profile,
             map,
             inclusive,
+            attributed_duration_ns,
             output,
         );
     }
@@ -643,6 +656,14 @@ fn duration_u128_json(duration: u128) -> Value {
     json!(u64::try_from(duration).unwrap_or(u64::MAX))
 }
 
+fn duration_percent(numerator: u128, denominator: u128) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64 * 100.0
+    }
+}
+
 fn usage(executable: &OsStr) -> String {
     format!(
         "usage: {} [--stats] [--timings] [--unlimited-tape] [--profile-map PATH] [--accept-embedded-profile] \
@@ -668,5 +689,52 @@ mod tests {
         );
         assert!(parse_duration(OsStr::new("0ms")).is_err());
         assert!(parse_duration(OsStr::new("1")).is_err());
+    }
+
+    #[test]
+    fn duration_percent_handles_attributed_and_empty_denominators() {
+        assert_eq!(duration_percent(1, 4), 25.0);
+        assert_eq!(duration_percent(1, 0), 0.0);
+    }
+
+    #[test]
+    fn text_site_report_distinguishes_wall_and_attributed_percent() {
+        let site = bf_interpreter::ProfileSiteId(0);
+        let map = ProfileMap {
+            format: bf_profiling::PROFILE_MAP_FORMAT.to_owned(),
+            version: bf_profiling::PROFILE_MAP_VERSION,
+            bf: bf_profiling::bf_identity(b""),
+            files: vec![],
+            sites: vec![bf_profiling::ProfileSite {
+                id: site,
+                parent: None,
+                kind: "artifact".into(),
+                stable_key: "artifact.root".into(),
+                label: "artifact".into(),
+                source: None,
+                attributes: BTreeMap::new(),
+            }],
+            ranges: vec![],
+        };
+        let profile = ProfileResult {
+            sites: vec![bf_interpreter::SiteProfile {
+                site,
+                counters: SiteCounters::default(),
+                samples: 0,
+                exclusive_time: Duration::from_nanos(25),
+                profile_block_executions: 1,
+            }],
+            total_samples: 0,
+            sampling_interval: None,
+            clock_reads: 2,
+            profile_block_executions: 1,
+            measured_execute_time: Duration::from_nanos(100),
+            mixed_provenance_native_operations: 0,
+        };
+        let inclusive = inclusive_durations(&profile, &map);
+        let mut output = String::new();
+        render_site_children(None, 0, &profile, &map, &inclusive, 25, &mut output);
+
+        assert!(output.contains("percent=25.00 attributed_percent=100.00"));
     }
 }

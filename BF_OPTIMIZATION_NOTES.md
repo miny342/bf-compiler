@@ -2,8 +2,9 @@
 
 この文書は、version 0の言語仕様やABIを変更しないbackend最適化と今後の候補を記録する。
 隣接する移動・加算の統合、zero命令の除去、clear loopの標準化など、意味を局所的に判定できる
-BF IR peephole最適化は採用済みである。以下の高度なlowering手法は未採用であり、実装時には
-生成BFの長さ、実行step、追加cell数を現在のloweringと比較してから選ぶ。
+BF IR peephole最適化とcontinuation dispatcherの二段countdownは採用済みである。その他の高度な
+lowering手法は未採用であり、実装時には生成BFの長さ、実行step、追加cell数を現在のloweringと
+比較してから選ぶ。
 
 ## Repository interpreterのfast IR
 
@@ -69,10 +70,11 @@ cargo run -p bf-compiler --example profile_bf_ir -- test.bfc
 ## 二段dispatcher
 
 2026-08-29、Rust backendのdispatcherをcontinuation IDのhigh byteでpage分けした。dispatch cycleでは
-まず存在するhigh-byte pageを照合し、一致したpageのlow-byte caseだけを照合する。user continuation、
+まず存在するhigh-byte pageを選び、一致したpageのlow-byte caseだけを選ぶ。user continuation、
 portal accessor、portal resumeは同じpage表へ入る。これによりcase数を`C`、存在するpage数を`P`と
-すると、各caseでlow/highを比較する`O(C)`の全件走査から、high比較`P`件と選択page内の最大256件の
-low比較になる。profile mapには`abi.dispatch.page.*` siteも出力する。
+すると、各caseでlow/highを比較する`O(C)`の全件走査を避けられる。連続するhigh-byte pageとpage内の
+連続するlow byteには破壊的countdownを使い、疎な集合だけequality scanへfallbackする。profile mapには
+`abi.dispatch.page.*` siteも出力する。
 
 case bodyはcall、return、portal処理によって別contextへdata pointerを移せる。移動先contextの`PcLow`
 はdispatch cycle末まで0なので、low byteが0のcaseをpageの先頭へ置き、移動後に`xx00`を誤dispatch
@@ -93,6 +95,78 @@ backend testで検査する。
 最大tape位置は203のままだった。`logs/tmp.bfc`から生成したBF sourceは、文書化済みの変更前
 53,238,909 byteに対して53,033,032 byte（0.39%減）だった。約3000秒かかるfull profile実行は
 この変更の開発時検証では再実行していない。
+
+### 二段の破壊的countdown
+
+同日、まずpage内のlow-byte equality scanを破壊的な多段switchへ置換した。page内の最小low byteを
+`PcLow`から一度引いて0始まりへ正規化し、nested loopを1段進むごとに`PcLow`を1減らす。0へ到達した
+段のcaseだけが共通`Branch` flagを消費して実行される。比較用cellへのcopy/restoreとcaseごとの定数比較は
+行わない。範囲外の値は最深部で`PcLow`とflagをclearするため、別caseへaliasしない。
+
+countdownはpage内のlow byteが連続している場合だけ選択する。公開Continuation IRは任意のu16 IDを許すため、
+たとえばlow byteが0と255だけの疎なpageへ256段のloopを生成すると退行する。この場合は従来のequality
+scanへfallbackし、`abi.dispatch.page.compare`としてprofileする。通常のfrontendとhidden portal ID allocatorが
+作る密なID列はcountdownを選択する。
+
+case bodyがcall、return、portalによってcontextを移動した場合、移動先では`PcLow`と`Branch`が0である。
+このため残りのnested loopとcaseは実行されず、従来dispatcherと同じくdispatch cycle末に`NextPc`を
+新しい`Pc`へ移す。entryでは`PcHigh`が選択済み、exitでは`PcLow=0`、`PcHigh=0`、`Branch=0`、pointerは
+current context originというtemplate契約になる。
+
+直前の二段equality dispatcherと同条件で`fizzbuzz.bfc`を比較した結果は次のとおりだった。wall timeは
+同一release binaryを交互に実行し、各artifactのwarm-up後3回の中央値を使用した。
+
+| 指標 | 二段equality | countdown | 削減率 |
+|---|---:|---:|---:|
+| BF source bytes | 36,867 | 33,034 | 10.40% |
+| 実行BF命令数 | 1,660,011,088 | 108,371,016 | 93.47% |
+| RLE型推定命令数 | 1,329,168,036 | 25,072,890 | 98.11% |
+| fast IR native operations | 73,382,252 | 7,881,310 | 89.26% |
+| execute wall time | 300.25 ms | 18.25 ms | 93.92% |
+
+wall timeは16.45倍高速化し、最大tape位置は203のままだった。
+
+続いて同じ方式を`PcHigh`にも適用した。存在するhigh-byte pageが連続している場合は最小high byteで
+正規化してpageを破壊的にcountdownし、疎なpage集合には従来のequality scanを残す。選択したpageのbodyが
+contextを移動すると、移動先の`PcHigh`と`Branch`は0なので残りのpage gateは実行されない。連続する
+`0x01xx`、`0x02xx`、`0x03xx`と、疎な`0x01xx`、`0xffxx`のprofile siteをbackend testで検査する。
+
+low-byte countdownだけの版と同条件で`fizzbuzz.bfc`を比較した結果は次のとおりだった。
+
+| 指標 | lowのみ | high + low | 削減率 |
+|---|---:|---:|---:|
+| BF source bytes | 33,034 | 33,001 | 0.10% |
+| 実行BF命令数 | 108,371,016 | 107,808,472 | 0.52% |
+| RLE型推定命令数 | 25,072,890 | 24,299,392 | 3.08% |
+| fast IR native operations | 7,881,310 | 7,107,812 | 9.81% |
+| execute wall time | 18.490 ms | 16.745 ms | 9.44% |
+
+最大tape位置は203のままで、wall timeはさらに1.10倍高速化した。`logs/tmp.bfc`の生成BF sourceは、
+二段equality版の53,033,032 byteから最終的に52,633,798 byteへ0.75%縮小した。
+
+profilingではhigh-byte countdownを`abi.dispatch.pages.countdown`、疎なhigh-byte集合のfallbackを
+`abi.dispatch.pages.compare`、その中のhigh-byte照合を`abi.dispatch.page.select`、low-byte countdownを
+`abi.dispatch.page.countdown`、疎なpage内のfallbackを`abi.dispatch.page.compare`、case gateとbodyを
+従来どおり`abi.dispatch.case.*`へ分離した。
+exact modeの`percent`はclock readを含むexecute wall time基準なので、帰属できた時間だけを分母にする
+`attributed_percent`もtext/JSON reportへ追加した。
+
+### full self-host exact profile
+
+`logs/tmp.bfc`をcontinuation granularityでcompileし、生成した52,633,798 byteのBFをexact modeで1回
+full self-host実行した。出力は`ok\n`、最大tape位置は26,390、executeは135.41 s、process全体は
+137.20 sだった。reportはrepository rootの`tmp.log`へ保存した。exact modeでは5,749,199,982回の
+clock readを行うため、execute wall timeのうちsiteへ帰属した時間は78.76 sである。
+
+`abi.dispatcher`のinclusive timeは78.76 s（attributed 100%）だが、これは関数本体をdispatcher siteの
+子として記録するprofile treeの構造による。dispatcher直下の関数実行までdispatch overheadと数えては
+ならない。dispatcher本体、high/page/case gateのexclusive timeを合計すると11.85 s、帰属時間の
+15.04%だった。内訳ではhigh-byte countdownは0.45 s（0.58%）、low-byte countdownは9.13 s
+（11.59%）であり、PcHighは主要な残存bottleneckではない。
+
+最大の単一workloadは`function.67.continuation.1177`のinclusive 29.03 s（36.85%）で、その中の
+inner `abi.frame.branch`だけでexclusive 14.47 s（21.65%）を占めた。次はhigh-byte dispatchではなく、
+low-byte ID配置/countdownと、このloop/branch loweringを優先して調べる。
 
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
@@ -174,11 +248,10 @@ array用templateは`D = 8`と`D = 16`の全入力についてのみ保証すれ�
 
 [条件分岐の多段化](https://zenn.dev/angel_p_57/articles/b409d3e760d99b)は、判定値を1ずつ減らし、
 共通のelse用flagを使い回してswitch相当を構成する。continuation IDやarrayのpage/slotは
-密な非負整数なので、次を比較する。
+密な非負整数なので比較した結果、high byteでpageを選んでからlow byteを破壊的に減らす二段countdownを
+Rust backendへ採用した。詳細と測定値は「二段dispatcher」の節に記録している。残る比較対象は次になる。
 
-- 現在のcontinuationごとの照合。
-- IDを減らしながら進む1段countdown。
-- high byte/pageを選んでからlow byte/slotを選ぶ2段countdown。
+- page内の小さなgapまでcountdownを許すcost model。
 - 頻度の高いcontinuationへ小さいIDを割り当てる配置。
 
 一般のswitch loweringにも使えるが、疎な値では減算回数が増える。密度とprofileを見て
@@ -245,7 +318,7 @@ code sizeとstep数のPareto frontierを残し、特定処理系にだけ速いv
 1. 比較templateを独立probeにし、全8-bit入力で結果、元値の保存、終了pointer位置を検証する。
 2. `Branch`のbackup版と非同期版を、条件0/nonzeroおよびbodyの距離を変えて比較する。
 3. 固定除数divmodをarray probeへ追加し、`D = 8/16`、配列長16/100/256で測定する。
-4. moving-index accessorとpage/slot countdown dispatcherを個別に導入し、組合せ爆発を避ける。
+4. moving-index accessorと追加のpage countdown改善を個別に導入し、組合せ爆発を避ける。
 5. 実programのprofileが得られてからcontinuation ID配置とtarget別cost modelを追加する。
 
 最適化templateは、入力cellのlive/dead、必要な初期zero cell、破壊されるcell、各経路の終了pointer
