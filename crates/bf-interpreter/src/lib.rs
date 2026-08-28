@@ -131,11 +131,27 @@ pub fn run(source: &[u8], input: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(run_with_stats(source, input)?.output)
 }
 
+/// Runs a program on a tape that grows to the right when necessary.
+pub fn run_unbounded(source: &[u8], input: &[u8]) -> Result<Vec<u8>, Error> {
+    Ok(run_unbounded_with_stats(source, input)?.output)
+}
+
 /// Runs a Brainfuck program and returns its output and execution measurements.
 pub fn run_with_stats(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
     let instructions = parse(source)?;
     let optimized = optimize(&instructions);
-    execute(&optimized, input)
+    execute(&optimized, input, false)
+}
+
+/// Runs a program on a tape that grows to the right when necessary.
+///
+/// This development mode is intended for the self-host compiler. Moving left
+/// of cell zero remains an error, and instruction accounting is identical to
+/// [`run_with_stats`].
+pub fn run_unbounded_with_stats(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
+    let instructions = parse(source)?;
+    let optimized = optimize(&instructions);
+    execute(&optimized, input, true)
 }
 
 /// String convenience wrapper around [`run`].
@@ -389,10 +405,11 @@ struct Machine<'a> {
     executed_instructions: u64,
     executed_rle_instructions: u64,
     optimization: OptimizationRunStats,
+    grow_tape: bool,
 }
 
 impl<'a> Machine<'a> {
-    fn new(input: &'a [u8]) -> Self {
+    fn new(input: &'a [u8], grow_tape: bool) -> Self {
         Self {
             tape: vec![0; TAPE_LEN],
             pointer: 0,
@@ -403,6 +420,7 @@ impl<'a> Machine<'a> {
             executed_instructions: 0,
             executed_rle_instructions: 0,
             optimization: OptimizationRunStats::default(),
+            grow_tape,
         }
     }
 
@@ -510,6 +528,12 @@ impl<'a> Machine<'a> {
                     1 + iterations * (body_rle_count + 1),
                 );
                 if iterations != 0 {
+                    if self.grow_tape && *max_offset > 0 {
+                        let reached = self.pointer.checked_add_signed(*max_offset).unwrap();
+                        if reached >= self.tape.len() {
+                            self.tape.resize(reached + 1, 0);
+                        }
+                    }
                     let factor = iterations as u8;
                     for &(offset, update) in updates.iter() {
                         let target = self.pointer.checked_add_signed(offset).unwrap();
@@ -540,23 +564,29 @@ impl<'a> Machine<'a> {
     fn offset_is_valid(&self, offset: isize) -> bool {
         self.pointer
             .checked_add_signed(offset)
-            .is_some_and(|position| position < self.tape.len())
+            .is_some_and(|position| self.grow_tape || position < self.tape.len())
     }
 
     fn move_pointer(&mut self, amount: isize, source_offsets: &[usize]) -> Result<(), Error> {
         if amount > 0 {
             let count = amount as usize;
-            if self
-                .pointer
-                .checked_add(count)
-                .is_none_or(|p| p >= self.tape.len())
-            {
+            let Some(destination) = self.pointer.checked_add(count) else {
                 let valid_steps = self.tape.len() - 1 - self.pointer;
                 return Err(Error::TapeOverflow {
                     instruction_offset: source_offsets[valid_steps],
                 });
+            };
+            if destination >= self.tape.len() {
+                if self.grow_tape {
+                    self.tape.resize(destination + 1, 0);
+                } else {
+                    let valid_steps = self.tape.len() - 1 - self.pointer;
+                    return Err(Error::TapeOverflow {
+                        instruction_offset: source_offsets[valid_steps],
+                    });
+                }
             }
-            self.pointer += count;
+            self.pointer = destination;
             self.max_pointer = self.max_pointer.max(self.pointer);
         } else {
             let count = amount.unsigned_abs();
@@ -581,8 +611,12 @@ fn iterations_to_zero(initial: u8, delta: u8) -> u64 {
     iterations
 }
 
-fn execute(instructions: &[FastInstruction], input: &[u8]) -> Result<RunResult, Error> {
-    let mut machine = Machine::new(input);
+fn execute(
+    instructions: &[FastInstruction],
+    input: &[u8],
+    grow_tape: bool,
+) -> Result<RunResult, Error> {
+    let mut machine = Machine::new(input, grow_tape);
     machine.execute_block(instructions)?;
     Ok(RunResult {
         output: machine.output,
@@ -774,6 +808,18 @@ mod tests {
                 instruction_offset: TAPE_LEN - 1
             })
         );
+    }
+
+    #[test]
+    fn unbounded_mode_grows_right_without_changing_standard_mode() {
+        let mut source = vec![b'>'; TAPE_LEN + 7];
+        source.extend_from_slice(b"+.");
+        assert!(matches!(run(&source, b""), Err(Error::TapeOverflow { .. })));
+
+        let result = run_unbounded_with_stats(&source, b"").unwrap();
+        assert_eq!(result.output, vec![1]);
+        assert_eq!(result.stats.max_pointer, TAPE_LEN + 7);
+        assert_eq!(result.stats.executed_instructions, (TAPE_LEN + 9) as u64);
     }
 
     #[test]

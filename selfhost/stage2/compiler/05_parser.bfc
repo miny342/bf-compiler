@@ -289,7 +289,7 @@ void parse_statement() {
     }
 }
 
-void compile_program() {
+void compile_program_stage4() {
     control_depth = 0;
     read_character();
     next_token();

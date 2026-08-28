@@ -16,26 +16,31 @@ fn main() -> ExitCode {
 fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os();
     let executable = arguments.next().unwrap_or_default();
-    let Some(first) = arguments.next() else {
-        return Err(usage(&executable).into());
-    };
-    let (print_stats, program_path) = if first == "--stats" {
-        let Some(program_path) = arguments.next() else {
+    let mut print_stats = false;
+    let mut unlimited_tape = false;
+    let mut program_path = None;
+    for argument in arguments {
+        if argument == "--stats" {
+            print_stats = true;
+        } else if argument == "--unlimited-tape" {
+            unlimited_tape = true;
+        } else if program_path.replace(argument).is_some() {
             return Err(usage(&executable).into());
-        };
-        (true, program_path)
-    } else {
-        (false, first)
-    };
-    if arguments.next().is_some() {
-        return Err(usage(&executable).into());
+        }
     }
+    let Some(program_path) = program_path else {
+        return Err(usage(&executable).into());
+    };
 
     let source = fs::read(program_path)?;
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
 
-    let result = bf_interpreter::run_with_stats(&source, &input)?;
+    let result = if unlimited_tape {
+        bf_interpreter::run_unbounded_with_stats(&source, &input)?
+    } else {
+        bf_interpreter::run_with_stats(&source, &input)?
+    };
     io::stdout().write_all(&result.output)?;
     if print_stats {
         let stats = result.stats;
@@ -64,7 +69,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
 
 fn usage(executable: &std::ffi::OsStr) -> String {
     format!(
-        "usage: {} [--stats] <program.bf>",
+        "usage: {} [--stats] [--unlimited-tape] <program.bf>",
         executable.to_string_lossy()
     )
 }

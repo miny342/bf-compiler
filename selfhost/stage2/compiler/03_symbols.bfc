@@ -50,10 +50,18 @@ cell token_is_while() {
         && token_text[4] == 'e';
 }
 
+cell token_is_return() {
+    return token_length == 6
+        && token_text[0] == 'r' && token_text[1] == 'e'
+        && token_text[2] == 't' && token_text[3] == 'u'
+        && token_text[4] == 'r' && token_text[5] == 'n';
+}
+
 cell token_is_reserved() {
     return token_is_cell() || token_is_void()
         || token_is_input() || token_is_output()
-        || token_is_if() || token_is_else() || token_is_while();
+        || token_is_if() || token_is_else() || token_is_while()
+        || token_is_return();
 }
 
 void consume(TokenKind expected) {
@@ -63,15 +71,6 @@ void consume(TokenKind expected) {
     next_token();
 }
 
-cell symbol_text_index(cell symbol, cell offset) {
-    cell result = offset;
-    while (symbol != 0) {
-        result += MAX_NAME;
-        symbol -= 1;
-    }
-    return result;
-}
-
 cell token_matches_symbol(cell symbol) {
     if (token_length != symbol_length[symbol]) {
         return 0;
@@ -79,7 +78,7 @@ cell token_matches_symbol(cell symbol) {
     cell index;
     while (index < token_length) {
         if (token_text[index]
-            != symbol_text[symbol_text_index(symbol, index)]) {
+            != symbol_text[symbol][index]) {
             return 0;
         }
         index += 1;
@@ -118,7 +117,7 @@ cell add_symbol() {
     symbol_cell[symbol] = symbol;
     cell index;
     while (index < token_length) {
-        symbol_text[symbol_text_index(symbol, index)] = token_text[index];
+        symbol_text[symbol][index] = token_text[index];
         index += 1;
     }
     symbol_count += 1;

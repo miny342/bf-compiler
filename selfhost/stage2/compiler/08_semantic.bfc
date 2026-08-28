@@ -1,0 +1,278 @@
+// 第5段階scalar programのfile-scope収集、名前解決、型検査。
+
+NodeId[256] semantic_local_names;
+cell[256] semantic_local_slots;
+cell semantic_local_count;
+cell semantic_max_local_count;
+cell semantic_scope_depth;
+cell[16] semantic_scope_base;
+NodeId semantic_current_function;
+NodeId main_function;
+cell function_count;
+
+NodeId find_function_by_name(NodeId name) {
+    NodeId function = first_function;
+    while (!node_is_null(function)) {
+        if (node_equals(node_name(function), name)) {
+            return function;
+        }
+        function = node_next(function);
+    }
+    fail();
+    return null_node();
+}
+
+cell find_local_slot(NodeId name) {
+    cell index = semantic_local_count;
+    while (index != 0) {
+        index -= 1;
+        if (node_equals(semantic_local_names[index], name)) {
+            return semantic_local_slots[index];
+        }
+    }
+    fail();
+    return 0;
+}
+
+cell add_semantic_local(NodeId name) {
+    if (semantic_local_count == 0xff) {
+        fail();
+    }
+    cell first = semantic_scope_base[semantic_scope_depth - 1];
+    cell probe = first;
+    while (probe < semantic_local_count) {
+        if (node_equals(semantic_local_names[probe], name)) {
+            fail();
+        }
+        probe += 1;
+    }
+    cell slot = semantic_local_count;
+    semantic_local_names[semantic_local_count] = name;
+    semantic_local_slots[semantic_local_count] = slot;
+    semantic_local_count += 1;
+    if (semantic_local_count > semantic_max_local_count) {
+        semantic_max_local_count = semantic_local_count;
+    }
+    return slot;
+}
+
+void enter_semantic_scope() {
+    if (semantic_scope_depth == 16) {
+        fail();
+    }
+    semantic_scope_base[semantic_scope_depth] = semantic_local_count;
+    semantic_scope_depth += 1;
+}
+
+void leave_semantic_scope() {
+    semantic_scope_depth -= 1;
+    semantic_local_count = semantic_scope_base[semantic_scope_depth];
+}
+
+cell analyze_ast_expression(NodeId expression) {
+    cell kind = node_kind(expression);
+    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_INPUT_EXPRESSION) {
+        return AST_TYPE_CELL;
+    }
+    if (kind == NODE_NAME_EXPRESSION) {
+        node_set_value(expression, find_local_slot(node_name(expression)));
+        return AST_TYPE_CELL;
+    }
+    if (kind == NODE_UNARY_EXPRESSION) {
+        if (analyze_ast_expression(node_a(expression)) != AST_TYPE_CELL) {
+            fail();
+        }
+        return AST_TYPE_CELL;
+    }
+    if (kind == NODE_BINARY_EXPRESSION) {
+        if (analyze_ast_expression(node_a(expression)) != AST_TYPE_CELL
+            || analyze_ast_expression(node_b(expression)) != AST_TYPE_CELL) {
+            fail();
+        }
+        return AST_TYPE_CELL;
+    }
+    if (kind == NODE_CALL_EXPRESSION) {
+        NodeId function = find_function_by_name(node_name(expression));
+        if (node_equals(function, main_function)) {
+            fail();
+        }
+        node_set_b(expression, function);
+        NodeId descriptor = node_c(function);
+        cell expected = node_tag(descriptor);
+        cell actual;
+        NodeId argument = node_a(expression);
+        while (!node_is_null(argument)) {
+            if (analyze_ast_expression(argument) != AST_TYPE_CELL) {
+                fail();
+            }
+            actual += 1;
+            argument = node_next(argument);
+        }
+        if (actual != expected) {
+            fail();
+        }
+        return node_tag(function);
+    }
+    fail();
+    return AST_TYPE_VOID;
+}
+
+cell analyze_ast_statement(NodeId statement) {
+    cell kind = node_kind(statement);
+    if (kind == NODE_EMPTY_STATEMENT) {
+        return 0;
+    }
+    if (kind == NODE_BLOCK) {
+        enter_semantic_scope();
+        cell guaranteed;
+        NodeId child = node_a(statement);
+        while (!node_is_null(child)) {
+            if (analyze_ast_statement(child)) {
+                guaranteed = 1;
+            }
+            child = node_next(child);
+        }
+        leave_semantic_scope();
+        return guaranteed;
+    }
+    if (kind == NODE_DECLARATION) {
+        cell slot = add_semantic_local(node_name(statement));
+        node_set_value(statement, slot);
+        if (!node_is_null(node_a(statement))
+            && analyze_ast_expression(node_a(statement)) != AST_TYPE_CELL) {
+            fail();
+        }
+        return 0;
+    }
+    if (kind == NODE_OUTPUT_STATEMENT) {
+        if (analyze_ast_expression(node_a(statement)) != AST_TYPE_CELL) {
+            fail();
+        }
+        return 0;
+    }
+    if (kind == NODE_ASSIGNMENT) {
+        if (analyze_ast_expression(node_a(statement)) != AST_TYPE_CELL
+            || analyze_ast_expression(node_b(statement)) != AST_TYPE_CELL) {
+            fail();
+        }
+        return 0;
+    }
+    if (kind == NODE_CALL_STATEMENT) {
+        cell discarded_type = analyze_ast_expression(node_a(statement));
+        if (discarded_type != AST_TYPE_VOID) {
+            fail();
+        }
+        return 0;
+    }
+    if (kind == NODE_RETURN_STATEMENT) {
+        NodeId value = node_a(statement);
+        if (node_tag(semantic_current_function) == AST_TYPE_VOID) {
+            if (!node_is_null(value)) {
+                fail();
+            }
+        } else if (node_is_null(value)
+            || analyze_ast_expression(value) != AST_TYPE_CELL) {
+            fail();
+        }
+        return 1;
+    }
+    if (kind == NODE_IF_STATEMENT) {
+        if (analyze_ast_expression(node_a(statement)) != AST_TYPE_CELL) {
+            fail();
+        }
+        cell then_returns = analyze_ast_statement(node_b(statement));
+        NodeId otherwise = node_c(statement);
+        if (node_is_null(otherwise)) {
+            return 0;
+        }
+        return then_returns && analyze_ast_statement(otherwise);
+    }
+    if (kind == NODE_WHILE_STATEMENT) {
+        if (analyze_ast_expression(node_a(statement)) != AST_TYPE_CELL) {
+            fail();
+        }
+        cell body_returns = analyze_ast_statement(node_b(statement));
+        return 0;
+    }
+    fail();
+    return 0;
+}
+
+void collect_function_declarations() {
+    function_count = 0;
+    main_function = null_node();
+    NodeId function = first_function;
+    while (!node_is_null(function)) {
+        NodeId earlier = first_function;
+        while (!node_equals(earlier, function)) {
+            if (node_equals(node_name(earlier), node_name(function))) {
+                fail();
+            }
+            earlier = node_next(earlier);
+        }
+        if (function_count == 0xff) {
+            fail();
+        }
+        node_set_value(function, function_count);
+        function_count += 1;
+
+        NodeId descriptor = allocate_node(NODE_FUNCTION_DESCRIPTOR);
+        node_set_c(function, descriptor);
+        NodeId parameter = node_a(function);
+        cell parameter_count;
+        while (!node_is_null(parameter)) {
+            parameter_count += 1;
+            parameter = node_next(parameter);
+        }
+        node_set_tag(descriptor, parameter_count);
+
+        NodeId name = node_name(function);
+        if (node_value(name) == 4) {
+            NodeId byte = node_a(name);
+            if (arena_cells[byte.page][byte.slot] == 'm') {
+                byte = arena_advance(byte, 1);
+                if (arena_cells[byte.page][byte.slot] == 'a') {
+                    byte = arena_advance(byte, 1);
+                    if (arena_cells[byte.page][byte.slot] == 'i') {
+                        byte = arena_advance(byte, 1);
+                        if (arena_cells[byte.page][byte.slot] == 'n') {
+                            if (!node_is_null(main_function)) {
+                                fail();
+                            }
+                            main_function = function;
+                        }
+                    }
+                }
+            }
+        }
+        function = node_next(function);
+    }
+    if (node_is_null(main_function) || node_tag(main_function) != AST_TYPE_VOID
+        || node_tag(node_c(main_function)) != 0) {
+        fail();
+    }
+}
+
+void analyze_ast_program() {
+    collect_function_declarations();
+    NodeId function = first_function;
+    while (!node_is_null(function)) {
+        semantic_current_function = function;
+        semantic_local_count = 0;
+        semantic_max_local_count = 0;
+        semantic_scope_depth = 0;
+        enter_semantic_scope();
+        NodeId parameter = node_a(function);
+        while (!node_is_null(parameter)) {
+            node_set_value(parameter, add_semantic_local(node_name(parameter)));
+            parameter = node_next(parameter);
+        }
+        cell returns = analyze_ast_statement(node_b(function));
+        if (node_tag(function) == AST_TYPE_CELL && !returns) {
+            fail();
+        }
+        node_set_value(node_c(function), semantic_max_local_count);
+        leave_semantic_scope();
+        function = node_next(function);
+    }
+}

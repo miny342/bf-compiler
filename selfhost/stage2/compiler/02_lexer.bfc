@@ -177,6 +177,9 @@ void next_token() {
     } else if (current_char == '}') {
         token_kind = TokenKind::RightBrace;
         read_character();
+    } else if (current_char == ',') {
+        token_kind = TokenKind::Comma;
+        read_character();
     } else if (current_char == ';') {
         token_kind = TokenKind::Semicolon;
         read_character();

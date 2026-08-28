@@ -23,7 +23,8 @@ mod semantic;
 mod static_layout;
 
 pub use abi_codegen::{
-    AbiCodegenError, compile_continuations, lower_continuations, lower_continuations_with_config,
+    AbiCodegenError, compile_continuations, compile_continuations_unbounded, lower_continuations,
+    lower_continuations_unbounded, lower_continuations_with_config,
 };
 pub use bf_ir::{BfInstruction, BfProgram};
 pub use bf_optimizer::{BfOptimizationStats, optimize_bf, optimize_bf_with_stats};

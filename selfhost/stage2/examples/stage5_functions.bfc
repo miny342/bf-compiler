@@ -1,0 +1,43 @@
+cell sum(cell value) {
+    if (value == 0) {
+        return 0;
+    }
+    return value + sum(value - 1);
+}
+
+cell odd(cell value) {
+    if (value == 0) {
+        return 0;
+    }
+    return even(value - 1);
+}
+
+cell even(cell value) {
+    if (value == 0) {
+        return 1;
+    }
+    return odd(value - 1);
+}
+
+void emit_twice(cell value) {
+    output(value);
+    output(value);
+    return;
+}
+
+void main() {
+    output(sum(3));
+    output(odd(3));
+    output(even(4));
+    emit_twice('A');
+    output(0xff > 0);
+    cell countdown = 3;
+    while (countdown != 0) {
+        countdown -= 1;
+    }
+    output(countdown);
+    output(input());
+    output(0 && input());
+    output(1 || input());
+    output(input());
+}

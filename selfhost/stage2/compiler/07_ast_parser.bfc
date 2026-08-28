@@ -1,0 +1,379 @@
+// 第5段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
+
+const cell AST_TYPE_VOID = 0;
+const cell AST_TYPE_CELL = 1;
+const cell AST_UNARY_PLUS = 0;
+const cell AST_UNARY_NEGATE = 1;
+const cell AST_UNARY_NOT = 2;
+const cell AST_BINARY_ADD = 0;
+const cell AST_BINARY_SUBTRACT = 1;
+const cell AST_BINARY_LESS = 2;
+const cell AST_BINARY_LESS_EQUAL = 3;
+const cell AST_BINARY_GREATER = 4;
+const cell AST_BINARY_GREATER_EQUAL = 5;
+const cell AST_BINARY_EQUAL = 6;
+const cell AST_BINARY_NOT_EQUAL = 7;
+const cell AST_BINARY_LOGICAL_AND = 8;
+const cell AST_BINARY_LOGICAL_OR = 9;
+const cell AST_ASSIGNMENT_SET = 0;
+const cell AST_ASSIGNMENT_ADD = 1;
+const cell AST_ASSIGNMENT_SUBTRACT = 2;
+
+NodeId parse_ast_expression() {
+    return parse_ast_logical_or();
+}
+
+NodeId make_unary(cell operator, NodeId operand) {
+    NodeId result = allocate_node(NODE_UNARY_EXPRESSION);
+    node_set_tag(result, operator);
+    node_set_a(result, operand);
+    return result;
+}
+
+NodeId make_binary(cell operator, NodeId left, NodeId right) {
+    NodeId result = allocate_node(NODE_BINARY_EXPRESSION);
+    node_set_tag(result, operator);
+    node_set_a(result, left);
+    node_set_b(result, right);
+    return result;
+}
+
+NodeId parse_ast_call(NodeId name) {
+    NodeId call = allocate_node(NODE_CALL_EXPRESSION);
+    node_set_name(call, name);
+    consume(TokenKind::LeftParen);
+    NodeId first;
+    NodeId last;
+    if (token_kind != TokenKind::RightParen) {
+        cell more = 1;
+        while (more) {
+            NodeId argument = parse_ast_expression();
+            if (node_is_null(first)) {
+                first = argument;
+            } else {
+                node_set_next(last, argument);
+            }
+            last = argument;
+            if (token_kind == TokenKind::Comma) {
+                next_token();
+            } else {
+                more = 0;
+            }
+        }
+    }
+    consume(TokenKind::RightParen);
+    node_set_a(call, first);
+    return call;
+}
+
+NodeId parse_ast_primary() {
+    if (token_kind == TokenKind::Number) {
+        NodeId result = allocate_node(NODE_LITERAL_EXPRESSION);
+        node_set_value(result, token_value);
+        next_token();
+        return result;
+    }
+    if (token_kind == TokenKind::Identifier) {
+        if (token_is_input()) {
+            NodeId result = allocate_node(NODE_INPUT_EXPRESSION);
+            next_token();
+            consume(TokenKind::LeftParen);
+            consume(TokenKind::RightParen);
+            return result;
+        }
+        NodeId name = intern_token_name();
+        next_token();
+        if (token_kind == TokenKind::LeftParen) {
+            return parse_ast_call(name);
+        }
+        NodeId result = allocate_node(NODE_NAME_EXPRESSION);
+        node_set_name(result, name);
+        return result;
+    }
+    if (token_kind == TokenKind::LeftParen) {
+        next_token();
+        NodeId result = parse_ast_expression();
+        consume(TokenKind::RightParen);
+        return result;
+    }
+    fail();
+    return null_node();
+}
+
+NodeId parse_ast_unary() {
+    if (token_kind == TokenKind::Bang) {
+        next_token();
+        return make_unary(AST_UNARY_NOT, parse_ast_unary());
+    }
+    if (token_kind == TokenKind::Plus) {
+        next_token();
+        return make_unary(AST_UNARY_PLUS, parse_ast_unary());
+    }
+    if (token_kind == TokenKind::Minus) {
+        next_token();
+        return make_unary(AST_UNARY_NEGATE, parse_ast_unary());
+    }
+    return parse_ast_primary();
+}
+
+NodeId parse_ast_additive() {
+    NodeId result = parse_ast_unary();
+    while (token_kind == TokenKind::Plus || token_kind == TokenKind::Minus) {
+        TokenKind operator = token_kind;
+        next_token();
+        NodeId right = parse_ast_unary();
+        if (operator == TokenKind::Plus) {
+            result = make_binary(AST_BINARY_ADD, result, right);
+        } else {
+            result = make_binary(AST_BINARY_SUBTRACT, result, right);
+        }
+    }
+    return result;
+}
+
+NodeId parse_ast_comparison() {
+    NodeId result = parse_ast_additive();
+    while (token_kind == TokenKind::Less || token_kind == TokenKind::LessEqual
+        || token_kind == TokenKind::Greater || token_kind == TokenKind::GreaterEqual) {
+        TokenKind operator = token_kind;
+        next_token();
+        NodeId right = parse_ast_additive();
+        cell ast_operator = AST_BINARY_LESS;
+        if (operator == TokenKind::LessEqual) {
+            ast_operator = AST_BINARY_LESS_EQUAL;
+        } else if (operator == TokenKind::Greater) {
+            ast_operator = AST_BINARY_GREATER;
+        } else if (operator == TokenKind::GreaterEqual) {
+            ast_operator = AST_BINARY_GREATER_EQUAL;
+        }
+        result = make_binary(ast_operator, result, right);
+    }
+    return result;
+}
+
+NodeId parse_ast_equality() {
+    NodeId result = parse_ast_comparison();
+    while (token_kind == TokenKind::EqualEqual || token_kind == TokenKind::BangEqual) {
+        TokenKind operator = token_kind;
+        next_token();
+        NodeId right = parse_ast_comparison();
+        if (operator == TokenKind::EqualEqual) {
+            result = make_binary(AST_BINARY_EQUAL, result, right);
+        } else {
+            result = make_binary(AST_BINARY_NOT_EQUAL, result, right);
+        }
+    }
+    return result;
+}
+
+NodeId parse_ast_logical_and() {
+    NodeId result = parse_ast_equality();
+    while (token_kind == TokenKind::AmpAmp) {
+        next_token();
+        result = make_binary(
+            AST_BINARY_LOGICAL_AND,
+            result,
+            parse_ast_equality()
+        );
+    }
+    return result;
+}
+
+NodeId parse_ast_logical_or() {
+    NodeId result = parse_ast_logical_and();
+    while (token_kind == TokenKind::PipePipe) {
+        next_token();
+        result = make_binary(
+            AST_BINARY_LOGICAL_OR,
+            result,
+            parse_ast_logical_and()
+        );
+    }
+    return result;
+}
+
+NodeId parse_ast_statement() {
+    if (token_kind == TokenKind::Semicolon) {
+        next_token();
+        return allocate_node(NODE_EMPTY_STATEMENT);
+    }
+    if (token_kind == TokenKind::LeftBrace) {
+        next_token();
+        NodeId block = allocate_node(NODE_BLOCK);
+        NodeId first;
+        NodeId last;
+        while (token_kind != TokenKind::RightBrace) {
+            if (token_kind == TokenKind::Eof) {
+                fail();
+            }
+            NodeId statement = parse_ast_statement();
+            if (node_is_null(first)) {
+                first = statement;
+            } else {
+                node_set_next(last, statement);
+            }
+            last = statement;
+        }
+        next_token();
+        node_set_a(block, first);
+        return block;
+    }
+    if (token_kind == TokenKind::Identifier && token_is_cell()) {
+        next_token();
+        if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+            fail();
+        }
+        NodeId declaration = allocate_node(NODE_DECLARATION);
+        node_set_name(declaration, intern_token_name());
+        next_token();
+        if (token_kind == TokenKind::Assign) {
+            next_token();
+            node_set_a(declaration, parse_ast_expression());
+        }
+        consume(TokenKind::Semicolon);
+        return declaration;
+    }
+    if (token_kind == TokenKind::Identifier && token_is_output()) {
+        next_token();
+        consume(TokenKind::LeftParen);
+        NodeId statement = allocate_node(NODE_OUTPUT_STATEMENT);
+        node_set_a(statement, parse_ast_expression());
+        consume(TokenKind::RightParen);
+        consume(TokenKind::Semicolon);
+        return statement;
+    }
+    if (token_kind == TokenKind::Identifier && token_is_return()) {
+        next_token();
+        NodeId statement = allocate_node(NODE_RETURN_STATEMENT);
+        if (token_kind != TokenKind::Semicolon) {
+            node_set_a(statement, parse_ast_expression());
+        }
+        consume(TokenKind::Semicolon);
+        return statement;
+    }
+    if (token_kind == TokenKind::Identifier && token_is_if()) {
+        next_token();
+        consume(TokenKind::LeftParen);
+        NodeId statement = allocate_node(NODE_IF_STATEMENT);
+        node_set_a(statement, parse_ast_expression());
+        consume(TokenKind::RightParen);
+        node_set_b(statement, parse_ast_statement());
+        if (token_kind == TokenKind::Identifier && token_is_else()) {
+            next_token();
+            node_set_c(statement, parse_ast_statement());
+        }
+        return statement;
+    }
+    if (token_kind == TokenKind::Identifier && token_is_while()) {
+        next_token();
+        consume(TokenKind::LeftParen);
+        NodeId statement = allocate_node(NODE_WHILE_STATEMENT);
+        node_set_a(statement, parse_ast_expression());
+        consume(TokenKind::RightParen);
+        node_set_b(statement, parse_ast_statement());
+        return statement;
+    }
+
+    NodeId left = parse_ast_expression();
+    if (token_kind == TokenKind::Assign || token_kind == TokenKind::PlusAssign
+        || token_kind == TokenKind::MinusAssign) {
+        if (node_kind(left) != NODE_NAME_EXPRESSION) {
+            fail();
+        }
+        TokenKind operator = token_kind;
+        next_token();
+        NodeId statement = allocate_node(NODE_ASSIGNMENT);
+        node_set_a(statement, left);
+        node_set_b(statement, parse_ast_expression());
+        if (operator == TokenKind::PlusAssign) {
+            node_set_tag(statement, AST_ASSIGNMENT_ADD);
+        } else if (operator == TokenKind::MinusAssign) {
+            node_set_tag(statement, AST_ASSIGNMENT_SUBTRACT);
+        }
+        consume(TokenKind::Semicolon);
+        return statement;
+    }
+    if (node_kind(left) != NODE_CALL_EXPRESSION) {
+        fail();
+    }
+    consume(TokenKind::Semicolon);
+    NodeId statement = allocate_node(NODE_CALL_STATEMENT);
+    node_set_a(statement, left);
+    return statement;
+}
+
+cell parse_ast_type() {
+    if (token_kind != TokenKind::Identifier) {
+        fail();
+    }
+    if (token_is_void()) {
+        next_token();
+        return AST_TYPE_VOID;
+    }
+    if (token_is_cell()) {
+        next_token();
+        return AST_TYPE_CELL;
+    }
+    fail();
+    return AST_TYPE_VOID;
+}
+
+NodeId parse_ast_function() {
+    cell return_type = parse_ast_type();
+    if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+        fail();
+    }
+    NodeId function = allocate_node(NODE_FUNCTION);
+    node_set_tag(function, return_type);
+    node_set_name(function, intern_token_name());
+    next_token();
+    consume(TokenKind::LeftParen);
+
+    NodeId first_parameter;
+    NodeId last_parameter;
+    if (token_kind != TokenKind::RightParen) {
+        cell more = 1;
+        while (more) {
+            if (parse_ast_type() != AST_TYPE_CELL
+                || token_kind != TokenKind::Identifier || token_is_reserved()) {
+                fail();
+            }
+            NodeId parameter = allocate_node(NODE_PARAMETER);
+            node_set_name(parameter, intern_token_name());
+            next_token();
+            if (node_is_null(first_parameter)) {
+                first_parameter = parameter;
+            } else {
+                node_set_next(last_parameter, parameter);
+            }
+            last_parameter = parameter;
+            if (token_kind == TokenKind::Comma) {
+                next_token();
+            } else {
+                more = 0;
+            }
+        }
+    }
+    consume(TokenKind::RightParen);
+    node_set_a(function, first_parameter);
+    node_set_b(function, parse_ast_statement());
+    if (node_kind(node_b(function)) != NODE_BLOCK) {
+        fail();
+    }
+    return function;
+}
+
+void parse_ast_program() {
+    reset_ast_arena();
+    read_character();
+    next_token();
+    while (token_kind != TokenKind::Eof) {
+        NodeId function = parse_ast_function();
+        if (node_is_null(first_function)) {
+            first_function = function;
+        } else {
+            node_set_next(last_function, function);
+        }
+        last_function = function;
+    }
+}

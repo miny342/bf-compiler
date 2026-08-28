@@ -51,6 +51,21 @@ impl StaticLayout {
         config: AbiConfig,
         descriptors: &[GlobalDescriptor],
     ) -> Result<Self, StaticLayoutError> {
+        Self::new_with_capacity_check(config, descriptors, true)
+    }
+
+    pub(crate) fn new_unbounded(
+        config: AbiConfig,
+        descriptors: &[GlobalDescriptor],
+    ) -> Result<Self, StaticLayoutError> {
+        Self::new_with_capacity_check(config, descriptors, false)
+    }
+
+    fn new_with_capacity_check(
+        config: AbiConfig,
+        descriptors: &[GlobalDescriptor],
+        check_capacity: bool,
+    ) -> Result<Self, StaticLayoutError> {
         validate_descriptors(descriptors)?;
 
         let scalar_cells = descriptors
@@ -106,7 +121,9 @@ impl StaticLayout {
             scalar_cells,
             anchor_head: next_head,
         };
-        layout.validate_capacity()?;
+        if check_capacity {
+            layout.validate_capacity()?;
+        }
         Ok(layout)
     }
 

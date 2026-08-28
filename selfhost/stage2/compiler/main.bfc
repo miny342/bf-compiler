@@ -9,5 +9,5 @@ macro compiler_output(value) {
 }
 
 void main() {
-    compile_program();
+    compile_program_stage5();
 }

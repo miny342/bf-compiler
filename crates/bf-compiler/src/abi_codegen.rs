@@ -17,9 +17,23 @@ pub fn compile_continuations(program: &ContinuationProgram) -> Result<String, Ab
     Ok(optimize_bf(&lower_continuations(program)?).to_source())
 }
 
+/// Compile continuation IR without enforcing the standard 30,000-cell tape.
+pub fn compile_continuations_unbounded(
+    program: &ContinuationProgram,
+) -> Result<String, AbiCodegenError> {
+    Ok(optimize_bf(&lower_continuations_unbounded(program)?).to_source())
+}
+
 /// Lower continuation IR to BF IR with the default ABI configuration.
 pub fn lower_continuations(program: &ContinuationProgram) -> Result<BfProgram, AbiCodegenError> {
-    lower_continuations_with_config(program, AbiConfig::default())
+    lower_continuations_with_options(program, AbiConfig::default(), true)
+}
+
+/// Lower continuation IR without enforcing the standard 30,000-cell tape.
+pub fn lower_continuations_unbounded(
+    program: &ContinuationProgram,
+) -> Result<BfProgram, AbiCodegenError> {
+    lower_continuations_with_options(program, AbiConfig::default(), false)
 }
 
 /// Lower continuation IR using an explicitly selected ABI chunk geometry.
@@ -27,11 +41,23 @@ pub fn lower_continuations_with_config(
     program: &ContinuationProgram,
     config: AbiConfig,
 ) -> Result<BfProgram, AbiCodegenError> {
+    lower_continuations_with_options(program, config, true)
+}
+
+fn lower_continuations_with_options(
+    program: &ContinuationProgram,
+    config: AbiConfig,
+    check_capacity: bool,
+) -> Result<BfProgram, AbiCodegenError> {
     let layouts = build_layouts(program, config)?;
-    let static_layout = StaticLayout::new(config, program.globals())?;
+    let static_layout = if check_capacity {
+        StaticLayout::new(config, program.globals())?
+    } else {
+        StaticLayout::new_unbounded(config, program.globals())?
+    };
     let portal = PortalPlan::new(program)?;
     let mut emitter = AbiEmitter::new(program, &layouts, &static_layout, &portal, config);
-    emitter.initialize_main()?;
+    emitter.initialize_main(check_capacity)?;
     emitter.emit_dispatcher()?;
     Ok(BfProgram::new(emitter.output))
 }
@@ -376,12 +402,14 @@ impl<'a> AbiEmitter<'a> {
         }
     }
 
-    fn initialize_main(&mut self) -> Result<(), AbiCodegenError> {
+    fn initialize_main(&mut self, check_capacity: bool) -> Result<(), AbiCodegenError> {
         let function = self.function(self.program.main())?;
         let function_id = function.id();
         let entry = function.entry();
         let frame = self.layout(function_id)?.frame.clone();
-        frame.validate_main_capacity(self.static_layout.anchor_head())?;
+        if check_capacity {
+            frame.validate_main_capacity(self.static_layout.anchor_head())?;
+        }
 
         let stride = self.config.stride();
         let frame_bottom = self.static_layout.anchor_head() + stride;

@@ -1,0 +1,67 @@
+cell[] ast_test_source = "cell first(cell x){return second(x+1);}cell second(cell y){if(y>2)return y;else return 2;}void main(){cell value=first(1);while(value!=0){value-=1;}}";
+
+cell name_first_byte(NodeId name) {
+    NodeId start = node_a(name);
+    return arena_cells[start.page][start.slot];
+}
+
+void test_arena_page_boundary() {
+    reset_ast_arena();
+    cell index;
+    NodeId node;
+    while (index < 0xff) {
+        node = allocate_node(NODE_EMPTY_STATEMENT);
+        index += 1;
+    }
+    expect_test(node.page > 0, 'h');
+    NodeId field = node_field(node, FIELD_NEXT_SLOT);
+    expect_test(field.page >= node.page, 'i');
+}
+
+void test_ast_parser() {
+    reset_test_input(5);
+    parse_ast_program();
+
+    NodeId first = first_function;
+    NodeId second = node_next(first);
+    NodeId main_function = node_next(second);
+    expect_test(node_kind(first) == NODE_FUNCTION
+        && node_tag(first) == AST_TYPE_CELL, 'j');
+    expect_test(name_first_byte(node_name(first)) == 'f', 'k');
+    expect_test(node_kind(node_a(first)) == NODE_PARAMETER, 'l');
+    expect_test(node_kind(node_b(first)) == NODE_BLOCK, 'm');
+    expect_test(name_first_byte(node_name(second)) == 's', 'n');
+    expect_test(node_tag(main_function)
+        == AST_TYPE_VOID && node_is_null(node_next(main_function)), 'o');
+
+    NodeId first_return = node_a(node_b(first));
+    NodeId call = node_a(first_return);
+    expect_test(node_kind(first_return) == NODE_RETURN_STATEMENT, 'p');
+    expect_test(node_kind(call) == NODE_CALL_EXPRESSION
+        && name_first_byte(node_name(call)) == 's', 'q');
+    NodeId argument = node_a(call);
+    expect_test(node_kind(argument) == NODE_BINARY_EXPRESSION
+        && node_tag(argument) == AST_BINARY_ADD, 'r');
+
+    analyze_ast_program();
+    expect_test(node_equals(node_b(call), second), 's');
+    expect_test(node_value(node_a(first)) == 0
+        && node_tag(node_c(first)) == 1, 't');
+    expect_test(node_value(node_c(first)) == 1
+        && node_value(node_c(main_function)) == 1, 'u');
+
+    lower_ast_program();
+    NodeId first_entry = node_a(node_c(first));
+    expect_test(node_kind(first_entry) == NODE_CONTINUATION
+        && node_tag(first_entry) == TERM_CALL, 'v');
+    expect_test(node_equals(node_name(first_entry), second), 'w');
+    NodeId resume = node_b(first_entry);
+    expect_test(node_kind(resume) == NODE_CONTINUATION
+        && node_tag(resume) == TERM_RETURN, 'x');
+    expect_test(node_tag(node_a(resume)) == IR_COPY_ABI_VALUE, 'y');
+    expect_test(node_value(node_c(first)) > 1, 'z');
+
+    reset_capture();
+    emit_continuation_program();
+    expect_test(capture_is_brainfuck() && test_capture_overflow, 'A');
+}

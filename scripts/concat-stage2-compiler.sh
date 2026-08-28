@@ -10,7 +10,7 @@ if [[ "$entry" != main && "$entry" != test ]]; then
 fi
 
 # ファイル境界で字句が連結しないよう、各ソースの後ろに改行を補う。
-for source in "$repo_dir"/selfhost/stage2/compiler/0*.bfc; do
+for source in "$repo_dir"/selfhost/stage2/compiler/[0-9][0-9]_*.bfc; do
     cat "$source"
     printf '\n'
 done

@@ -1,9 +1,9 @@
-// LANGUAGE.mdの初期実装第1〜4段階を対象にするbootstrap BFC compiler。
+// LANGUAGE.mdの初期実装第1〜5段階を対象にするbootstrap BFC compiler。
 //
-// compiler自体は実装済みのversion 1 BFCで記述する。第4段階sourceをinputから
+// compiler自体は実装済みのversion 1 BFCで記述する。第5段階sourceをinputから
 // 読み、Brainfuckを出力する。BFCのinput()仕様に従い、NULを入力終端とする。
 
-const cell MAX_NAME = 16;
+const cell MAX_NAME = 64;
 const cell MAX_SYMBOLS = 16;
 const cell MAX_SCOPES = 16;
 const cell SCRATCH_BASE = 32;
@@ -19,6 +19,7 @@ enum TokenKind {
     RightParen,
     LeftBrace,
     RightBrace,
+    Comma,
     Semicolon,
     Assign,
     EqualEqual,
@@ -42,8 +43,7 @@ cell token_value;
 cell token_length;
 cell[MAX_NAME] token_text;
 
-// Sixteen names of at most sixteen bytes exactly fill one addressable page.
-cell[256] symbol_text;
+cell[MAX_SYMBOLS][MAX_NAME] symbol_text;
 cell[MAX_SYMBOLS] symbol_length;
 cell[MAX_SYMBOLS] symbol_cell;
 cell symbol_count;
