@@ -66,6 +66,34 @@ cargo run -p bf-compiler --example profile_bf_ir -- test.bfc
 生成サイズと1文字ずつ解釈する処理系には大きく効く一方、同種命令をまとめるRLE型targetへの
 実行時効果は小さい。今後のtemplate最適化ではRLE型推定命令数も主要な判断材料にする。
 
+## 二段dispatcher
+
+2026-08-29、Rust backendのdispatcherをcontinuation IDのhigh byteでpage分けした。dispatch cycleでは
+まず存在するhigh-byte pageを照合し、一致したpageのlow-byte caseだけを照合する。user continuation、
+portal accessor、portal resumeは同じpage表へ入る。これによりcase数を`C`、存在するpage数を`P`と
+すると、各caseでlow/highを比較する`O(C)`の全件走査から、high比較`P`件と選択page内の最大256件の
+low比較になる。profile mapには`abi.dispatch.page.*` siteも出力する。
+
+case bodyはcall、return、portal処理によって別contextへdata pointerを移せる。移動先contextの`PcLow`
+はdispatch cycle末まで0なので、low byteが0のcaseをpageの先頭へ置き、移動後に`xx00`を誤dispatch
+しないことをtemplateの不変条件とする。`0x0100`を含む複数page、callによるcontext移動、D=8/16を
+backend testで検査する。
+
+`fizzbuzz.bfc`をrelease buildし、repository fast interpreterでwarm-up後3回の中央値を測った結果は
+次のとおりだった。入力なし、出力は最適化前後で一致した。
+
+| 指標 | 変更前 | 二段dispatcher | 削減率 |
+|---|---:|---:|---:|
+| BF source bytes | 39,516 | 36,867 | 6.70% |
+| 実行BF命令数 | 1,770,938,111 | 1,660,011,088 | 6.26% |
+| RLE型推定命令数 | 1,456,578,134 | 1,329,168,036 | 8.75% |
+| fast IR native operations | 103,829,946 | 73,382,252 | 29.33% |
+| execute wall time | 375.76 ms | 300.57 ms | 20.01% |
+
+最大tape位置は203のままだった。`logs/tmp.bfc`から生成したBF sourceは、文書化済みの変更前
+53,238,909 byteに対して53,033,032 byte（0.39%減）だった。約3000秒かかるfull profile実行は
+この変更の開発時検証では再実行していない。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を

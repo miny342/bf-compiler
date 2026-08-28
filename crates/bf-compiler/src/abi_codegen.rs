@@ -324,6 +324,23 @@ struct PortalSite {
     next_resume: Option<ContinuationId>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DispatchEntry<'a> {
+    Continuation(&'a Continuation),
+    PortalAccessor(PortalAccessor),
+    PortalResume(PortalSite),
+}
+
+impl DispatchEntry<'_> {
+    fn id(self) -> ContinuationId {
+        match self {
+            Self::Continuation(continuation) => continuation.id(),
+            Self::PortalAccessor(accessor) => accessor.id,
+            Self::PortalResume(site) => site.resume,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PortalPlan {
     accessors: Vec<PortalAccessor>,
@@ -643,23 +660,32 @@ impl<'a> AbiEmitter<'a> {
     fn emit_dispatcher(&mut self) -> Result<(), AbiCodegenError> {
         let body = self.capture(|emitter| {
             emitter.move_to(0);
+            let mut pages = BTreeMap::<u8, Vec<DispatchEntry<'_>>>::new();
             for continuation in emitter.program.continuations() {
-                emitter.emit_dispatch_case(continuation)?;
+                pages
+                    .entry((continuation.id().get() >> 8) as u8)
+                    .or_default()
+                    .push(DispatchEntry::Continuation(continuation));
             }
-            let accessors = emitter.portal.accessors.clone();
-            for accessor in accessors {
-                emitter.emit_hidden_dispatch_case(accessor.id, |emitter| {
-                    emitter.emit_aggregate_accessor(accessor)?;
-                    emitter.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
-                    emitter.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
-                    Ok(())
-                })?;
+            for &accessor in &emitter.portal.accessors {
+                pages
+                    .entry((accessor.id.get() >> 8) as u8)
+                    .or_default()
+                    .push(DispatchEntry::PortalAccessor(accessor));
             }
-            let sites = emitter.portal.ordered_sites.clone();
-            for site in sites {
-                emitter.emit_hidden_dispatch_case(site.resume, |emitter| {
-                    emitter.emit_portal_resume(site)
-                })?;
+            for &site in &emitter.portal.ordered_sites {
+                pages
+                    .entry((site.resume.get() >> 8) as u8)
+                    .or_default()
+                    .push(DispatchEntry::PortalResume(site));
+            }
+            for (high, mut entries) in pages {
+                // A dispatched body can migrate to a fresh context whose PcLow
+                // is zero until the end of this dispatcher cycle. Keeping the
+                // zero case first prevents that fresh context from being
+                // mistaken for continuation xx00 later in the same page.
+                entries.sort_by_key(|entry| entry.id().get() as u8);
+                emitter.emit_dispatch_page(high, &entries)?;
             }
             emitter.move_abi_field(AbiField::NextPcLow, AbiField::PcLow);
             emitter.move_abi_field(AbiField::NextPcHigh, AbiField::PcHigh);
@@ -671,9 +697,61 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    fn emit_dispatch_case(&mut self, continuation: &Continuation) -> Result<(), AbiCodegenError> {
-        self.emit_hidden_dispatch_case(continuation.id(), |emitter| {
-            emitter.emit_continuation_body(continuation)
+    fn emit_dispatch_page(
+        &mut self,
+        high: u8,
+        entries: &[DispatchEntry<'a>],
+    ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site(
+            "abi",
+            format!("abi.dispatch.page.{high}"),
+            format!("dispatch page {high}"),
+            |emitter| emitter.emit_dispatch_page_inner(high, entries),
+        )
+    }
+
+    fn emit_dispatch_page_inner(
+        &mut self,
+        high: u8,
+        entries: &[DispatchEntry<'a>],
+    ) -> Result<(), AbiCodegenError> {
+        self.copy_abi_field(AbiField::PcHigh, AbiField::Condition)?;
+        self.add_abi_field(AbiField::Condition, 0_u8.wrapping_sub(high))?;
+        self.set_abi_field(AbiField::Branch, 1)?;
+        self.clear_branch_on_nonzero(AbiField::Condition)?;
+
+        let branch = self.current_abi_offset(AbiField::Branch)?;
+        self.move_to(branch);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            // Once a page matches, make every later page fail. PcLow is kept
+            // until the matching low-byte case consumes it.
+            emitter.clear_abi_field(AbiField::PcHigh)?;
+            for &entry in entries {
+                emitter.emit_dispatch_entry(entry)?;
+            }
+            let branch = emitter.current_abi_offset(AbiField::Branch)?;
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn emit_dispatch_entry(&mut self, entry: DispatchEntry<'a>) -> Result<(), AbiCodegenError> {
+        self.emit_hidden_dispatch_case(entry.id(), |emitter| match entry {
+            DispatchEntry::Continuation(continuation) => {
+                emitter.emit_continuation_body(continuation)
+            }
+            DispatchEntry::PortalAccessor(accessor) => {
+                emitter.emit_aggregate_accessor(accessor)?;
+                emitter.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
+                emitter.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
+                Ok(())
+            }
+            DispatchEntry::PortalResume(site) => emitter.emit_portal_resume(site),
         })
     }
 
@@ -735,17 +813,12 @@ impl<'a> AbiEmitter<'a> {
         self.set_abi_field(AbiField::Branch, 1)?;
         self.clear_branch_on_nonzero(AbiField::Condition)?;
 
-        self.copy_abi_field(AbiField::PcHigh, AbiField::Condition)?;
-        self.add_abi_field(AbiField::Condition, 0_u8.wrapping_sub((id >> 8) as u8))?;
-        self.clear_branch_on_nonzero(AbiField::Condition)?;
-
         let branch = self.current_abi_offset(AbiField::Branch)?;
         self.move_to(branch);
         let body = self.capture(|emitter| {
             emitter.adjust(255);
             emitter.move_to(0);
             emitter.clear_abi_field(AbiField::PcLow)?;
-            emitter.clear_abi_field(AbiField::PcHigh)?;
             body_emitter(emitter)?;
             let next_branch = emitter.current_abi_offset(AbiField::Branch)?;
             emitter.move_to(next_branch);
@@ -2490,6 +2563,138 @@ mod tests {
         let program = ContinuationProgram::new(main, vec![function], vec![continuation]).unwrap();
         let source = compile_continuations(&program).unwrap();
         assert_eq!(run(source.as_bytes(), b"").unwrap(), b"H");
+    }
+
+    #[test]
+    fn dispatcher_selects_low_zero_and_crosses_high_byte_pages() {
+        let main = FunctionId::new(0);
+        let first = id(1);
+        let second = id(0x0100);
+        let third = id(0x0201);
+        let fourth = id(u16::MAX);
+        let function = FunctionDescriptor::new(main, vec![], 1, crate::ValueType::Void, first);
+        let output = |continuation, byte, target| {
+            Continuation::new(
+                continuation,
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::Frame(FrameSlot::new(0)),
+                        value: byte,
+                    },
+                    FrameInstruction::Output {
+                        src: Address::Frame(FrameSlot::new(0)),
+                    },
+                ],
+                target,
+            )
+        };
+        let program = ContinuationProgram::new(
+            main,
+            vec![function],
+            vec![
+                output(first, b'A', Terminator::Goto { target: second }),
+                output(second, b'B', Terminator::Goto { target: third }),
+                output(third, b'C', Terminator::Goto { target: fourth }),
+                output(fourth, b'D', Terminator::Halt),
+            ],
+        )
+        .unwrap();
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"ABCD");
+        }
+
+        let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
+            .expect("profiled dispatcher should compile");
+        assert_eq!(artifact.source, compile_continuations(&program).unwrap());
+        artifact
+            .map
+            .validate_for_source(artifact.source.as_bytes())
+            .unwrap();
+        let page_keys = artifact
+            .map
+            .sites
+            .iter()
+            .filter(|site| site.stable_key.starts_with("abi.dispatch.page."))
+            .map(|site| site.stable_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            page_keys,
+            [
+                "abi.dispatch.page.0",
+                "abi.dispatch.page.1",
+                "abi.dispatch.page.2",
+                "abi.dispatch.page.255"
+            ]
+        );
+    }
+
+    #[test]
+    fn dispatcher_does_not_run_low_zero_after_call_migrates_context() {
+        let main = FunctionId::new(0);
+        let helper = FunctionId::new(1);
+        let main_entry = id(0x0101);
+        let decoy = id(0x0100);
+        let main_resume = id(2);
+        let helper_entry = id(3);
+        let functions = vec![
+            FunctionDescriptor::new(main, vec![], 1, crate::ValueType::Void, main_entry),
+            FunctionDescriptor::new(helper, vec![], 0, crate::ValueType::Void, helper_entry),
+        ];
+        // Keep the xx00 decoy after the entry to exercise the dispatcher's
+        // ordering rather than relying on ContinuationProgram input order.
+        let continuations = vec![
+            Continuation::new(
+                main_entry,
+                main,
+                vec![],
+                Terminator::Call {
+                    callee: helper,
+                    arguments: vec![],
+                    return_to: main_resume,
+                },
+            ),
+            Continuation::new(
+                decoy,
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::Frame(FrameSlot::new(0)),
+                        value: b'X',
+                    },
+                    FrameInstruction::Output {
+                        src: Address::Frame(FrameSlot::new(0)),
+                    },
+                ],
+                Terminator::Halt,
+            ),
+            Continuation::new(
+                main_resume,
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::Frame(FrameSlot::new(0)),
+                        value: b'A',
+                    },
+                    FrameInstruction::Output {
+                        src: Address::Frame(FrameSlot::new(0)),
+                    },
+                ],
+                Terminator::Halt,
+            ),
+            Continuation::new(
+                helper_entry,
+                helper,
+                vec![],
+                Terminator::Return { value: None },
+            ),
+        ];
+        let program = ContinuationProgram::new(main, functions, continuations).unwrap();
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"A");
+        }
     }
 
     #[test]
