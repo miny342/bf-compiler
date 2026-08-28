@@ -3,6 +3,12 @@
 
 use std::error::Error as StdError;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+pub use bf_profiling::{ProfileMap, ProfileSiteId};
 
 /// Number of cells in the standard tape.
 pub const TAPE_LEN: usize = 30_000;
@@ -49,6 +55,80 @@ pub struct OptimizationRunStats {
 pub struct RunResult {
     pub output: Vec<u8>,
     pub stats: RunStats,
+    /// Internal phase timings when requested through [`RunOptions`].
+    pub timings: Option<Timings>,
+    /// Site attribution collected when a profile map was supplied.
+    pub profile: Option<ProfileResult>,
+}
+
+/// Options for the configurable interpreter entry point.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    pub unbounded_tape: bool,
+    pub collect_stats: bool,
+    pub collect_timings: bool,
+    pub profile: Option<ProfileOptions>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileOptions {
+    pub map: ProfileMap,
+    pub mode: ProfileMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileMode {
+    Counters,
+    Sample { interval: Duration },
+    Exact,
+}
+
+/// Durations measured inside the interpreter library.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Timings {
+    pub parse: Duration,
+    pub fast_ir_build: Duration,
+    pub execute: Duration,
+}
+
+/// Dynamic counters attributed to one profile site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SiteCounters {
+    pub fast_operations: u64,
+    pub raw_bf_instructions: u64,
+    pub rle_instructions: u64,
+    pub loop_entries: u64,
+    pub loop_iterations: u64,
+    pub rle_operations: u64,
+    pub clear_loops: u64,
+    pub scan_loops: u64,
+    pub scan_steps: u64,
+    pub transfer_loops: u64,
+    pub transfer_iterations: u64,
+    pub input_operations: u64,
+    pub output_operations: u64,
+    pub pointer_distance: u64,
+    pub maximum_pointer_observed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteProfile {
+    pub site: ProfileSiteId,
+    pub counters: SiteCounters,
+    pub samples: u64,
+    pub exclusive_time: Duration,
+    pub profile_block_executions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileResult {
+    pub sites: Vec<SiteProfile>,
+    pub total_samples: u64,
+    pub sampling_interval: Option<Duration>,
+    pub clock_reads: u64,
+    pub profile_block_executions: u64,
+    pub measured_execute_time: Duration,
+    pub mixed_provenance_native_operations: u64,
 }
 
 /// An error encountered while parsing or running a program.
@@ -58,6 +138,7 @@ pub enum Error {
     UnmatchedClosingBracket { offset: usize },
     TapeUnderflow { instruction_offset: usize },
     TapeOverflow { instruction_offset: usize },
+    ProfileArtifact(String),
     InvalidUtf8Output,
 }
 
@@ -78,6 +159,7 @@ impl fmt::Display for Error {
                 f,
                 "data pointer moved right of the tape at byte offset {instruction_offset}"
             ),
+            Self::ProfileArtifact(message) => write!(f, "profile artifact error: {message}"),
             Self::InvalidUtf8Output => write!(f, "program output is not valid UTF-8"),
         }
     }
@@ -121,6 +203,20 @@ impl Op {
 struct Instruction {
     op: Op,
     source_offset: usize,
+    site: ResolvedProfileSite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedProfileSite {
+    id: ProfileSiteId,
+    slot: usize,
+}
+
+impl ResolvedProfileSite {
+    const ROOT: Self = Self {
+        id: ProfileSiteId(0),
+        slot: 0,
+    };
 }
 
 /// Runs a Brainfuck program with byte-oriented input and output.
@@ -138,9 +234,14 @@ pub fn run_unbounded(source: &[u8], input: &[u8]) -> Result<Vec<u8>, Error> {
 
 /// Runs a Brainfuck program and returns its output and execution measurements.
 pub fn run_with_stats(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
-    let instructions = parse(source)?;
-    let optimized = optimize(&instructions);
-    execute(&optimized, input, false)
+    run_with_options(
+        source,
+        input,
+        RunOptions {
+            collect_stats: true,
+            ..RunOptions::default()
+        },
+    )
 }
 
 /// Runs a program on a tape that grows to the right when necessary.
@@ -149,9 +250,69 @@ pub fn run_with_stats(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
 /// of cell zero remains an error, and instruction accounting is identical to
 /// [`run_with_stats`].
 pub fn run_unbounded_with_stats(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
-    let instructions = parse(source)?;
-    let optimized = optimize(&instructions);
-    execute(&optimized, input, true)
+    run_with_options(
+        source,
+        input,
+        RunOptions {
+            unbounded_tape: true,
+            collect_stats: true,
+            ..RunOptions::default()
+        },
+    )
+}
+
+/// Runs a program with optional timings and site attribution.
+pub fn run_with_options(
+    source: &[u8],
+    input: &[u8],
+    options: RunOptions,
+) -> Result<RunResult, Error> {
+    if let Some(profile) = &options.profile {
+        if matches!(profile.mode, ProfileMode::Sample { interval } if interval.is_zero()) {
+            return Err(Error::ProfileArtifact(
+                "sampling interval must be greater than zero".into(),
+            ));
+        }
+        profile
+            .map
+            .validate_for_source(source)
+            .map_err(|error| Error::ProfileArtifact(error.to_string()))?;
+    }
+
+    let parse_started = options.collect_timings.then(Instant::now);
+    let instructions = parse_with_profile(source, options.profile.as_ref().map(|p| &p.map))?;
+    let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
+    let build_started = options.collect_timings.then(Instant::now);
+    let optimized = optimize(
+        &instructions,
+        options.profile.as_ref().map(|profile| &profile.map),
+    );
+    let build_elapsed = build_started.map_or(Duration::ZERO, |started| started.elapsed());
+    let execute_started = (options.collect_timings || options.profile.is_some()).then(Instant::now);
+    let mut result = execute(
+        &optimized,
+        input,
+        options.unbounded_tape,
+        options.profile.as_ref(),
+    )?;
+    let execute_elapsed = execute_started.map_or(Duration::ZERO, |started| started.elapsed());
+    if options.collect_timings {
+        result.timings = Some(Timings {
+            parse: parse_elapsed,
+            fast_ir_build: build_elapsed,
+            execute: execute_elapsed,
+        });
+    }
+    if let Some(profile) = &mut result.profile {
+        profile.measured_execute_time = execute_elapsed;
+        if profile.total_samples != 0 {
+            for site in &mut profile.sites {
+                site.exclusive_time =
+                    execute_elapsed.mul_f64(site.samples as f64 / profile.total_samples as f64);
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// String convenience wrapper around [`run`].
@@ -163,9 +324,29 @@ pub fn run_str(source: &str, input: &str) -> Result<String, Error> {
     String::from_utf8(output).map_err(|_| Error::InvalidUtf8Output)
 }
 
+#[cfg(test)]
 fn parse(source: &[u8]) -> Result<Vec<Instruction>, Error> {
+    parse_with_profile(source, None)
+}
+
+fn parse_with_profile(
+    source: &[u8],
+    profile_map: Option<&ProfileMap>,
+) -> Result<Vec<Instruction>, Error> {
     let mut instructions: Vec<Instruction> = Vec::new();
     let mut openings = Vec::new();
+    let mut range_index = 0_usize;
+    let range_slots = profile_map.map(|map| {
+        map.ranges
+            .iter()
+            .map(|range| {
+                map.sites
+                    .iter()
+                    .position(|site| site.id == range.site)
+                    .expect("validated profile range references a known site")
+            })
+            .collect::<Vec<_>>()
+    });
 
     for (source_offset, byte) in source.iter().copied().enumerate() {
         let op = match byte {
@@ -191,7 +372,23 @@ fn parse(source: &[u8]) -> Result<Vec<Instruction>, Error> {
             }
             _ => continue,
         };
-        instructions.push(Instruction { op, source_offset });
+        let ordinal = instructions.len() as u64;
+        let site = profile_map
+            .map(|map| {
+                while map.ranges[range_index].end <= ordinal {
+                    range_index += 1;
+                }
+                ResolvedProfileSite {
+                    id: map.ranges[range_index].site,
+                    slot: range_slots.as_ref().unwrap()[range_index],
+                }
+            })
+            .unwrap_or(ResolvedProfileSite::ROOT);
+        instructions.push(Instruction {
+            op,
+            source_offset,
+            site,
+        });
     }
 
     if let Some(opening_index) = openings.first().copied() {
@@ -206,19 +403,53 @@ fn parse(source: &[u8]) -> Result<Vec<Instruction>, Error> {
 #[derive(Debug, Clone)]
 enum FastInstruction {
     Move {
+        site: ResolvedProfileSite,
+        mixed: bool,
         amount: isize,
         source_offsets: Box<[usize]>,
     },
     Add {
+        site: ResolvedProfileSite,
+        mixed: bool,
         amount: u8,
         raw_count: u64,
     },
-    Input,
-    Output,
+    Input {
+        site: ResolvedProfileSite,
+        mixed: bool,
+    },
+    Output {
+        site: ResolvedProfileSite,
+        mixed: bool,
+    },
     Loop {
+        site: ResolvedProfileSite,
+        mixed: bool,
         body: Vec<FastInstruction>,
         optimization: Option<LoopOptimization>,
     },
+}
+
+impl FastInstruction {
+    const fn site(&self) -> ResolvedProfileSite {
+        match self {
+            Self::Move { site, .. }
+            | Self::Add { site, .. }
+            | Self::Input { site, .. }
+            | Self::Output { site, .. }
+            | Self::Loop { site, .. } => *site,
+        }
+    }
+
+    const fn mixed_provenance(&self) -> bool {
+        match self {
+            Self::Move { mixed, .. }
+            | Self::Add { mixed, .. }
+            | Self::Input { mixed, .. }
+            | Self::Output { mixed, .. }
+            | Self::Loop { mixed, .. } => *mixed,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -239,22 +470,38 @@ enum LoopOptimization {
         max_offset: isize,
         body_raw_count: u64,
         body_rle_count: u64,
+        body_pointer_distance: u64,
     },
 }
 
-fn optimize(instructions: &[Instruction]) -> Vec<FastInstruction> {
-    optimize_range(instructions, 0, instructions.len())
+fn optimize(
+    instructions: &[Instruction],
+    profile_map: Option<&ProfileMap>,
+) -> Vec<FastInstruction> {
+    optimize_range(instructions, 0, instructions.len(), profile_map)
 }
 
-fn optimize_range(instructions: &[Instruction], start: usize, end: usize) -> Vec<FastInstruction> {
+fn optimize_range(
+    instructions: &[Instruction],
+    start: usize,
+    end: usize,
+    profile_map: Option<&ProfileMap>,
+) -> Vec<FastInstruction> {
     let mut result = Vec::new();
     let mut position = start;
     while position < end {
         match instructions[position].op {
             Op::Right | Op::Left => {
                 let op = instructions[position].op;
+                let mut site = instructions[position].site;
+                let mut mixed = false;
                 let run_start = position;
                 while position < end && instructions[position].op == op {
+                    if profile_map.is_some() {
+                        mixed |= site.id != instructions[position].site.id;
+                        site =
+                            lowest_common_ancestor(profile_map, site, instructions[position].site);
+                    }
                     position += 1;
                 }
                 let count = position - run_start;
@@ -270,14 +517,23 @@ fn optimize_range(instructions: &[Instruction], start: usize, end: usize) -> Vec
                     .collect::<Vec<_>>()
                     .into_boxed_slice();
                 result.push(FastInstruction::Move {
+                    site,
+                    mixed,
                     amount,
                     source_offsets,
                 });
             }
             Op::Increment | Op::Decrement => {
                 let op = instructions[position].op;
+                let mut site = instructions[position].site;
+                let mut mixed = false;
                 let run_start = position;
                 while position < end && instructions[position].op == op {
+                    if profile_map.is_some() {
+                        mixed |= site.id != instructions[position].site.id;
+                        site =
+                            lowest_common_ancestor(profile_map, site, instructions[position].site);
+                    }
                     position += 1;
                 }
                 let count = position - run_start;
@@ -288,29 +544,86 @@ fn optimize_range(instructions: &[Instruction], start: usize, end: usize) -> Vec
                     0_u8.wrapping_sub(magnitude)
                 };
                 result.push(FastInstruction::Add {
+                    site,
+                    mixed,
                     amount,
                     raw_count: count as u64,
                 });
             }
             Op::Input => {
-                result.push(FastInstruction::Input);
+                result.push(FastInstruction::Input {
+                    site: instructions[position].site,
+                    mixed: false,
+                });
                 position += 1;
             }
             Op::Output => {
-                result.push(FastInstruction::Output);
+                result.push(FastInstruction::Output {
+                    site: instructions[position].site,
+                    mixed: false,
+                });
                 position += 1;
             }
             Op::JumpIfZero(target) => {
                 let closing = target - 1;
-                let body = optimize_range(instructions, position + 1, closing);
+                let body = optimize_range(instructions, position + 1, closing, profile_map);
                 let optimization = recognize_loop(instructions, position + 1, closing, &body);
-                result.push(FastInstruction::Loop { body, optimization });
+                let site = instructions[position].site;
+                let mixed = optimization.is_some()
+                    && body
+                        .iter()
+                        .any(|instruction| instruction.site().id != site.id);
+                result.push(FastInstruction::Loop {
+                    site,
+                    mixed,
+                    body,
+                    optimization,
+                });
                 position = target;
             }
             Op::JumpIfNonZero(_) => unreachable!("loop closing is consumed with its opening"),
         }
     }
     result
+}
+
+fn lowest_common_ancestor(
+    profile_map: Option<&ProfileMap>,
+    left: ResolvedProfileSite,
+    right: ResolvedProfileSite,
+) -> ResolvedProfileSite {
+    if left.id == right.id {
+        return left;
+    }
+    let Some(profile_map) = profile_map else {
+        return ResolvedProfileSite::ROOT;
+    };
+    let parent = |id: ProfileSiteId| {
+        profile_map
+            .sites
+            .iter()
+            .find(|site| site.id == id)
+            .and_then(|site| site.parent)
+    };
+    let mut ancestors = std::collections::HashSet::new();
+    let mut current = Some(left.id);
+    while let Some(site) = current {
+        ancestors.insert(site);
+        current = parent(site);
+    }
+    let mut current = Some(right.id);
+    while let Some(site) = current {
+        if ancestors.contains(&site) {
+            let slot = profile_map
+                .sites
+                .iter()
+                .position(|metadata| metadata.id == site)
+                .expect("validated parent references a known site");
+            return ResolvedProfileSite { id: site, slot };
+        }
+        current = parent(site);
+    }
+    ResolvedProfileSite::ROOT
 }
 
 fn recognize_loop(
@@ -323,7 +636,11 @@ fn recognize_loop(
         return None;
     }
 
-    if let [FastInstruction::Add { amount, raw_count }] = body
+    if let [
+        FastInstruction::Add {
+            amount, raw_count, ..
+        },
+    ] = body
         && amount % 2 == 1
     {
         return Some(LoopOptimization::Clear {
@@ -337,6 +654,7 @@ fn recognize_loop(
         FastInstruction::Move {
             amount,
             source_offsets,
+            ..
         },
     ] = body
     {
@@ -352,6 +670,7 @@ fn recognize_loop(
     let mut updates = std::collections::BTreeMap::<isize, u8>::new();
     let mut previous = None;
     let mut rle_count = 0_u64;
+    let mut pointer_distance = 0_u64;
 
     for instruction in &instructions[start..end] {
         let rle_op = instruction.op.rle_op()?;
@@ -361,10 +680,12 @@ fn recognize_loop(
         }
         match instruction.op {
             Op::Right => {
+                pointer_distance += 1;
                 pointer += 1;
                 max_offset = max_offset.max(pointer);
             }
             Op::Left => {
+                pointer_distance += 1;
                 pointer -= 1;
                 min_offset = min_offset.min(pointer);
             }
@@ -392,7 +713,98 @@ fn recognize_loop(
         max_offset,
         body_raw_count: (end - start) as u64,
         body_rle_count: rle_count,
+        body_pointer_distance: pointer_distance,
     })
+}
+
+const INACTIVE_PROFILE_SITE: u32 = u32::MAX;
+
+struct ProfileCollector {
+    sites: Vec<SiteProfile>,
+    exact: bool,
+}
+
+impl ProfileCollector {
+    fn new(options: &ProfileOptions) -> Self {
+        let sites = options
+            .map
+            .sites
+            .iter()
+            .map(|site| SiteProfile {
+                site: site.id,
+                counters: SiteCounters::default(),
+                samples: 0,
+                exclusive_time: Duration::ZERO,
+                profile_block_executions: 0,
+            })
+            .collect();
+        Self {
+            sites,
+            exact: options.mode == ProfileMode::Exact,
+        }
+    }
+
+    fn site_mut(&mut self, site: ResolvedProfileSite) -> &mut SiteProfile {
+        &mut self.sites[site.slot]
+    }
+}
+
+struct SamplingSession {
+    current_site: Arc<AtomicU32>,
+    stop: Arc<AtomicBool>,
+    samples: Arc<Vec<AtomicU64>>,
+    interval: Duration,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl SamplingSession {
+    fn start(options: Option<&ProfileOptions>, site_slots: usize) -> Option<Self> {
+        let ProfileMode::Sample { interval } = options?.mode else {
+            return None;
+        };
+        let current_site = Arc::new(AtomicU32::new(INACTIVE_PROFILE_SITE));
+        let stop = Arc::new(AtomicBool::new(false));
+        let samples = Arc::new(
+            (0..site_slots)
+                .map(|_| AtomicU64::new(0))
+                .collect::<Vec<_>>(),
+        );
+        let thread_site = Arc::clone(&current_site);
+        let thread_stop = Arc::clone(&stop);
+        let thread_samples = Arc::clone(&samples);
+        let handle = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                thread::park_timeout(interval);
+                let site = thread_site.load(Ordering::Relaxed);
+                if let Some(counter) = thread_samples.get(site as usize) {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        Some(Self {
+            current_site,
+            stop,
+            samples,
+            interval,
+            handle: Some(handle),
+        })
+    }
+
+    fn finish(mut self) -> (Vec<u64>, Duration) {
+        self.current_site
+            .store(INACTIVE_PROFILE_SITE, Ordering::Release);
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+        let samples = self
+            .samples
+            .iter()
+            .map(|sample| sample.load(Ordering::Relaxed))
+            .collect();
+        (samples, self.interval)
+    }
 }
 
 struct Machine<'a> {
@@ -406,10 +818,21 @@ struct Machine<'a> {
     executed_rle_instructions: u64,
     optimization: OptimizationRunStats,
     grow_tape: bool,
+    profile: Option<ProfileCollector>,
+    sampled_site: Option<Arc<AtomicU32>>,
+    published_sample_site: u32,
+    clock_reads: u64,
+    profile_block_executions: u64,
+    mixed_provenance_native_operations: u64,
 }
 
 impl<'a> Machine<'a> {
-    fn new(input: &'a [u8], grow_tape: bool) -> Self {
+    fn new(
+        input: &'a [u8],
+        grow_tape: bool,
+        profile_options: Option<&ProfileOptions>,
+        sampled_site: Option<Arc<AtomicU32>>,
+    ) -> Self {
         Self {
             tape: vec![0; TAPE_LEN],
             pointer: 0,
@@ -421,50 +844,87 @@ impl<'a> Machine<'a> {
             executed_rle_instructions: 0,
             optimization: OptimizationRunStats::default(),
             grow_tape,
+            profile: profile_options.map(ProfileCollector::new),
+            sampled_site,
+            published_sample_site: INACTIVE_PROFILE_SITE,
+            clock_reads: 0,
+            profile_block_executions: 0,
+            mixed_provenance_native_operations: 0,
         }
     }
 
-    fn add_counts(&mut self, raw: u64, rle: u64) {
+    fn add_counts(&mut self, site: ResolvedProfileSite, raw: u64, rle: u64) {
+        self.executed_instructions += raw;
+        self.executed_rle_instructions += rle;
+        if let Some(profile) = &mut self.profile {
+            let counters = &mut profile.site_mut(site).counters;
+            counters.raw_bf_instructions += raw;
+            counters.rle_instructions += rle;
+        }
+    }
+
+    fn publish_sample_site(&mut self, site: ResolvedProfileSite) {
+        let slot = u32::try_from(site.slot).expect("profile site count fits in u32");
+        if self.published_sample_site != slot {
+            if let Some(sampled_site) = &self.sampled_site {
+                sampled_site.store(slot, Ordering::Release);
+            }
+            self.published_sample_site = slot;
+        }
+    }
+
+    fn execute_block(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
+        if self.profile.is_none() {
+            self.execute_block_unprofiled(instructions)
+        } else {
+            self.execute_block_profiled(instructions)
+        }
+    }
+
+    fn add_counts_unprofiled(&mut self, raw: u64, rle: u64) {
         self.executed_instructions += raw;
         self.executed_rle_instructions += rle;
     }
 
-    fn execute_block(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
+    fn execute_block_unprofiled(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
         for instruction in instructions {
             self.optimization.executed_native_operations += 1;
             match instruction {
                 FastInstruction::Move {
                     amount,
                     source_offsets,
+                    ..
                 } => {
                     self.optimization.rle_operations += 1;
-                    self.add_counts(source_offsets.len() as u64, 1);
+                    self.add_counts_unprofiled(source_offsets.len() as u64, 1);
                     self.move_pointer(*amount, source_offsets)?;
                 }
-                FastInstruction::Add { amount, raw_count } => {
+                FastInstruction::Add {
+                    amount, raw_count, ..
+                } => {
                     self.optimization.rle_operations += 1;
-                    self.add_counts(*raw_count, 1);
+                    self.add_counts_unprofiled(*raw_count, 1);
                     self.tape[self.pointer] = self.tape[self.pointer].wrapping_add(*amount);
                 }
-                FastInstruction::Input => {
-                    self.add_counts(1, 1);
+                FastInstruction::Input { .. } => {
+                    self.add_counts_unprofiled(1, 1);
                     self.tape[self.pointer] =
                         self.input.get(self.input_position).copied().unwrap_or(0);
                     self.input_position = self.input_position.saturating_add(1);
                 }
-                FastInstruction::Output => {
-                    self.add_counts(1, 1);
+                FastInstruction::Output { .. } => {
+                    self.add_counts_unprofiled(1, 1);
                     self.output.push(self.tape[self.pointer]);
                 }
-                FastInstruction::Loop { body, optimization } => {
-                    self.execute_loop(body, optimization.as_ref())?;
-                }
+                FastInstruction::Loop {
+                    body, optimization, ..
+                } => self.execute_loop_unprofiled(body, optimization.as_ref())?,
             }
         }
         Ok(())
     }
 
-    fn execute_loop(
+    fn execute_loop_unprofiled(
         &mut self,
         body: &[FastInstruction],
         optimization: Option<&LoopOptimization>,
@@ -477,7 +937,7 @@ impl<'a> Machine<'a> {
             }) => {
                 self.optimization.clear_loops += 1;
                 let iterations = iterations_to_zero(self.tape[self.pointer], *delta);
-                self.add_counts(
+                self.add_counts_unprofiled(
                     1 + iterations * (body_raw_count + 1),
                     1 + iterations * (body_rle_count + 1),
                 );
@@ -489,13 +949,13 @@ impl<'a> Machine<'a> {
                 source_offsets,
             }) => {
                 self.optimization.scan_loops += 1;
-                self.add_counts(1, 1);
+                self.add_counts_unprofiled(1, 1);
                 while self.tape[self.pointer] != 0 {
                     self.optimization.scan_steps += 1;
                     self.optimization.rle_operations += 1;
-                    self.add_counts(source_offsets.len() as u64, 1);
+                    self.add_counts_unprofiled(source_offsets.len() as u64, 1);
                     self.move_pointer(*amount, source_offsets)?;
-                    self.add_counts(1, 1);
+                    self.add_counts_unprofiled(1, 1);
                 }
                 Ok(())
             }
@@ -506,6 +966,7 @@ impl<'a> Machine<'a> {
                 max_offset,
                 body_raw_count,
                 body_rle_count,
+                body_pointer_distance: _,
             }) => {
                 let initial = self.tape[self.pointer];
                 let iterations = if initial == 0 {
@@ -518,12 +979,12 @@ impl<'a> Machine<'a> {
                 if iterations != 0
                     && (!self.offset_is_valid(*min_offset) || !self.offset_is_valid(*max_offset))
                 {
-                    return self.execute_generic_loop(body);
+                    return self.execute_generic_loop_unprofiled(body);
                 }
 
                 self.optimization.transfer_loops += 1;
                 self.optimization.transfer_iterations += iterations;
-                self.add_counts(
+                self.add_counts_unprofiled(
                     1 + iterations * (body_raw_count + 1),
                     1 + iterations * (body_rle_count + 1),
                 );
@@ -548,17 +1009,252 @@ impl<'a> Machine<'a> {
                 }
                 Ok(())
             }
-            None => self.execute_generic_loop(body),
+            None => self.execute_generic_loop_unprofiled(body),
         }
     }
 
-    fn execute_generic_loop(&mut self, body: &[FastInstruction]) -> Result<(), Error> {
-        self.add_counts(1, 1);
+    fn execute_generic_loop_unprofiled(&mut self, body: &[FastInstruction]) -> Result<(), Error> {
+        self.add_counts_unprofiled(1, 1);
         while self.tape[self.pointer] != 0 {
-            self.execute_block(body)?;
-            self.add_counts(1, 1);
+            self.execute_block_unprofiled(body)?;
+            self.add_counts_unprofiled(1, 1);
         }
         Ok(())
+    }
+
+    fn execute_block_profiled(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
+        for instruction in instructions {
+            let site = instruction.site();
+            if self.sampled_site.is_some() {
+                self.publish_sample_site(site);
+            }
+            if instruction.mixed_provenance() {
+                self.mixed_provenance_native_operations += 1;
+            }
+            self.optimization.executed_native_operations += 1;
+            let exact = self.profile.as_ref().is_some_and(|profile| profile.exact);
+            let started = exact.then(Instant::now);
+            if exact {
+                self.clock_reads += 1;
+            }
+            self.profile_block_executions += 1;
+            if let Some(profile) = &mut self.profile {
+                let site_profile = profile.site_mut(site);
+                site_profile.counters.fast_operations += 1;
+                site_profile.counters.maximum_pointer_observed = site_profile
+                    .counters
+                    .maximum_pointer_observed
+                    .max(self.pointer);
+                site_profile.profile_block_executions += 1;
+            }
+            let nested_time = match instruction {
+                FastInstruction::Move {
+                    amount,
+                    source_offsets,
+                    ..
+                } => {
+                    self.optimization.rle_operations += 1;
+                    self.add_counts(site, source_offsets.len() as u64, 1);
+                    if let Some(profile) = &mut self.profile {
+                        let counters = &mut profile.site_mut(site).counters;
+                        counters.rle_operations += 1;
+                        counters.pointer_distance += source_offsets.len() as u64;
+                    }
+                    self.move_pointer(*amount, source_offsets)?;
+                    Duration::ZERO
+                }
+                FastInstruction::Add {
+                    amount, raw_count, ..
+                } => {
+                    self.optimization.rle_operations += 1;
+                    self.add_counts(site, *raw_count, 1);
+                    if let Some(profile) = &mut self.profile {
+                        profile.site_mut(site).counters.rle_operations += 1;
+                    }
+                    self.tape[self.pointer] = self.tape[self.pointer].wrapping_add(*amount);
+                    Duration::ZERO
+                }
+                FastInstruction::Input { .. } => {
+                    self.add_counts(site, 1, 1);
+                    if let Some(profile) = &mut self.profile {
+                        profile.site_mut(site).counters.input_operations += 1;
+                    }
+                    self.tape[self.pointer] =
+                        self.input.get(self.input_position).copied().unwrap_or(0);
+                    self.input_position = self.input_position.saturating_add(1);
+                    Duration::ZERO
+                }
+                FastInstruction::Output { .. } => {
+                    self.add_counts(site, 1, 1);
+                    if let Some(profile) = &mut self.profile {
+                        profile.site_mut(site).counters.output_operations += 1;
+                    }
+                    self.output.push(self.tape[self.pointer]);
+                    Duration::ZERO
+                }
+                FastInstruction::Loop {
+                    body, optimization, ..
+                } => {
+                    if let Some(profile) = &mut self.profile {
+                        profile.site_mut(site).counters.loop_entries += 1;
+                    }
+                    self.execute_loop(site, body, optimization.as_ref())?
+                }
+            };
+            if let Some(started) = started {
+                let elapsed = started.elapsed();
+                self.clock_reads += 1;
+                if let Some(profile) = &mut self.profile {
+                    profile.site_mut(site).exclusive_time += elapsed.saturating_sub(nested_time);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_loop(
+        &mut self,
+        site: ResolvedProfileSite,
+        body: &[FastInstruction],
+        optimization: Option<&LoopOptimization>,
+    ) -> Result<Duration, Error> {
+        match optimization {
+            Some(LoopOptimization::Clear {
+                delta,
+                body_raw_count,
+                body_rle_count,
+            }) => {
+                self.optimization.clear_loops += 1;
+                let iterations = iterations_to_zero(self.tape[self.pointer], *delta);
+                self.add_counts(
+                    site,
+                    1 + iterations * (body_raw_count + 1),
+                    1 + iterations * (body_rle_count + 1),
+                );
+                if let Some(profile) = &mut self.profile {
+                    let counters = &mut profile.site_mut(site).counters;
+                    counters.clear_loops += 1;
+                    counters.loop_iterations += iterations;
+                }
+                self.tape[self.pointer] = 0;
+                Ok(Duration::ZERO)
+            }
+            Some(LoopOptimization::Scan {
+                amount,
+                source_offsets,
+            }) => {
+                self.optimization.scan_loops += 1;
+                self.add_counts(site, 1, 1);
+                if let Some(profile) = &mut self.profile {
+                    profile.site_mut(site).counters.scan_loops += 1;
+                }
+                let mut iterations = 0_u64;
+                while self.tape[self.pointer] != 0 {
+                    iterations += 1;
+                    self.optimization.scan_steps += 1;
+                    self.optimization.rle_operations += 1;
+                    self.add_counts(site, source_offsets.len() as u64, 1);
+                    self.move_pointer(*amount, source_offsets)?;
+                    self.add_counts(site, 1, 1);
+                }
+                if let Some(profile) = &mut self.profile {
+                    let counters = &mut profile.site_mut(site).counters;
+                    counters.loop_iterations += iterations;
+                    counters.scan_steps += iterations;
+                    counters.rle_operations += iterations;
+                    counters.pointer_distance += iterations * source_offsets.len() as u64;
+                }
+                Ok(Duration::ZERO)
+            }
+            Some(LoopOptimization::Transfer {
+                source_delta,
+                updates,
+                min_offset,
+                max_offset,
+                body_raw_count,
+                body_rle_count,
+                body_pointer_distance,
+            }) => {
+                let initial = self.tape[self.pointer];
+                let iterations = if initial == 0 {
+                    0
+                } else if *source_delta == 255 {
+                    u64::from(initial)
+                } else {
+                    u64::from(0_u8.wrapping_sub(initial))
+                };
+                if iterations != 0
+                    && (!self.offset_is_valid(*min_offset) || !self.offset_is_valid(*max_offset))
+                {
+                    return self.execute_generic_loop(site, body);
+                }
+
+                self.optimization.transfer_loops += 1;
+                self.optimization.transfer_iterations += iterations;
+                self.add_counts(
+                    site,
+                    1 + iterations * (body_raw_count + 1),
+                    1 + iterations * (body_rle_count + 1),
+                );
+                if let Some(profile) = &mut self.profile {
+                    let counters = &mut profile.site_mut(site).counters;
+                    counters.transfer_loops += 1;
+                    counters.transfer_iterations += iterations;
+                    counters.loop_iterations += iterations;
+                    counters.pointer_distance += iterations * body_pointer_distance;
+                }
+                if iterations != 0 {
+                    if self.grow_tape && *max_offset > 0 {
+                        let reached = self.pointer.checked_add_signed(*max_offset).unwrap();
+                        if reached >= self.tape.len() {
+                            self.tape.resize(reached + 1, 0);
+                        }
+                    }
+                    let factor = iterations as u8;
+                    for &(offset, update) in updates.iter() {
+                        let target = self.pointer.checked_add_signed(offset).unwrap();
+                        self.tape[target] =
+                            self.tape[target].wrapping_add(update.wrapping_mul(factor));
+                    }
+                    if *max_offset > 0 {
+                        let reached = self.pointer.checked_add_signed(*max_offset).unwrap();
+                        self.max_pointer = self.max_pointer.max(reached);
+                    }
+                    self.tape[self.pointer] = 0;
+                }
+                Ok(Duration::ZERO)
+            }
+            None => self.execute_generic_loop(site, body),
+        }
+    }
+
+    fn execute_generic_loop(
+        &mut self,
+        site: ResolvedProfileSite,
+        body: &[FastInstruction],
+    ) -> Result<Duration, Error> {
+        self.add_counts(site, 1, 1);
+        let mut nested_time = Duration::ZERO;
+        let mut iterations = 0_u64;
+        let exact = self.profile.as_ref().is_some_and(|profile| profile.exact);
+        while self.tape[self.pointer] != 0 {
+            iterations += 1;
+            let body_started = exact.then(|| {
+                self.clock_reads += 1;
+                Instant::now()
+            });
+            self.execute_block(body)?;
+            if let Some(body_started) = body_started {
+                nested_time += body_started.elapsed();
+                self.clock_reads += 1;
+            }
+            self.publish_sample_site(site);
+            self.add_counts(site, 1, 1);
+        }
+        if let Some(profile) = &mut self.profile {
+            profile.site_mut(site).counters.loop_iterations += iterations;
+        }
+        Ok(nested_time)
     }
 
     fn offset_is_valid(&self, offset: isize) -> bool {
@@ -615,9 +1311,43 @@ fn execute(
     instructions: &[FastInstruction],
     input: &[u8],
     grow_tape: bool,
+    profile_options: Option<&ProfileOptions>,
 ) -> Result<RunResult, Error> {
-    let mut machine = Machine::new(input, grow_tape);
-    machine.execute_block(instructions)?;
+    let site_slots = profile_options.map_or(0, |options| options.map.sites.len());
+    let sampling = SamplingSession::start(profile_options, site_slots);
+    let sampled_site = sampling
+        .as_ref()
+        .map(|session| Arc::clone(&session.current_site));
+    let mut machine = Machine::new(input, grow_tape, profile_options, sampled_site);
+    let execution = machine.execute_block(instructions);
+    if let Some(sampled_site) = &machine.sampled_site {
+        sampled_site.store(INACTIVE_PROFILE_SITE, Ordering::Release);
+    }
+    let sample_result = sampling.map(SamplingSession::finish);
+    execution?;
+
+    let profile = machine.profile.take().map(|mut collector| {
+        let (sample_counts, sampling_interval) = match sample_result {
+            Some((samples, interval)) => (Some(samples), Some(interval)),
+            None => (None, None),
+        };
+        let mut total_samples = 0_u64;
+        if let Some(sample_counts) = sample_counts {
+            for (slot, site) in collector.sites.iter_mut().enumerate() {
+                site.samples = sample_counts[slot];
+                total_samples += site.samples;
+            }
+        }
+        ProfileResult {
+            sites: collector.sites,
+            total_samples,
+            sampling_interval,
+            clock_reads: machine.clock_reads,
+            profile_block_executions: machine.profile_block_executions,
+            measured_execute_time: Duration::ZERO,
+            mixed_provenance_native_operations: machine.mixed_provenance_native_operations,
+        }
+    });
     Ok(RunResult {
         output: machine.output,
         stats: RunStats {
@@ -626,6 +1356,8 @@ fn execute(
             max_pointer: machine.max_pointer,
             optimization: machine.optimization,
         },
+        timings: None,
+        profile,
     })
 }
 
@@ -717,12 +1449,18 @@ fn execute_reference(instructions: &[Instruction], input: &[u8]) -> Result<RunRe
             max_pointer,
             optimization: OptimizationRunStats::default(),
         },
+        timings: None,
+        profile: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bf_profiling::{
+        PROFILE_MAP_FORMAT, PROFILE_MAP_VERSION, ProfileRange, ProfileSite, bf_identity,
+    };
+    use std::collections::BTreeMap;
 
     fn run_reference(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
         let instructions = parse(source)?;
@@ -743,6 +1481,45 @@ mod tests {
         );
         assert_eq!(optimized.stats.max_pointer, reference.stats.max_pointer);
         optimized
+    }
+
+    fn test_profile_map(source: &[u8], ranges: Vec<ProfileRange>) -> ProfileMap {
+        ProfileMap {
+            format: PROFILE_MAP_FORMAT.into(),
+            version: PROFILE_MAP_VERSION,
+            bf: bf_identity(source),
+            files: Vec::new(),
+            sites: vec![
+                ProfileSite {
+                    id: ProfileSiteId(0),
+                    parent: None,
+                    kind: "artifact".into(),
+                    stable_key: "artifact.root".into(),
+                    label: "test".into(),
+                    source: None,
+                    attributes: BTreeMap::new(),
+                },
+                ProfileSite {
+                    id: ProfileSiteId(1),
+                    parent: Some(ProfileSiteId(0)),
+                    kind: "test".into(),
+                    stable_key: "test.one".into(),
+                    label: "one".into(),
+                    source: None,
+                    attributes: BTreeMap::new(),
+                },
+                ProfileSite {
+                    id: ProfileSiteId(2),
+                    parent: Some(ProfileSiteId(0)),
+                    kind: "test".into(),
+                    stable_key: "test.two".into(),
+                    label: "two".into(),
+                    source: None,
+                    attributes: BTreeMap::new(),
+                },
+            ],
+            ranges,
+        }
     }
 
     #[test]
@@ -902,5 +1679,298 @@ mod tests {
             scan.push_str("[>].");
             assert_matches_reference(scan.as_bytes(), b"");
         }
+    }
+
+    #[test]
+    fn profile_counters_preserve_semantics_and_global_counts() {
+        let source = b"+++.>";
+        let map = test_profile_map(
+            source,
+            vec![
+                ProfileRange {
+                    start: 0,
+                    end: 2,
+                    site: ProfileSiteId(1),
+                },
+                ProfileRange {
+                    start: 2,
+                    end: 5,
+                    site: ProfileSiteId(2),
+                },
+            ],
+        );
+        let baseline = run_with_stats(source, b"").unwrap();
+        let result = run_with_options(
+            source,
+            b"",
+            RunOptions {
+                collect_stats: true,
+                collect_timings: true,
+                profile: Some(ProfileOptions {
+                    map,
+                    mode: ProfileMode::Counters,
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.output, baseline.output);
+        assert_eq!(result.stats, baseline.stats);
+        assert!(result.timings.is_some());
+        let profile = result.profile.unwrap();
+        assert_eq!(profile.mixed_provenance_native_operations, 1);
+        assert_eq!(
+            profile
+                .sites
+                .iter()
+                .map(|site| site.counters.raw_bf_instructions)
+                .sum::<u64>(),
+            result.stats.executed_instructions
+        );
+        assert_eq!(
+            profile
+                .sites
+                .iter()
+                .map(|site| site.counters.rle_instructions)
+                .sum::<u64>(),
+            result.stats.executed_rle_instructions
+        );
+        assert_eq!(profile.sites[0].counters.raw_bf_instructions, 3);
+    }
+
+    #[test]
+    fn exact_and_sample_modes_return_overhead_metadata() {
+        let source = b"++++[->+<]>.";
+        let map = test_profile_map(
+            source,
+            vec![ProfileRange {
+                start: 0,
+                end: bf_identity(source).instruction_count,
+                site: ProfileSiteId(1),
+            }],
+        );
+        let exact = run_with_options(
+            source,
+            b"",
+            RunOptions {
+                profile: Some(ProfileOptions {
+                    map: map.clone(),
+                    mode: ProfileMode::Exact,
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        let exact_profile = exact.profile.unwrap();
+        assert_eq!(
+            exact_profile.clock_reads,
+            exact_profile.profile_block_executions * 2
+        );
+
+        let sampled = run_with_options(
+            source,
+            b"",
+            RunOptions {
+                profile: Some(ProfileOptions {
+                    map,
+                    mode: ProfileMode::Sample {
+                        interval: Duration::from_millis(1),
+                    },
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            sampled.profile.unwrap().sampling_interval,
+            Some(Duration::from_millis(1))
+        );
+
+        let generic_source = b"++[.-]";
+        let generic_map = test_profile_map(
+            generic_source,
+            vec![ProfileRange {
+                start: 0,
+                end: bf_identity(generic_source).instruction_count,
+                site: ProfileSiteId(1),
+            }],
+        );
+        let generic = run_with_options(
+            generic_source,
+            b"",
+            RunOptions {
+                profile: Some(ProfileOptions {
+                    map: generic_map,
+                    mode: ProfileMode::Exact,
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap()
+        .profile
+        .unwrap();
+        assert!(generic.clock_reads > generic.profile_block_executions * 2);
+    }
+
+    #[test]
+    fn sparse_site_ids_use_dense_runtime_storage() {
+        let source = b"+.";
+        let sparse = ProfileSiteId(u32::MAX - 1);
+        let mut map = test_profile_map(
+            source,
+            vec![ProfileRange {
+                start: 0,
+                end: 2,
+                site: ProfileSiteId(1),
+            }],
+        );
+        map.sites.truncate(1);
+        map.sites.push(ProfileSite {
+            id: sparse,
+            parent: Some(ProfileSiteId(0)),
+            kind: "test".into(),
+            stable_key: "test.sparse".into(),
+            label: "sparse".into(),
+            source: None,
+            attributes: BTreeMap::new(),
+        });
+        map.ranges[0].site = sparse;
+        let result = run_with_options(
+            source,
+            b"",
+            RunOptions {
+                profile: Some(ProfileOptions {
+                    map,
+                    mode: ProfileMode::Counters,
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.output, vec![1]);
+        assert_eq!(result.profile.unwrap().sites[1].site, sparse);
+    }
+
+    #[test]
+    fn optimized_profile_counter_totals_match_run_stats() {
+        for source in [
+            b"+++++[-].".as_slice(),
+            b"+>+>+<<[>].".as_slice(),
+            b"++++[->>>++>+<<<<]>>>.>.".as_slice(),
+            b"++[>++[>+<-]<-]>>.".as_slice(),
+        ] {
+            let map = test_profile_map(
+                source,
+                vec![ProfileRange {
+                    start: 0,
+                    end: bf_identity(source).instruction_count,
+                    site: ProfileSiteId(1),
+                }],
+            );
+            let result = run_with_options(
+                source,
+                b"",
+                RunOptions {
+                    profile: Some(ProfileOptions {
+                        map,
+                        mode: ProfileMode::Counters,
+                    }),
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+            let sites = &result.profile.as_ref().unwrap().sites;
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.raw_bf_instructions)
+                    .sum::<u64>(),
+                result.stats.executed_instructions
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.rle_instructions)
+                    .sum::<u64>(),
+                result.stats.executed_rle_instructions
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.fast_operations)
+                    .sum::<u64>(),
+                result.stats.optimization.executed_native_operations
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.rle_operations)
+                    .sum::<u64>(),
+                result.stats.optimization.rle_operations
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.clear_loops)
+                    .sum::<u64>(),
+                result.stats.optimization.clear_loops
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.scan_loops)
+                    .sum::<u64>(),
+                result.stats.optimization.scan_loops
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.scan_steps)
+                    .sum::<u64>(),
+                result.stats.optimization.scan_steps
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.transfer_loops)
+                    .sum::<u64>(),
+                result.stats.optimization.transfer_loops
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.counters.transfer_iterations)
+                    .sum::<u64>(),
+                result.stats.optimization.transfer_iterations
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_profile_map_for_another_artifact() {
+        let source = b"+.";
+        let map = test_profile_map(
+            source,
+            vec![ProfileRange {
+                start: 0,
+                end: 2,
+                site: ProfileSiteId(1),
+            }],
+        );
+        assert!(matches!(
+            run_with_options(
+                b"++.",
+                b"",
+                RunOptions {
+                    profile: Some(ProfileOptions {
+                        map,
+                        mode: ProfileMode::Counters,
+                    }),
+                    ..RunOptions::default()
+                }
+            ),
+            Err(Error::ProfileArtifact(_))
+        ));
     }
 }

@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
-use crate::bf_optimizer::optimize_bf;
+use crate::bf_optimizer::{optimize_annotated_bf, optimize_bf};
 use crate::continuation_ir::{
     Address, AggregateRegion, ArrayRegion, Continuation, ContinuationId, ContinuationProgram,
     FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId,
@@ -10,11 +10,64 @@ use crate::continuation_ir::{
 };
 use crate::frame_layout::{AbiConfig, AbiField, FrameLayout, FrameLayoutError, PROTOCOL_CELLS};
 use crate::static_layout::{StaticLayout, StaticLayoutError};
-use crate::{BfInstruction, BfProgram};
+use crate::{
+    AnnotatedBfInstruction, AnnotatedBfOperation, AnnotatedBfProgram, BfProgram, ProfileSiteTable,
+};
+
+/// Selects how much compiler provenance is emitted into a profile map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileGranularity {
+    /// ABI templates only.
+    Abi,
+    /// ABI templates plus functions and continuations.
+    Continuation,
+    /// Continuation provenance plus frame instructions and terminators.
+    Instruction,
+    /// Currently the same sites as `Instruction`; source spans will be added
+    /// when continuation IR retains frontend provenance.
+    Source,
+}
+
+/// A normal BF artifact plus its sidecar profile map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledProfileArtifact {
+    pub source: String,
+    pub map: bf_profiling::ProfileMap,
+}
+
+impl CompiledProfileArtifact {
+    pub fn embedded_source(&self) -> Result<String, bf_profiling::EmbeddedProfileError> {
+        bf_profiling::embed_profile_markers(&self.source, &self.map)
+    }
+}
 
 /// Compile continuation IR with the default ABI configuration.
 pub fn compile_continuations(program: &ContinuationProgram) -> Result<String, AbiCodegenError> {
     Ok(optimize_bf(&lower_continuations(program)?).to_source())
+}
+
+/// Compile an artifact with provenance sidecar metadata.
+pub fn compile_continuations_with_profile(
+    program: &ContinuationProgram,
+    granularity: ProfileGranularity,
+) -> Result<CompiledProfileArtifact, AbiCodegenError> {
+    let annotated = lower_continuations_with_profile(program, granularity)?;
+    let optimized = optimize_annotated_bf(&annotated);
+    let source = optimized.to_source();
+    let map = optimized.profile_map();
+    Ok(CompiledProfileArtifact { source, map })
+}
+
+/// Compile an unbounded-tape artifact with provenance sidecar metadata.
+pub fn compile_continuations_unbounded_with_profile(
+    program: &ContinuationProgram,
+    granularity: ProfileGranularity,
+) -> Result<CompiledProfileArtifact, AbiCodegenError> {
+    let annotated = lower_continuations_unbounded_with_profile(program, granularity)?;
+    let optimized = optimize_annotated_bf(&annotated);
+    let source = optimized.to_source();
+    let map = optimized.profile_map();
+    Ok(CompiledProfileArtifact { source, map })
 }
 
 /// Compile continuation IR without enforcing the standard 30,000-cell tape.
@@ -27,6 +80,23 @@ pub fn compile_continuations_unbounded(
 /// Lower continuation IR to BF IR with the default ABI configuration.
 pub fn lower_continuations(program: &ContinuationProgram) -> Result<BfProgram, AbiCodegenError> {
     lower_continuations_with_options(program, AbiConfig::default(), true)
+}
+
+/// Lower continuation IR to provenance-carrying BF IR.
+pub fn lower_continuations_with_profile(
+    program: &ContinuationProgram,
+    granularity: ProfileGranularity,
+) -> Result<AnnotatedBfProgram, AbiCodegenError> {
+    lower_continuations_annotated_with_options(program, AbiConfig::default(), true, granularity)
+}
+
+/// Lower continuation IR to provenance-carrying BF IR without the standard
+/// tape-capacity check.
+pub fn lower_continuations_unbounded_with_profile(
+    program: &ContinuationProgram,
+    granularity: ProfileGranularity,
+) -> Result<AnnotatedBfProgram, AbiCodegenError> {
+    lower_continuations_annotated_with_options(program, AbiConfig::default(), false, granularity)
 }
 
 /// Lower continuation IR without enforcing the standard 30,000-cell tape.
@@ -49,6 +119,21 @@ fn lower_continuations_with_options(
     config: AbiConfig,
     check_capacity: bool,
 ) -> Result<BfProgram, AbiCodegenError> {
+    Ok(lower_continuations_annotated_with_options(
+        program,
+        config,
+        check_capacity,
+        ProfileGranularity::Abi,
+    )?
+    .into_plain())
+}
+
+fn lower_continuations_annotated_with_options(
+    program: &ContinuationProgram,
+    config: AbiConfig,
+    check_capacity: bool,
+    granularity: ProfileGranularity,
+) -> Result<AnnotatedBfProgram, AbiCodegenError> {
     let layouts = build_layouts(program, config)?;
     let static_layout = if check_capacity {
         StaticLayout::new(config, program.globals())?
@@ -56,10 +141,24 @@ fn lower_continuations_with_options(
         StaticLayout::new_unbounded(config, program.globals())?
     };
     let portal = PortalPlan::new(program)?;
-    let mut emitter = AbiEmitter::new(program, &layouts, &static_layout, &portal, config);
-    emitter.initialize_main(check_capacity)?;
-    emitter.emit_dispatcher()?;
-    Ok(BfProgram::new(emitter.output))
+    let mut emitter = AbiEmitter::new(
+        program,
+        &layouts,
+        &static_layout,
+        &portal,
+        config,
+        granularity,
+    );
+    emitter.with_profile_site(
+        "abi",
+        "abi.initialization",
+        "ABI initialization",
+        |emitter| emitter.initialize_main(check_capacity),
+    )?;
+    emitter.with_profile_site("abi", "abi.dispatcher", "ABI dispatcher", |emitter| {
+        emitter.emit_dispatcher()
+    })?;
+    Ok(AnnotatedBfProgram::new(emitter.output, emitter.sites))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,13 +469,44 @@ fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
         .unwrap_or(0)
 }
 
+fn instruction_kind(instruction: &FrameInstruction) -> &'static str {
+    match instruction {
+        FrameInstruction::Set { .. } => "set",
+        FrameInstruction::AddConst { .. } => "add_const",
+        FrameInstruction::Transfer { .. } => "transfer",
+        FrameInstruction::AggregateCopy { .. } => "aggregate_copy",
+        FrameInstruction::Input { .. } => "input",
+        FrameInstruction::Output { .. } => "output",
+        FrameInstruction::Loop { .. } => "loop",
+        FrameInstruction::Branch { .. } => "branch",
+    }
+}
+
+fn terminator_kind(terminator: &Terminator) -> &'static str {
+    match terminator {
+        Terminator::Goto { .. } => "goto",
+        Terminator::Branch { .. } => "branch",
+        Terminator::Call { .. } => "call",
+        Terminator::Return { .. } => "return",
+        Terminator::ArrayLoad { .. } => "array_load",
+        Terminator::ArrayStore { .. } => "array_store",
+        Terminator::AggregateLoad { .. } => "aggregate_load",
+        Terminator::AggregateStore { .. } => "aggregate_store",
+        Terminator::Abort => "abort",
+        Terminator::Halt => "halt",
+    }
+}
+
 struct AbiEmitter<'a> {
     program: &'a ContinuationProgram,
     layouts: &'a HashMap<FunctionId, FunctionLayout>,
     static_layout: &'a StaticLayout,
     portal: &'a PortalPlan,
     config: AbiConfig,
-    output: Vec<BfInstruction>,
+    output: Vec<AnnotatedBfInstruction>,
+    sites: ProfileSiteTable,
+    site_stack: Vec<bf_profiling::ProfileSiteId>,
+    granularity: ProfileGranularity,
     /// Physical during initialization; context-base-relative in dispatcher.
     position: isize,
     branch_temporary_depth: usize,
@@ -389,6 +519,7 @@ impl<'a> AbiEmitter<'a> {
         static_layout: &'a StaticLayout,
         portal: &'a PortalPlan,
         config: AbiConfig,
+        granularity: ProfileGranularity,
     ) -> Self {
         Self {
             program,
@@ -397,9 +528,66 @@ impl<'a> AbiEmitter<'a> {
             portal,
             config,
             output: Vec::new(),
+            sites: ProfileSiteTable::with_root("BFC artifact"),
+            site_stack: vec![bf_profiling::ProfileSiteId(0)],
+            granularity,
             position: 0,
             branch_temporary_depth: 0,
         }
+    }
+
+    fn current_profile_site(&self) -> bf_profiling::ProfileSiteId {
+        *self.site_stack.last().expect("root profile site")
+    }
+
+    fn with_profile_site<T>(
+        &mut self,
+        kind: &str,
+        stable_key: impl Into<String>,
+        label: impl Into<String>,
+        emit: impl FnOnce(&mut Self) -> Result<T, AbiCodegenError>,
+    ) -> Result<T, AbiCodegenError> {
+        let site = self.sites.intern(
+            Some(self.current_profile_site()),
+            kind,
+            stable_key,
+            label,
+            BTreeMap::new(),
+        );
+        self.site_stack.push(site);
+        let result = emit(self);
+        self.site_stack.pop();
+        result
+    }
+
+    fn emit_operation(&mut self, operation: AnnotatedBfOperation) {
+        self.output.push(AnnotatedBfInstruction::new(
+            self.current_profile_site(),
+            operation,
+        ));
+    }
+
+    fn emit_loop(&mut self, body: Vec<AnnotatedBfInstruction>) {
+        self.emit_operation(AnnotatedBfOperation::Loop(body));
+    }
+
+    fn with_profile_site_infallible(
+        &mut self,
+        kind: &str,
+        stable_key: impl Into<String>,
+        label: impl Into<String>,
+        emit: impl FnOnce(&mut Self),
+    ) {
+        let site = self.sites.intern(
+            Some(self.current_profile_site()),
+            kind,
+            stable_key,
+            label,
+            BTreeMap::new(),
+        );
+        self.site_stack.push(site);
+        emit(self);
+        self.site_stack.pop();
     }
 
     fn initialize_main(&mut self, check_capacity: bool) -> Result<(), AbiCodegenError> {
@@ -456,19 +644,64 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(active);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         Ok(())
     }
 
     fn emit_dispatch_case(&mut self, continuation: &Continuation) -> Result<(), AbiCodegenError> {
         self.emit_hidden_dispatch_case(continuation.id(), |emitter| {
-            emitter.branch_temporary_depth = 0;
-            emitter.emit_all(continuation.body(), continuation.function())?;
-            emitter.emit_terminator(continuation)
+            emitter.emit_continuation_body(continuation)
         })
     }
 
+    fn emit_continuation_body(
+        &mut self,
+        continuation: &Continuation,
+    ) -> Result<(), AbiCodegenError> {
+        if matches!(self.granularity, ProfileGranularity::Abi) {
+            self.emit_continuation_body_inner(continuation)
+        } else {
+            let function = continuation.function().index();
+            let continuation_id = continuation.id().get();
+            self.with_profile_site(
+                "function",
+                format!("function.{function}"),
+                format!("function {function}"),
+                |emitter| {
+                    emitter.with_profile_site(
+                        "continuation",
+                        format!("function.{function}.continuation.{continuation_id}"),
+                        format!("continuation {continuation_id}"),
+                        |emitter| emitter.emit_continuation_body_inner(continuation),
+                    )
+                },
+            )
+        }
+    }
+
+    fn emit_continuation_body_inner(
+        &mut self,
+        continuation: &Continuation,
+    ) -> Result<(), AbiCodegenError> {
+        self.branch_temporary_depth = 0;
+        self.emit_all(continuation.body(), continuation.function())?;
+        self.emit_terminator(continuation)
+    }
+
     fn emit_hidden_dispatch_case(
+        &mut self,
+        continuation: ContinuationId,
+        body_emitter: impl FnOnce(&mut Self) -> Result<(), AbiCodegenError>,
+    ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site(
+            "abi",
+            format!("abi.dispatch.case.{}", continuation.get()),
+            format!("dispatch case {}", continuation.get()),
+            |emitter| emitter.emit_hidden_dispatch_case_inner(continuation, body_emitter),
+        )
+    }
+
+    fn emit_hidden_dispatch_case_inner(
         &mut self,
         continuation: ContinuationId,
         body_emitter: impl FnOnce(&mut Self) -> Result<(), AbiCodegenError>,
@@ -495,7 +728,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(next_branch);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_to(0);
         Ok(())
     }
@@ -509,7 +742,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(condition);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_to(0);
         Ok(())
     }
@@ -589,6 +822,44 @@ impl<'a> AbiEmitter<'a> {
         instruction: &FrameInstruction,
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
+        if matches!(
+            self.granularity,
+            ProfileGranularity::Abi | ProfileGranularity::Continuation
+        ) {
+            self.emit_instruction_with_abi_site(instruction, function)
+        } else {
+            self.with_profile_site(
+                "frame_instruction",
+                format!(
+                    "function.{}.frame_instruction.{}",
+                    function.index(),
+                    instruction_kind(instruction)
+                ),
+                instruction_kind(instruction),
+                |emitter| emitter.emit_instruction_with_abi_site(instruction, function),
+            )
+        }
+    }
+
+    fn emit_instruction_with_abi_site(
+        &mut self,
+        instruction: &FrameInstruction,
+        function: FunctionId,
+    ) -> Result<(), AbiCodegenError> {
+        let kind = instruction_kind(instruction);
+        self.with_profile_site(
+            "abi",
+            format!("abi.frame.{kind}"),
+            format!("frame {kind}"),
+            |emitter| emitter.emit_instruction_inner(instruction, function),
+        )
+    }
+
+    fn emit_instruction_inner(
+        &mut self,
+        instruction: &FrameInstruction,
+        function: FunctionId,
+    ) -> Result<(), AbiCodegenError> {
         match instruction {
             FrameInstruction::Set { dst, value } => {
                 let dst = self.address_location(*dst, function)?;
@@ -609,13 +880,13 @@ impl<'a> AbiEmitter<'a> {
             FrameInstruction::Input { dst } => {
                 let dst = self.address_location(*dst, function)?;
                 self.move_context_to_location(dst);
-                self.output.push(BfInstruction::Input);
+                self.emit_operation(AnnotatedBfOperation::Input);
                 self.move_location_to_context(dst);
             }
             FrameInstruction::Output { src } => {
                 let src = self.address_location(*src, function)?;
                 self.move_context_to_location(src);
-                self.output.push(BfInstruction::Output);
+                self.emit_operation(AnnotatedBfOperation::Output);
                 self.move_location_to_context(src);
             }
             FrameInstruction::Loop { condition, body } => {
@@ -627,7 +898,7 @@ impl<'a> AbiEmitter<'a> {
                     emitter.move_context_to_location(condition);
                     Ok(())
                 })?;
-                self.output.push(BfInstruction::Loop(body));
+                self.emit_loop(body);
                 self.move_location_to_context(condition);
             }
             FrameInstruction::Branch {
@@ -660,7 +931,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_context_to_location(condition);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(then_loop));
+        self.emit_loop(then_loop);
         self.move_location_to_context(condition);
 
         self.move_context_to_location(flag);
@@ -673,13 +944,36 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_context_to_location(flag);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(else_loop));
+        self.emit_loop(else_loop);
         self.move_location_to_context(flag);
         self.branch_temporary_depth -= 1;
         Ok(())
     }
 
     fn emit_terminator(&mut self, continuation: &Continuation) -> Result<(), AbiCodegenError> {
+        if matches!(
+            self.granularity,
+            ProfileGranularity::Abi | ProfileGranularity::Continuation
+        ) {
+            self.emit_terminator_inner(continuation)
+        } else {
+            self.with_profile_site(
+                "terminator",
+                format!(
+                    "function.{}.terminator.{}",
+                    continuation.function().index(),
+                    terminator_kind(continuation.terminator())
+                ),
+                terminator_kind(continuation.terminator()),
+                |emitter| emitter.emit_terminator_inner(continuation),
+            )
+        }
+    }
+
+    fn emit_terminator_inner(
+        &mut self,
+        continuation: &Continuation,
+    ) -> Result<(), AbiCodegenError> {
         match continuation.terminator() {
             Terminator::Goto { target } => self.set_next_pc(*target)?,
             Terminator::Branch {
@@ -697,7 +991,7 @@ impl<'a> AbiEmitter<'a> {
                     emitter.move_context_to_location(condition);
                     Ok(())
                 })?;
-                self.output.push(BfInstruction::Loop(body));
+                self.emit_loop(body);
                 self.move_location_to_context(condition);
             }
             Terminator::Call {
@@ -727,6 +1021,18 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn emit_call(
+        &mut self,
+        caller: FunctionId,
+        callee: FunctionId,
+        arguments: &[ValueOperand],
+        return_to: ContinuationId,
+    ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site("abi", "abi.call", "ABI call", |emitter| {
+            emitter.emit_call_inner(caller, callee, arguments, return_to)
+        })
+    }
+
+    fn emit_call_inner(
         &mut self,
         caller: FunctionId,
         callee: FunctionId,
@@ -829,6 +1135,16 @@ impl<'a> AbiEmitter<'a> {
         callee: FunctionId,
         value: Option<ValueOperand>,
     ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site("abi", "abi.return", "ABI return", |emitter| {
+            emitter.emit_return_inner(callee, value)
+        })
+    }
+
+    fn emit_return_inner(
+        &mut self,
+        callee: FunctionId,
+        value: Option<ValueOperand>,
+    ) -> Result<(), AbiCodegenError> {
         let callee_frame = self.layout(callee)?.frame.clone();
         let stride = self.config.stride();
         let caller_delta = -((callee_frame.frame_chunks() * stride) as isize);
@@ -911,7 +1227,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_context_to_location(src);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_location_to_context(src);
         Ok(())
     }
@@ -936,6 +1252,12 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn emit_portal_start(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
+        self.with_profile_site("abi", "abi.portal.start", "portal start", |emitter| {
+            emitter.emit_portal_start_inner(site)
+        })
+    }
+
+    fn emit_portal_start_inner(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
         if let PortalOperation::Store { source } = site.operation
             && site.cells > 1
         {
@@ -1004,10 +1326,40 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn emit_aggregate_accessor(&mut self, accessor: PortalAccessor) -> Result<(), AbiCodegenError> {
-        self.compute_aggregate_chunk_offset()?;
-        self.shift_portal_by_count(AbiField::Scratch1, AbiField::Scratch2, true)?;
-        self.access_payload_with_remainder(accessor.kind)?;
-        self.shift_portal_by_count(AbiField::Condition, AbiField::Restore, false)?;
+        self.with_profile_site("abi", "abi.portal.accessor", "portal accessor", |emitter| {
+            emitter.emit_aggregate_accessor_inner(accessor)
+        })
+    }
+
+    fn emit_aggregate_accessor_inner(
+        &mut self,
+        accessor: PortalAccessor,
+    ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site(
+            "abi",
+            "abi.portal.offset",
+            "portal offset calculation",
+            |emitter| emitter.compute_aggregate_chunk_offset(),
+        )?;
+        self.with_profile_site(
+            "abi",
+            "abi.portal.window.right",
+            "portal window right",
+            |emitter| emitter.shift_portal_by_count(AbiField::Scratch1, AbiField::Scratch2, true),
+        )?;
+        let (access_key, access_label) = match accessor.kind {
+            PortalAccessKind::Load => ("abi.portal.load", "portal payload load"),
+            PortalAccessKind::Store => ("abi.portal.store", "portal payload store"),
+        };
+        self.with_profile_site("abi", access_key, access_label, |emitter| {
+            emitter.access_payload_with_remainder(accessor.kind)
+        })?;
+        self.with_profile_site(
+            "abi",
+            "abi.portal.window.left",
+            "portal window left",
+            |emitter| emitter.shift_portal_by_count(AbiField::Condition, AbiField::Restore, false),
+        )?;
         for field in [
             AbiField::Index,
             AbiField::Condition,
@@ -1048,7 +1400,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(high);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(high_body));
+        self.emit_loop(high_body);
         self.move_to(0);
         self.clear_abi_field(AbiField::Scratch3)?;
 
@@ -1076,7 +1428,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(offset);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_to(0);
         Ok(())
     }
@@ -1102,7 +1454,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(branch);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(wrap));
+        self.emit_loop(wrap);
         self.move_to(0);
         Ok(())
     }
@@ -1127,7 +1479,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(carry_offset);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_to(0);
         Ok(())
     }
@@ -1146,7 +1498,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.shift_portal_window(right);
             emitter.move_to(low_offset);
         });
-        self.output.push(BfInstruction::Loop(low_body));
+        self.emit_loop(low_body);
         self.move_to(0);
 
         let high_offset = self.current_abi_offset(high)?;
@@ -1163,11 +1515,11 @@ impl<'a> AbiEmitter<'a> {
                 emitter.shift_portal_window(right);
                 emitter.move_to(low_offset);
             });
-            emitter.output.push(BfInstruction::Loop(low_255));
+            emitter.emit_loop(low_255);
             emitter.move_to(high_offset);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(high_body));
+        self.emit_loop(high_body);
         self.move_to(0);
         Ok(())
     }
@@ -1242,7 +1594,7 @@ impl<'a> AbiEmitter<'a> {
                 emitter.move_to(branch);
                 Ok(())
             })?;
-            self.output.push(BfInstruction::Loop(body));
+            self.emit_loop(body);
             self.move_to(0);
         }
         Ok(())
@@ -1261,12 +1613,18 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(condition);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_to(0);
         Ok(())
     }
 
     fn emit_portal_resume(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
+        self.with_profile_site("abi", "abi.portal.resume", "portal resume", |emitter| {
+            emitter.emit_portal_resume_inner(site)
+        })
+    }
+
+    fn emit_portal_resume_inner(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
         let is_load = matches!(site.operation, PortalOperation::Load { .. });
         for field in AbiField::ALL {
             if is_load && field == AbiField::Value {
@@ -1367,7 +1725,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.clear_location(branch);
             emitter.move_context_to_location(condition);
         });
-        self.output.push(BfInstruction::Loop(nonzero));
+        self.emit_loop(nonzero);
         self.move_location_to_context(condition);
 
         self.move_context_to_location(low);
@@ -1382,7 +1740,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_location_to_context(high);
             emitter.move_context_to_location(branch);
         });
-        self.output.push(BfInstruction::Loop(carry));
+        self.emit_loop(carry);
         self.move_location_to_context(branch);
         Ok(())
     }
@@ -1411,7 +1769,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(value);
             Ok(())
         })?;
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_to(0);
         self.emit_global_to_context(base, context_chunks);
         Ok(())
@@ -1693,7 +2051,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_location_to_context(restore);
             emitter.move_context_to_location(src);
         });
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_location_to_context(src);
         self.move_location(restore, src);
     }
@@ -1712,7 +2070,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_location_to_context(dst);
             emitter.move_context_to_location(src);
         });
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_location_to_context(src);
     }
 
@@ -1739,12 +2097,23 @@ impl<'a> AbiEmitter<'a> {
     /// Move from a function context base to one absolute static cell and
     /// rebase the compile-time origin at that cell. Stack flags are preserved.
     fn emit_context_to_global(&mut self, position: usize, context_chunks: usize) {
+        self.with_profile_site_infallible(
+            "abi",
+            "abi.navigation.global",
+            "context to global",
+            |emitter| emitter.emit_context_to_global_inner(position, context_chunks),
+        );
+    }
+
+    fn emit_context_to_global_inner(&mut self, position: usize, context_chunks: usize) {
         debug_assert_eq!(self.position, 0);
         let stride = self.config.stride() as isize;
         self.push_move(context_chunks as isize * stride);
         self.push_move(-stride);
-        self.output
-            .push(BfInstruction::Loop(vec![BfInstruction::Move(-stride)]));
+        self.emit_loop(vec![AnnotatedBfInstruction::new(
+            self.current_profile_site(),
+            AnnotatedBfOperation::Move(-stride),
+        )]);
         self.push_move(-((self.static_layout.anchor_head() - position) as isize));
         self.position = 0;
     }
@@ -1752,19 +2121,30 @@ impl<'a> AbiEmitter<'a> {
     /// Move from one absolute static cell through the anchor to the current
     /// frame context and rebase the compile-time origin there.
     fn emit_global_to_context(&mut self, position: usize, context_chunks: usize) {
+        self.with_profile_site_infallible(
+            "abi",
+            "abi.navigation.global",
+            "global to context",
+            |emitter| emitter.emit_global_to_context_inner(position, context_chunks),
+        );
+    }
+
+    fn emit_global_to_context_inner(&mut self, position: usize, context_chunks: usize) {
         debug_assert_eq!(self.position, 0);
         let stride = self.config.stride() as isize;
         self.push_move((self.static_layout.anchor_head() - position) as isize);
         self.push_move(stride);
-        self.output
-            .push(BfInstruction::Loop(vec![BfInstruction::Move(stride)]));
+        self.emit_loop(vec![AnnotatedBfInstruction::new(
+            self.current_profile_site(),
+            AnnotatedBfOperation::Move(stride),
+        )]);
         self.push_move(-(context_chunks as isize * stride));
         self.position = 0;
     }
 
     fn push_move(&mut self, distance: isize) {
         if distance != 0 {
-            self.output.push(BfInstruction::Move(distance));
+            self.emit_operation(AnnotatedBfOperation::Move(distance));
         }
     }
 
@@ -1780,7 +2160,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.adjust(1);
             emitter.move_to(src);
         });
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_value(restore, src);
         self.move_to(0);
     }
@@ -1794,7 +2174,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.adjust(1);
             emitter.move_to(src);
         });
-        self.output.push(BfInstruction::Loop(body));
+        self.emit_loop(body);
         self.move_to(0);
     }
 
@@ -1818,17 +2198,19 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn clear_current(&mut self) {
-        self.output
-            .push(BfInstruction::Loop(vec![BfInstruction::Add(255)]));
+        let site = self.current_profile_site();
+        self.emit_loop(vec![AnnotatedBfInstruction::new(
+            site,
+            AnnotatedBfOperation::Add(255),
+        )]);
     }
 
     fn adjust(&mut self, value: u8) {
-        self.output.push(BfInstruction::Add(value));
+        self.emit_operation(AnnotatedBfOperation::Add(value));
     }
 
     fn move_to(&mut self, destination: isize) {
-        self.output
-            .push(BfInstruction::Move(destination - self.position));
+        self.emit_operation(AnnotatedBfOperation::Move(destination - self.position));
         self.position = destination;
     }
 
@@ -1841,13 +2223,13 @@ impl<'a> AbiEmitter<'a> {
     fn capture<T>(
         &mut self,
         emit: impl FnOnce(&mut Self) -> Result<T, AbiCodegenError>,
-    ) -> Result<Vec<BfInstruction>, AbiCodegenError> {
+    ) -> Result<Vec<AnnotatedBfInstruction>, AbiCodegenError> {
         let outer = std::mem::take(&mut self.output);
         emit(self)?;
         Ok(std::mem::replace(&mut self.output, outer))
     }
 
-    fn capture_infallible(&mut self, emit: impl FnOnce(&mut Self)) -> Vec<BfInstruction> {
+    fn capture_infallible(&mut self, emit: impl FnOnce(&mut Self)) -> Vec<AnnotatedBfInstruction> {
         let outer = std::mem::take(&mut self.output);
         emit(self);
         std::mem::replace(&mut self.output, outer)

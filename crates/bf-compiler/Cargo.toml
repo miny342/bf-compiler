@@ -8,6 +8,9 @@ license = "MIT OR Apache-2.0"
 name = "bf_compiler"
 path = "src/lib.rs"
 
+[dependencies]
+bf-profiling = { path = "../bf-profiling" }
+
 [[bin]]
 name = "bfc"
 path = "src/main.rs"

@@ -23,11 +23,19 @@ mod semantic;
 mod static_layout;
 
 pub use abi_codegen::{
-    AbiCodegenError, compile_continuations, compile_continuations_unbounded, lower_continuations,
-    lower_continuations_unbounded, lower_continuations_with_config,
+    AbiCodegenError, CompiledProfileArtifact, ProfileGranularity, compile_continuations,
+    compile_continuations_unbounded, compile_continuations_unbounded_with_profile,
+    compile_continuations_with_profile, lower_continuations, lower_continuations_unbounded,
+    lower_continuations_unbounded_with_profile, lower_continuations_with_config,
+    lower_continuations_with_profile,
 };
-pub use bf_ir::{BfInstruction, BfProgram};
-pub use bf_optimizer::{BfOptimizationStats, optimize_bf, optimize_bf_with_stats};
+pub use bf_ir::{
+    AnnotatedBfInstruction, AnnotatedBfOperation, AnnotatedBfProgram, BfInstruction, BfProgram,
+    ProfileSiteRecord, ProfileSiteTable,
+};
+pub use bf_optimizer::{
+    BfOptimizationStats, optimize_annotated_bf, optimize_bf, optimize_bf_with_stats,
+};
 pub use codegen::{CodegenError, compile, lower};
 pub use continuation_ir::{
     Address, AggregateRegion, ArrayRegion, Continuation, ContinuationId, ContinuationIrError,

@@ -1,6 +1,9 @@
 //! Semantics-preserving peephole optimization for Brainfuck-shaped IR.
 
-use crate::{BfInstruction, BfProgram};
+use crate::{
+    AnnotatedBfInstruction, AnnotatedBfOperation, AnnotatedBfProgram, BfInstruction, BfProgram,
+    ProfileSiteTable,
+};
 
 /// Static measurements collected around one BF IR optimization pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +52,150 @@ pub fn optimize_bf_with_stats(program: &BfProgram) -> (BfProgram, BfOptimization
         source_bytes_after: optimized.to_source().len(),
     };
     (optimized, stats)
+}
+
+/// Optimize annotated BF while preserving provenance.  Merged operations from
+/// different sites are attributed to their lowest common ancestor.
+pub fn optimize_annotated_bf(program: &AnnotatedBfProgram) -> AnnotatedBfProgram {
+    AnnotatedBfProgram::new(
+        optimize_annotated_instructions(program.instructions(), program.sites()),
+        program.sites().clone(),
+    )
+}
+
+fn optimize_annotated_instructions(
+    instructions: &[AnnotatedBfInstruction],
+    sites: &ProfileSiteTable,
+) -> Vec<AnnotatedBfInstruction> {
+    let mut output = Vec::with_capacity(instructions.len());
+    for instruction in instructions {
+        match &instruction.operation {
+            AnnotatedBfOperation::Move(amount) => {
+                push_annotated_move(&mut output, instruction.site, *amount, sites)
+            }
+            AnnotatedBfOperation::Add(value) => {
+                push_annotated_add(&mut output, instruction.site, *value, sites)
+            }
+            AnnotatedBfOperation::Input => {
+                while output.last().is_some_and(|item| {
+                    matches!(item.operation, AnnotatedBfOperation::Add(_))
+                        || annotated_is_clear(item)
+                }) {
+                    output.pop();
+                }
+                output.push(instruction.clone());
+            }
+            AnnotatedBfOperation::Output => output.push(instruction.clone()),
+            AnnotatedBfOperation::Loop(body) => {
+                let body = optimize_annotated_instructions(body, sites);
+                if annotated_is_clear_body(&body) {
+                    push_annotated_clear(&mut output, instruction.site);
+                } else {
+                    output.push(AnnotatedBfInstruction::new(
+                        instruction.site,
+                        AnnotatedBfOperation::Loop(body),
+                    ));
+                }
+            }
+        }
+    }
+    output
+}
+
+fn merge_site(
+    left: bf_profiling::ProfileSiteId,
+    right: bf_profiling::ProfileSiteId,
+    sites: &ProfileSiteTable,
+) -> bf_profiling::ProfileSiteId {
+    if left == right {
+        left
+    } else {
+        sites.lowest_common_ancestor(left, right)
+    }
+}
+
+fn push_annotated_move(
+    output: &mut Vec<AnnotatedBfInstruction>,
+    site: bf_profiling::ProfileSiteId,
+    amount: isize,
+    sites: &ProfileSiteTable,
+) {
+    if amount == 0 {
+        return;
+    }
+    if let Some(last) = output.last_mut()
+        && let AnnotatedBfOperation::Move(previous) = &mut last.operation
+        && let Some(combined) = previous.checked_add(amount)
+    {
+        if combined == 0 {
+            output.pop();
+        } else {
+            *previous = combined;
+            last.site = merge_site(last.site, site, sites);
+        }
+        return;
+    }
+    output.push(AnnotatedBfInstruction::new(
+        site,
+        AnnotatedBfOperation::Move(amount),
+    ));
+}
+
+fn push_annotated_add(
+    output: &mut Vec<AnnotatedBfInstruction>,
+    site: bf_profiling::ProfileSiteId,
+    value: u8,
+    sites: &ProfileSiteTable,
+) {
+    if value == 0 {
+        return;
+    }
+    if let Some(last) = output.last_mut()
+        && let AnnotatedBfOperation::Add(previous) = &mut last.operation
+    {
+        let combined = previous.wrapping_add(value);
+        if combined == 0 {
+            output.pop();
+        } else {
+            *previous = combined;
+            last.site = merge_site(last.site, site, sites);
+        }
+        return;
+    }
+    output.push(AnnotatedBfInstruction::new(
+        site,
+        AnnotatedBfOperation::Add(value),
+    ));
+}
+
+fn push_annotated_clear(
+    output: &mut Vec<AnnotatedBfInstruction>,
+    site: bf_profiling::ProfileSiteId,
+) {
+    while output
+        .last()
+        .is_some_and(|item| matches!(item.operation, AnnotatedBfOperation::Add(_)))
+    {
+        output.pop();
+    }
+    if output.last().is_some_and(annotated_is_clear) {
+        return;
+    }
+    output.push(AnnotatedBfInstruction::new(
+        site,
+        AnnotatedBfOperation::Loop(vec![AnnotatedBfInstruction::new(
+            site,
+            AnnotatedBfOperation::Add(u8::MAX),
+        )]),
+    ));
+}
+
+fn annotated_is_clear(instruction: &AnnotatedBfInstruction) -> bool {
+    matches!(&instruction.operation, AnnotatedBfOperation::Loop(body) if annotated_is_clear_body(body))
+}
+
+fn annotated_is_clear_body(body: &[AnnotatedBfInstruction]) -> bool {
+    matches!(body, [AnnotatedBfInstruction { operation: AnnotatedBfOperation::Add(value), .. }] if value % 2 == 1)
 }
 
 fn optimize_instructions(instructions: &[BfInstruction]) -> Vec<BfInstruction> {
@@ -277,5 +424,22 @@ mod tests {
         assert_eq!(stats.source_bytes_after, 2);
         assert_eq!(stats.instruction_nodes_removed(), 2);
         assert_eq!(stats.source_bytes_removed(), 4);
+    }
+
+    #[test]
+    fn annotated_merge_uses_lowest_common_ancestor() {
+        let root = bf_profiling::ProfileSiteId(0);
+        let left = bf_profiling::ProfileSiteId(1);
+        let right = bf_profiling::ProfileSiteId(2);
+        let program = AnnotatedBfProgram::new(
+            vec![
+                AnnotatedBfInstruction::new(left, AnnotatedBfOperation::Add(1)),
+                AnnotatedBfInstruction::new(right, AnnotatedBfOperation::Add(2)),
+            ],
+            ProfileSiteTable::new(vec![None, Some(root), Some(root)]),
+        );
+        let optimized = optimize_annotated_bf(&program);
+        assert_eq!(optimized.instructions()[0].site, root);
+        assert_eq!(optimized.to_source(), "+".repeat(3));
     }
 }
