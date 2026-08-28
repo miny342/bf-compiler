@@ -506,6 +506,13 @@ struct AbiEmitter<'a> {
     output: Vec<AnnotatedBfInstruction>,
     sites: ProfileSiteTable,
     site_stack: Vec<bf_profiling::ProfileSiteId>,
+    /// Structural path of the frame instruction currently being emitted.
+    ///
+    /// Frame instructions do not have IDs of their own, so their position in
+    /// the continuation body is part of the stable profile identity.  The
+    /// named segments distinguish nested loop and branch bodies that would
+    /// otherwise share the same numeric index.
+    instruction_path: Vec<String>,
     granularity: ProfileGranularity,
     /// Physical during initialization; context-base-relative in dispatcher.
     position: isize,
@@ -530,6 +537,7 @@ impl<'a> AbiEmitter<'a> {
             output: Vec::new(),
             sites: ProfileSiteTable::with_root("BFC artifact"),
             site_stack: vec![bf_profiling::ProfileSiteId(0)],
+            instruction_path: Vec::new(),
             granularity,
             position: 0,
             branch_temporary_depth: 0,
@@ -558,6 +566,21 @@ impl<'a> AbiEmitter<'a> {
         let result = emit(self);
         self.site_stack.pop();
         result
+    }
+
+    fn with_instruction_path<T>(
+        &mut self,
+        segment: impl Into<String>,
+        emit: impl FnOnce(&mut Self) -> Result<T, AbiCodegenError>,
+    ) -> Result<T, AbiCodegenError> {
+        self.instruction_path.push(segment.into());
+        let result = emit(self);
+        self.instruction_path.pop();
+        result
+    }
+
+    fn instruction_path_key(&self) -> String {
+        self.instruction_path.join(".")
     }
 
     fn emit_operation(&mut self, operation: AnnotatedBfOperation) {
@@ -763,7 +786,9 @@ impl<'a> AbiEmitter<'a> {
                 value: 0,
             } = instructions[index]
             else {
-                self.emit_instruction(&instructions[index], function)?;
+                self.with_instruction_path(index.to_string(), |emitter| {
+                    emitter.emit_instruction(&instructions[index], function)
+                })?;
                 index += 1;
                 continue;
             };
@@ -783,10 +808,19 @@ impl<'a> AbiEmitter<'a> {
                 end += 1;
             }
             if end - index >= 2 && array != AggregateRegion::Outbox {
-                self.emit_aggregate_clear_range(array, first, end - index, function)?;
+                self.emit_aggregate_clear_range(
+                    array,
+                    first,
+                    end - index,
+                    function,
+                    &instructions[index..end],
+                    index,
+                )?;
             } else {
-                for instruction in &instructions[index..end] {
-                    self.emit_instruction(instruction, function)?;
+                for (offset, instruction) in instructions[index..end].iter().enumerate() {
+                    self.with_instruction_path((index + offset).to_string(), |emitter| {
+                        emitter.emit_instruction(instruction, function)
+                    })?;
                 }
             }
             index = end;
@@ -800,10 +834,12 @@ impl<'a> AbiEmitter<'a> {
         first: usize,
         cells: usize,
         function: FunctionId,
+        instructions: &[FrameInstruction],
+        instruction_start: usize,
     ) -> Result<(), AbiCodegenError> {
         let base = self.portal_base_location(region, function)?;
         self.move_context_to_location(base);
-        for index in first..first + cells {
+        for (instruction_offset, index) in (first..first + cells).enumerate() {
             let mut offset = self.config.logical_offset_from_head(PROTOCOL_CELLS + index) as isize;
             // Global navigation rebases emitter bookkeeping at the aggregate
             // head. A frame-relative move retains the caller-context origin,
@@ -811,7 +847,26 @@ impl<'a> AbiEmitter<'a> {
             if let Location::Relative(base) = base {
                 offset += base;
             }
-            self.clear(offset);
+            self.with_instruction_path(
+                (instruction_start + instruction_offset).to_string(),
+                |emitter| {
+                    emitter.emit_instruction_site(
+                        &instructions[instruction_offset],
+                        function,
+                        |emitter| {
+                            emitter.with_profile_site(
+                                "abi",
+                                "abi.frame.set",
+                                "frame set",
+                                |emitter| {
+                                    emitter.clear(offset);
+                                    Ok(())
+                                },
+                            )
+                        },
+                    )
+                },
+            )?;
         }
         self.move_location_to_context(base);
         Ok(())
@@ -822,21 +877,33 @@ impl<'a> AbiEmitter<'a> {
         instruction: &FrameInstruction,
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
+        self.emit_instruction_site(instruction, function, |emitter| {
+            emitter.emit_instruction_with_abi_site(instruction, function)
+        })
+    }
+
+    fn emit_instruction_site<T>(
+        &mut self,
+        instruction: &FrameInstruction,
+        function: FunctionId,
+        emit: impl FnOnce(&mut Self) -> Result<T, AbiCodegenError>,
+    ) -> Result<T, AbiCodegenError> {
         if matches!(
             self.granularity,
             ProfileGranularity::Abi | ProfileGranularity::Continuation
         ) {
-            self.emit_instruction_with_abi_site(instruction, function)
+            emit(self)
         } else {
             self.with_profile_site(
                 "frame_instruction",
                 format!(
-                    "function.{}.frame_instruction.{}",
+                    "function.{}.frame_instruction.{}.{}",
                     function.index(),
+                    self.instruction_path_key(),
                     instruction_kind(instruction)
                 ),
                 instruction_kind(instruction),
-                |emitter| emitter.emit_instruction_with_abi_site(instruction, function),
+                emit,
             )
         }
     }
@@ -894,7 +961,9 @@ impl<'a> AbiEmitter<'a> {
                 self.move_context_to_location(condition);
                 let body = self.capture(|emitter| {
                     emitter.move_location_to_context(condition);
-                    emitter.emit_all(body, function)?;
+                    emitter.with_instruction_path("loop", |emitter| {
+                        emitter.emit_all(body, function)
+                    })?;
                     emitter.move_context_to_location(condition);
                     Ok(())
                 })?;
@@ -925,7 +994,8 @@ impl<'a> AbiEmitter<'a> {
         let then_loop = self.capture(|emitter| {
             emitter.clear_current();
             emitter.move_location_to_context(condition);
-            emitter.emit_all(then_body, function)?;
+            emitter
+                .with_instruction_path("then", |emitter| emitter.emit_all(then_body, function))?;
             emitter.clear_location(condition);
             emitter.clear_location(flag);
             emitter.move_context_to_location(condition);
@@ -938,7 +1008,8 @@ impl<'a> AbiEmitter<'a> {
         let else_loop = self.capture(|emitter| {
             emitter.clear_current();
             emitter.move_location_to_context(flag);
-            emitter.emit_all(else_body, function)?;
+            emitter
+                .with_instruction_path("else", |emitter| emitter.emit_all(else_body, function))?;
             emitter.clear_location(condition);
             emitter.clear_location(flag);
             emitter.move_context_to_location(flag);

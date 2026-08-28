@@ -568,11 +568,17 @@ fn optimize_range(
                 let closing = target - 1;
                 let body = optimize_range(instructions, position + 1, closing, profile_map);
                 let optimization = recognize_loop(instructions, position + 1, closing, &body);
-                let site = instructions[position].site;
-                let mixed = optimization.is_some()
-                    && body
-                        .iter()
-                        .any(|instruction| instruction.site().id != site.id);
+                let mut site = instructions[position].site;
+                let mut mixed = false;
+                if optimization.is_some() && profile_map.is_some() {
+                    // Native loop operations subsume the opening/closing brackets and all
+                    // instructions in their body, so attribute them to the LCA of that
+                    // complete provenance set rather than just the opening bracket.
+                    for instruction in &instructions[position + 1..target] {
+                        mixed |= site.id != instruction.site.id;
+                        site = lowest_common_ancestor(profile_map, site, instruction.site);
+                    }
+                }
                 result.push(FastInstruction::Loop {
                     site,
                     mixed,
@@ -863,6 +869,17 @@ impl<'a> Machine<'a> {
         }
     }
 
+    fn record_maximum_pointer(&mut self, site: ResolvedProfileSite) {
+        self.record_maximum_pointer_at(site, self.pointer);
+    }
+
+    fn record_maximum_pointer_at(&mut self, site: ResolvedProfileSite, pointer: usize) {
+        if let Some(profile) = &mut self.profile {
+            let counters = &mut profile.site_mut(site).counters;
+            counters.maximum_pointer_observed = counters.maximum_pointer_observed.max(pointer);
+        }
+    }
+
     fn publish_sample_site(&mut self, site: ResolvedProfileSite) {
         let slot = u32::try_from(site.slot).expect("profile site count fits in u32");
         if self.published_sample_site != slot {
@@ -1061,6 +1078,7 @@ impl<'a> Machine<'a> {
                         counters.pointer_distance += source_offsets.len() as u64;
                     }
                     self.move_pointer(*amount, source_offsets)?;
+                    self.record_maximum_pointer(site);
                     Duration::ZERO
                 }
                 FastInstruction::Add {
@@ -1155,6 +1173,7 @@ impl<'a> Machine<'a> {
                     self.optimization.rle_operations += 1;
                     self.add_counts(site, source_offsets.len() as u64, 1);
                     self.move_pointer(*amount, source_offsets)?;
+                    self.record_maximum_pointer(site);
                     self.add_counts(site, 1, 1);
                 }
                 if let Some(profile) = &mut self.profile {
@@ -1221,6 +1240,11 @@ impl<'a> Machine<'a> {
                         self.max_pointer = self.max_pointer.max(reached);
                     }
                     self.tape[self.pointer] = 0;
+                    let reached = self
+                        .pointer
+                        .checked_add_signed((*max_offset).max(0))
+                        .unwrap();
+                    self.record_maximum_pointer_at(site, reached);
                 }
                 Ok(Duration::ZERO)
             }
@@ -1737,6 +1761,92 @@ mod tests {
             result.stats.executed_rle_instructions
         );
         assert_eq!(profile.sites[0].counters.raw_bf_instructions, 3);
+    }
+
+    #[test]
+    fn native_loops_are_attributed_to_the_lca_of_their_provenance() {
+        for (source, expected_counter) in [
+            (b"+[-]".as_slice(), "clear"),
+            (b"+>+>+<<[>]".as_slice(), "scan"),
+            (b"+[->+<]".as_slice(), "transfer"),
+        ] {
+            let instruction_count = bf_identity(source).instruction_count;
+            let map = test_profile_map(
+                source,
+                vec![
+                    ProfileRange {
+                        start: 0,
+                        end: instruction_count - 2,
+                        site: ProfileSiteId(1),
+                    },
+                    ProfileRange {
+                        start: instruction_count - 2,
+                        end: instruction_count,
+                        site: ProfileSiteId(2),
+                    },
+                ],
+            );
+            let profile = run_with_options(
+                source,
+                b"",
+                RunOptions {
+                    profile: Some(ProfileOptions {
+                        map,
+                        mode: ProfileMode::Counters,
+                    }),
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap()
+            .profile
+            .unwrap();
+
+            let counters = &profile.sites[0].counters;
+            match expected_counter {
+                "clear" => assert_eq!(counters.clear_loops, 1),
+                "scan" => assert_eq!(counters.scan_loops, 1),
+                "transfer" => assert_eq!(counters.transfer_loops, 1),
+                _ => unreachable!(),
+            }
+            assert_eq!(profile.mixed_provenance_native_operations, 1);
+        }
+    }
+
+    #[test]
+    fn profile_maximum_pointer_includes_native_operation_destinations() {
+        for (source, expected_maximum) in [
+            (b">>".as_slice(), 2),
+            (b"+>+>+<<[>]".as_slice(), 3),
+            (b"+[->>+<<]".as_slice(), 2),
+        ] {
+            let map = test_profile_map(
+                source,
+                vec![ProfileRange {
+                    start: 0,
+                    end: bf_identity(source).instruction_count,
+                    site: ProfileSiteId(1),
+                }],
+            );
+            let result = run_with_options(
+                source,
+                b"",
+                RunOptions {
+                    profile: Some(ProfileOptions {
+                        map,
+                        mode: ProfileMode::Counters,
+                    }),
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.stats.max_pointer, expected_maximum);
+            assert_eq!(
+                result.profile.unwrap().sites[1]
+                    .counters
+                    .maximum_pointer_observed,
+                expected_maximum,
+            );
+        }
     }
 
     #[test]

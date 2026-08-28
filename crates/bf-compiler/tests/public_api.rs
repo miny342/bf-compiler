@@ -1,8 +1,9 @@
 use bf_compiler::{
-    Continuation, ContinuationId, ContinuationProgram, FunctionDescriptor, FunctionId,
-    ProfileGranularity, Terminator, ValueType, compile_continuations,
-    compile_continuations_unbounded, compile_continuations_unbounded_with_profile,
-    compile_continuations_with_profile, lower_continuations, lower_source,
+    Address, Continuation, ContinuationId, ContinuationProgram, FrameInstruction, FrameSlot,
+    FunctionDescriptor, FunctionId, ProfileGranularity, Terminator, ValueType,
+    compile_continuations, compile_continuations_unbounded,
+    compile_continuations_unbounded_with_profile, compile_continuations_with_profile,
+    lower_continuations, lower_source,
 };
 
 fn continuation_id(value: u16) -> ContinuationId {
@@ -141,4 +142,58 @@ fn public_continuation_ir_can_be_constructed_and_compiled() {
             .is_empty()
     );
     assert!(!compile_continuations(&program).unwrap().is_empty());
+}
+
+#[test]
+fn instruction_and_source_profiles_distinguish_same_kind_frame_instructions() {
+    let main = FunctionId::new(0);
+    let entry = continuation_id(1);
+    let program = ContinuationProgram::new(
+        main,
+        vec![FunctionDescriptor::new(
+            main,
+            vec![],
+            2,
+            ValueType::Void,
+            entry,
+        )],
+        vec![Continuation::new(
+            entry,
+            main,
+            vec![
+                FrameInstruction::Set {
+                    dst: Address::Frame(FrameSlot::new(0)),
+                    value: 1,
+                },
+                FrameInstruction::Set {
+                    dst: Address::Frame(FrameSlot::new(1)),
+                    value: 2,
+                },
+            ],
+            Terminator::Halt,
+        )],
+    )
+    .unwrap();
+
+    for granularity in [ProfileGranularity::Instruction, ProfileGranularity::Source] {
+        let artifact = compile_continuations_with_profile(&program, granularity).unwrap();
+        let set_sites = artifact
+            .map
+            .sites
+            .iter()
+            .filter(|site| site.kind == "frame_instruction" && site.label == "set")
+            .collect::<Vec<_>>();
+
+        assert_eq!(set_sites.len(), 2);
+        assert!(
+            set_sites
+                .iter()
+                .any(|site| site.stable_key == "function.0.frame_instruction.0.set")
+        );
+        assert!(
+            set_sites
+                .iter()
+                .any(|site| site.stable_key == "function.0.frame_instruction.1.set")
+        );
+    }
 }

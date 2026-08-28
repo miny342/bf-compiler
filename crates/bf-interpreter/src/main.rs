@@ -3,7 +3,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -55,6 +55,11 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os();
     let executable = arguments.next().unwrap_or_default();
     let options = parse_arguments(&executable, arguments)?;
+    validate_profile_output_paths(
+        options.profile_output.as_deref(),
+        &options.program_path,
+        options.profile_map_path.as_deref(),
+    )?;
 
     let source_read_started = Instant::now();
     let source = fs::read(&options.program_path)?;
@@ -284,6 +289,40 @@ fn required_value(
     value: Option<OsString>,
 ) -> Result<OsString, String> {
     value.ok_or_else(|| format!("{option} requires a value\n{}", usage(executable)))
+}
+
+fn validate_profile_output_paths(
+    profile_output: Option<&Path>,
+    program_path: &Path,
+    profile_map_path: Option<&Path>,
+) -> Result<(), String> {
+    let Some(profile_output) = profile_output else {
+        return Ok(());
+    };
+
+    for (input_path, input_name) in std::iter::once((program_path, "program"))
+        .chain(profile_map_path.map(|path| (path, "profile map")))
+    {
+        if profile_output == input_path {
+            return Err(format!(
+                "--profile-output must not overwrite the {input_name}: {}",
+                input_path.display()
+            ));
+        }
+
+        if let (Ok(output_canonical), Ok(input_canonical)) = (
+            fs::canonicalize(profile_output),
+            fs::canonicalize(input_path),
+        ) && output_canonical == input_canonical
+        {
+            return Err(format!(
+                "--profile-output must not overwrite the {input_name}: {}",
+                input_path.display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_duration(value: &OsStr) -> Result<Duration, String> {
