@@ -18,7 +18,7 @@
 - `compiler/07_ast_parser.bfc`: 第5段階surface syntaxのfull AST構築
 - `compiler/08_semantic.bfc`: function収集、名前解決、scalar型検査
 - `compiler/09_continuation_ir.bfc`: typed ASTからContinuation IRへのlowering
-- `compiler/10_abi_codegen.bfc`: uniform frame、dispatcher、call/return ABI
+- `compiler/10_abi_codegen.bfc`: uniform frame、二段countdown dispatcher、call/return ABI
 - `compiler/main.bfc`: production標準入出力とentry point
 
 Rust版`bfc`へは、これらを番号順に複数sourceとして直接渡してもよい。BF上で動くBFC製
@@ -70,6 +70,11 @@ production経路には、identifier 64 byte、function 255個、block nesting 16
 frameのlocal/temporary 239 cell、packed AST/IR arena 4,096 cellという明示的な制限がある。
 制限超過または後段階の構文を検出すると`BFC_STAGE5_ERROR`を出力して停止する。runtime演算は
 通常のBFCと同じくmod 256でwrapする。旧第4段階direct parserは内部回帰test用に残している。
+
+Continuationにはarena上の`NodeId`とは別に1始まりの密な16-bit dispatch IDを割り当てる。
+ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的countdownでdispatchし、
+caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
+dispatch cycle末までは`Pc`を0に保つ。
 
 ## 検証
 

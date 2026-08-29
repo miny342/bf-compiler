@@ -18,6 +18,22 @@ void test_arena_page_boundary() {
     expect_test(field.page >= node.page, 'i');
 }
 
+void test_continuation_dispatch_ids() {
+    reset_ast_arena();
+    first_continuation = null_node();
+    last_continuation = null_node();
+    NodeId first = new_continuation();
+    NodeId second = new_continuation();
+    NodeId first_id = continuation_dispatch_id(first);
+    NodeId second_id = continuation_dispatch_id(second);
+    NodeId boundary;
+    boundary.slot = 0xff;
+    boundary = next_continuation_dispatch_id(boundary);
+    expect_test(first_id.page == 0 && first_id.slot == 1, '0');
+    expect_test(second_id.page == 0 && second_id.slot == 2, '1');
+    expect_test(boundary.page == 1 && boundary.slot == 0, '2');
+}
+
 void test_ast_parser() {
     reset_test_input(5);
     parse_ast_program();

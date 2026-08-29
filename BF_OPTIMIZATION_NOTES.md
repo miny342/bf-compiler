@@ -152,6 +152,12 @@ profilingではhigh-byte countdownを`abi.dispatch.pages.countdown`、疎なhigh
 exact modeの`percent`はclock readを含むexecute wall time基準なので、帰属できた時間だけを分母にする
 `attributed_percent`もtext/JSON reportへ追加した。
 
+2026-08-30、BFC製第5段階compilerのABI backendにもhigh/low二段countdownを移植した。selfhost IRの
+`NodeId`はAST・命令と同じarena上の疎なaddressなので、continuation recordへ1始まりの密な16-bit
+dispatch IDを追加し、PCにはこのIDだけを使う。call先は移動先contextの`NextPc`へ設定し、dispatch
+cycle末までは`Pc=0`を保つ。BFC compiler自身のglobal navigationを増やさないよう、frame幅とarenaから
+読んだID・list cursorはloopの外またはlocalへcacheする。
+
 ### full self-host exact profile
 
 `logs/tmp.bfc`をcontinuation granularityでcompileし、生成した52,633,798 byteのBFをexact modeで1回

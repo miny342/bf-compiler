@@ -25,6 +25,8 @@ const cell IR_EQUAL = 15;
 const cell IR_NOT_EQUAL = 16;
 
 const cell VOID_RETURN_SLOT = 0xff;
+// Continuation records extend the common 13-cell node with a dense dispatch ID.
+const cell CONTINUATION_CELLS = 15;
 
 NodeId first_continuation;
 NodeId last_continuation;
@@ -34,13 +36,45 @@ NodeId lowering_current_function;
 cell lowering_temp_next;
 cell lowering_temp_max;
 
+NodeId continuation_dispatch_id(NodeId continuation) {
+    NodeId result;
+    result.slot = arena_read(continuation, FIELD_DISPATCH_LOW);
+    result.page = arena_read(continuation, FIELD_DISPATCH_HIGH);
+    return result;
+}
+
+void set_continuation_dispatch_id(NodeId continuation, NodeId id) {
+    arena_write(continuation, FIELD_DISPATCH_LOW, id.slot);
+    arena_write(continuation, FIELD_DISPATCH_HIGH, id.page);
+}
+
+NodeId next_continuation_dispatch_id(NodeId previous) {
+    NodeId result = previous;
+    if (result.slot == 0xff) {
+        result.slot = 0;
+        result.page += 1;
+    } else {
+        result.slot += 1;
+    }
+    return result;
+}
+
 NodeId new_continuation() {
-    NodeId result = allocate_node(NODE_CONTINUATION);
-    if (node_is_null(first_continuation)) {
+    NodeId result = allocate_cells(CONTINUATION_CELLS);
+    arena_write(result, FIELD_KIND, NODE_CONTINUATION);
+    NodeId previous = last_continuation;
+    NodeId dispatch_id;
+    if (node_is_null(previous)) {
+        // 0 is reserved for a context which has not reached the cycle-end PC move.
+        dispatch_id.slot = 1;
         first_continuation = result;
     } else {
-        node_set_next(last_continuation, result);
+        dispatch_id = next_continuation_dispatch_id(
+            continuation_dispatch_id(previous)
+        );
+        node_set_next(previous, result);
     }
+    set_continuation_dispatch_id(result, dispatch_id);
     last_continuation = result;
     return result;
 }

@@ -18,6 +18,8 @@ const cell FIELD_C_PAGE = 9;
 const cell FIELD_C_SLOT = 10;
 const cell FIELD_NEXT_PAGE = 11;
 const cell FIELD_NEXT_SLOT = 12;
+const cell FIELD_DISPATCH_LOW = 13;
+const cell FIELD_DISPATCH_HIGH = 14;
 
 struct NodeId {
     cell page;

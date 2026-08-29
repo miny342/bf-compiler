@@ -118,30 +118,34 @@ void emit_frame_less(cell left, cell right) {
     emit_transfer(FRAME_SCRATCH_1, left, 0);
 }
 
-void emit_next_context() {
+void emit_next_context(cell frame_cells) {
     emit_move_to(0);
-    emit_repeat_character('>', stage5_frame_cells);
+    emit_repeat_character('>', frame_cells);
     target_position = 0;
 }
 
-void emit_previous_context() {
+void emit_previous_context(cell frame_cells) {
     emit_move_to(0);
-    emit_repeat_character('<', stage5_frame_cells);
+    emit_repeat_character('<', frame_cells);
     target_position = 0;
 }
 
-void emit_copy_to_next_context(cell source, cell destination) {
+void emit_copy_to_next_context(
+    cell source,
+    cell destination,
+    cell frame_cells
+) {
     emit_clear(FRAME_RESTORE);
     emit_move_to(source);
     compiler_output!('[');
     compiler_output!('-');
     emit_move_to(0);
-    emit_repeat_character('>', stage5_frame_cells);
+    emit_repeat_character('>', frame_cells);
     target_position = 0;
     emit_move_to(destination);
     compiler_output!('+');
     emit_move_to(0);
-    emit_repeat_character('<', stage5_frame_cells);
+    emit_repeat_character('<', frame_cells);
     target_position = 0;
     emit_move_to(FRAME_RESTORE);
     compiler_output!('+');
@@ -151,27 +155,31 @@ void emit_copy_to_next_context(cell source, cell destination) {
     emit_move_to(0);
 }
 
-void emit_transfer_to_previous_context(cell source, cell destination) {
+void emit_transfer_to_previous_context(
+    cell source,
+    cell destination,
+    cell frame_cells
+) {
     emit_move_to(source);
     compiler_output!('[');
     compiler_output!('-');
     emit_move_to(0);
-    emit_repeat_character('<', stage5_frame_cells);
+    emit_repeat_character('<', frame_cells);
     target_position = 0;
     emit_move_to(destination);
     compiler_output!('+');
     emit_move_to(0);
-    emit_repeat_character('>', stage5_frame_cells);
+    emit_repeat_character('>', frame_cells);
     target_position = 0;
     emit_move_to(source);
     compiler_output!(']');
     emit_move_to(0);
 }
 
-void emit_clear_previous_context(cell destination) {
-    emit_previous_context();
+void emit_clear_previous_context(cell destination, cell frame_cells) {
+    emit_previous_context(frame_cells);
     emit_clear(destination);
-    emit_next_context();
+    emit_next_context(frame_cells);
 }
 
 void emit_ir_instruction(NodeId instruction) {
@@ -227,67 +235,87 @@ void emit_call_terminator(NodeId continuation) {
     NodeId callee = node_name(continuation);
     NodeId resume = node_b(continuation);
     NodeId entry = node_a(node_c(callee));
+    NodeId entry_id = continuation_dispatch_id(entry);
+    NodeId resume_id = continuation_dispatch_id(resume);
 
-    emit_next_context();
+    cell frame_cells = stage5_frame_cells;
+    emit_next_context(frame_cells);
     cell position;
-    while (position < stage5_frame_cells) {
+    while (position < frame_cells) {
         emit_clear(position);
         position += 1;
     }
     emit_constant(FRAME_ACTIVE, 1);
-    emit_constant(FRAME_PC_LOW, entry.slot);
-    emit_constant(FRAME_PC_HIGH, entry.page);
-    emit_constant(FRAME_RETURN_PC_LOW, resume.slot);
-    emit_constant(FRAME_RETURN_PC_HIGH, resume.page);
-    emit_previous_context();
+    emit_constant(FRAME_NEXT_PC_LOW, entry_id.slot);
+    emit_constant(FRAME_NEXT_PC_HIGH, entry_id.page);
+    emit_constant(FRAME_RETURN_PC_LOW, resume_id.slot);
+    emit_constant(FRAME_RETURN_PC_HIGH, resume_id.page);
+    emit_previous_context(frame_cells);
 
     NodeId argument = node_c(continuation);
     while (!node_is_null(argument)) {
         emit_copy_to_next_context(
             physical_frame_slot(node_value(argument)),
-            physical_frame_slot(node_tag(argument))
+            physical_frame_slot(node_tag(argument)),
+            frame_cells
         );
         argument = node_next(argument);
     }
-    emit_next_context();
+    emit_next_context(frame_cells);
 }
 
 void emit_return_terminator(NodeId continuation) {
+    cell frame_cells = stage5_frame_cells;
     cell slot = node_value(continuation);
     if (slot == VOID_RETURN_SLOT) {
-        emit_clear_previous_context(FRAME_VALUE);
+        emit_clear_previous_context(FRAME_VALUE, frame_cells);
     } else {
         emit_frame_copy(physical_frame_slot(slot), FRAME_VALUE);
-        emit_clear_previous_context(FRAME_VALUE);
-        emit_transfer_to_previous_context(FRAME_VALUE, FRAME_VALUE);
+        emit_clear_previous_context(FRAME_VALUE, frame_cells);
+        emit_transfer_to_previous_context(
+            FRAME_VALUE,
+            FRAME_VALUE,
+            frame_cells
+        );
     }
-    emit_transfer_to_previous_context(FRAME_RETURN_PC_LOW, FRAME_NEXT_PC_LOW);
-    emit_transfer_to_previous_context(FRAME_RETURN_PC_HIGH, FRAME_NEXT_PC_HIGH);
+    emit_transfer_to_previous_context(
+        FRAME_RETURN_PC_LOW,
+        FRAME_NEXT_PC_LOW,
+        frame_cells
+    );
+    emit_transfer_to_previous_context(
+        FRAME_RETURN_PC_HIGH,
+        FRAME_NEXT_PC_HIGH,
+        frame_cells
+    );
 
     cell position;
-    while (position < stage5_frame_cells) {
+    while (position < frame_cells) {
         emit_clear(position);
         position += 1;
     }
-    emit_previous_context();
+    emit_previous_context(frame_cells);
 }
 
 void emit_continuation_terminator(NodeId continuation) {
     cell kind = node_tag(continuation);
     if (kind == TERM_GOTO) {
         NodeId target = node_name(continuation);
-        emit_constant(FRAME_NEXT_PC_LOW, target.slot);
-        emit_constant(FRAME_NEXT_PC_HIGH, target.page);
+        NodeId target_id = continuation_dispatch_id(target);
+        emit_constant(FRAME_NEXT_PC_LOW, target_id.slot);
+        emit_constant(FRAME_NEXT_PC_HIGH, target_id.page);
     } else if (kind == TERM_BRANCH) {
         NodeId then_target = node_name(continuation);
         NodeId else_target = node_b(continuation);
-        emit_constant(FRAME_NEXT_PC_LOW, else_target.slot);
-        emit_constant(FRAME_NEXT_PC_HIGH, else_target.page);
+        NodeId then_id = continuation_dispatch_id(then_target);
+        NodeId else_id = continuation_dispatch_id(else_target);
+        emit_constant(FRAME_NEXT_PC_LOW, else_id.slot);
+        emit_constant(FRAME_NEXT_PC_HIGH, else_id.page);
         cell condition = physical_frame_slot(node_value(continuation));
         emit_loop_open(condition);
         emit_clear(condition);
-        emit_constant(FRAME_NEXT_PC_LOW, then_target.slot);
-        emit_constant(FRAME_NEXT_PC_HIGH, then_target.page);
+        emit_constant(FRAME_NEXT_PC_LOW, then_id.slot);
+        emit_constant(FRAME_NEXT_PC_HIGH, then_id.page);
         emit_loop_close(condition);
     } else if (kind == TERM_CALL) {
         emit_call_terminator(continuation);
@@ -300,35 +328,106 @@ void emit_continuation_terminator(NodeId continuation) {
     }
 }
 
-void emit_clear_branch_on_nonzero() {
-    emit_loop_open(FRAME_CONDITION);
-    emit_clear(FRAME_CONDITION);
-    emit_clear(FRAME_BRANCH);
-    emit_loop_close(FRAME_CONDITION);
-}
-
-void emit_dispatch_case(NodeId continuation) {
-    emit_frame_copy(FRAME_PC_LOW, FRAME_CONDITION);
-    emit_add_constant(FRAME_CONDITION, 0 - continuation.slot);
-    emit_constant(FRAME_BRANCH, 1);
-    emit_clear_branch_on_nonzero();
-    emit_frame_copy(FRAME_PC_HIGH, FRAME_CONDITION);
-    emit_add_constant(FRAME_CONDITION, 0 - continuation.page);
-    emit_clear_branch_on_nonzero();
-
-    emit_loop_open(FRAME_BRANCH);
-    emit_move_to(FRAME_BRANCH);
-    compiler_output!('-');
-    emit_clear(FRAME_PC_LOW);
-    emit_clear(FRAME_PC_HIGH);
+void emit_dispatch_body(NodeId continuation) {
     NodeId instruction = node_a(continuation);
     while (!node_is_null(instruction)) {
         emit_ir_instruction(instruction);
         instruction = node_next(instruction);
     }
     emit_continuation_terminator(continuation);
+}
+
+// PcLowを最小IDで正規化し、入れ子loopを一段進むたびに破壊的に
+// decrementする。Branchは一致したcaseだけが一度消費する。
+void emit_countdown_case(NodeId continuation) {
+    emit_loop_open(FRAME_BRANCH);
+    emit_move_to(FRAME_BRANCH);
+    compiler_output!('-');
+    emit_move_to(0);
+    emit_dispatch_body(continuation);
     emit_loop_close(FRAME_BRANCH);
     emit_move_to(0);
+}
+
+void emit_low_countdown_level(NodeId continuation, cell remaining) {
+    emit_loop_open(FRAME_PC_LOW);
+    if (remaining == 0) {
+        emit_clear(FRAME_PC_LOW);
+        emit_clear(FRAME_BRANCH);
+    } else {
+        emit_move_to(FRAME_PC_LOW);
+        compiler_output!('-');
+        emit_move_to(0);
+        NodeId next = node_next(continuation);
+        emit_low_countdown_level(next, remaining - 1);
+    }
+    emit_loop_close(FRAME_PC_LOW);
+    emit_move_to(0);
+    emit_countdown_case(continuation);
+}
+
+void emit_dispatch_page(NodeId first, NodeId after) {
+    NodeId first_id = continuation_dispatch_id(first);
+    NodeId last = first;
+    NodeId probe = node_next(first);
+    while (!node_equals(probe, after)) {
+        last = probe;
+        probe = node_next(probe);
+    }
+    NodeId last_id = continuation_dispatch_id(last);
+    emit_add_constant(FRAME_PC_LOW, 0 - first_id.slot);
+    emit_constant(FRAME_BRANCH, 1);
+    emit_low_countdown_level(first, last_id.slot - first_id.slot);
+}
+
+NodeId next_dispatch_page(NodeId first) {
+    NodeId first_id = continuation_dispatch_id(first);
+    NodeId result = node_next(first);
+    while (!node_is_null(result)) {
+        NodeId result_id = continuation_dispatch_id(result);
+        if (result_id.page != first_id.page) {
+            return result;
+        }
+        result = node_next(result);
+    }
+    return result;
+}
+
+void emit_page_countdown_case(NodeId first, NodeId after) {
+    emit_loop_open(FRAME_BRANCH);
+    emit_move_to(FRAME_BRANCH);
+    compiler_output!('-');
+    emit_move_to(0);
+    emit_dispatch_page(first, after);
+    emit_loop_close(FRAME_BRANCH);
+    emit_move_to(0);
+}
+
+void emit_page_countdown_level(NodeId first, cell remaining) {
+    NodeId after = next_dispatch_page(first);
+    emit_loop_open(FRAME_PC_HIGH);
+    if (remaining == 0) {
+        emit_clear(FRAME_PC_HIGH);
+        emit_clear(FRAME_BRANCH);
+    } else {
+        emit_move_to(FRAME_PC_HIGH);
+        compiler_output!('-');
+        emit_move_to(0);
+        emit_page_countdown_level(after, remaining - 1);
+    }
+    emit_loop_close(FRAME_PC_HIGH);
+    emit_move_to(0);
+    emit_page_countdown_case(first, after);
+}
+
+// continuationのdispatch IDは1から密に割り当てるため、low byteと
+// high byteの両方を比較scanなしのcountdownにできる。
+void emit_dispatch_countdown(NodeId first, NodeId last) {
+    NodeId first_id = continuation_dispatch_id(first);
+    NodeId last_id = continuation_dispatch_id(last);
+    emit_add_constant(FRAME_PC_HIGH, 0 - first_id.page);
+    emit_constant(FRAME_BRANCH, 1);
+    emit_page_countdown_level(first, last_id.page - first_id.page);
 }
 
 void calculate_stage5_frame_size() {
@@ -351,17 +450,16 @@ void emit_continuation_program() {
     calculate_stage5_frame_size();
     target_position = 0;
     NodeId main_entry = node_a(node_c(main_function));
+    NodeId main_entry_id = continuation_dispatch_id(main_entry);
     emit_constant(FRAME_ACTIVE, 1);
-    emit_constant(FRAME_PC_LOW, main_entry.slot);
-    emit_constant(FRAME_PC_HIGH, main_entry.page);
+    emit_constant(FRAME_PC_LOW, main_entry_id.slot);
+    emit_constant(FRAME_PC_HIGH, main_entry_id.page);
     emit_move_to(FRAME_ACTIVE);
     compiler_output!('[');
 
-    NodeId continuation = first_continuation;
-    while (!node_is_null(continuation)) {
-        emit_dispatch_case(continuation);
-        continuation = node_next(continuation);
-    }
+    NodeId first = first_continuation;
+    NodeId last = last_continuation;
+    emit_dispatch_countdown(first, last);
     emit_transfer(FRAME_NEXT_PC_LOW, FRAME_PC_LOW, 0);
     emit_transfer(FRAME_NEXT_PC_HIGH, FRAME_PC_HIGH, 0);
     emit_move_to(FRAME_ACTIVE);
