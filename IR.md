@@ -1,35 +1,67 @@
 # 中間表現の設計
 
-この文書は、ソース言語から Brainfuck を生成するまでの中間表現（IR）の
-責務と、現時点での設計方針を記録する。
+この文書は、Rust版`bf-compiler`でソース言語からBrainfuckを生成するまでの実装、
+各中間表現（IR）の責務、最適化を置く層、今後IRを追加する条件を記録する。
+
+以下では、実装に存在するものを「現行」、まだ存在しないpassやIRを「提案」と明記する。
+型名と公開範囲は現在のRust実装を基準とする。設計候補を、実装済みであるかのようには記述しない。
 
 ## 全体構成
 
-コンパイラは、構文木から直接 Brainfuck の文字列を生成しない。source frontendと
-低水準APIは、それぞれ用途に応じたIR pipelineを持つ。
+コンパイラは、構文木から直接Brainfuck文字列を生成しない。source frontendと低水準APIは、
+それぞれ用途の異なるpipelineを持つ。
 
 ```text
-source frontend:
-  BFC source → AST → macro expansion/desugaring → typed HIR
-             → Continuation IR → ABI backend → BF IR → optimize → Brainfuck
+source/CLIの本線:
+  BFC source text
+    → tokens
+    → AST
+    → macro expansion
+    → typed HIR
+    → Continuation IR
+    → ABI layout / portal planning / BF template selection
+    → BF IR（内部ではprovenance付きvariantも使用）
+    → BF peephole optimization
+    → Brainfuck source text
 
 low-level API:
   Cell IR → static-cell backend → BF IR → optimize → Brainfuck
 ```
 
-scalar関数、再帰、frame-relativeなローカル変数には、typed HIRとContinuation IRを
-使用する。chunked frame stack、call/return、pointer位置の規約は[ABI.md](ABI.md)に
-定義する。現在のsource frontendは、名前解決・型検査済みHIRから関数ごとのframe slotと
-Continuationを生成し、ABI backendへ渡す。低水準APIとして、静的`CellId`を使用する従来の
-セルIRとbackendも独立して残す。
+「Raw LANG」と呼びたくなる最初の段階は、正式なIRではなくUTF-8のBFC source textである。
+同様に「Raw BF」は`BfProgram::to_source`が返す文字列である。token列とASTもコンパイル途中の
+表現だが、この文書では、解析後も意図的な契約を持つHIR以降をIRとして扱う。
+
+実際の主要な型と入口は次のとおりである。
+
+| 段階 | Rust上の表現・処理 | 保持する情報 | この段階で確定または失われる情報 |
+|---|---|---|---|
+| source | `&str` / `SourceFile` | source byteとfile名 | なし |
+| token | `Vec<Token>` / `lexer::lex` | token種別、byte offset | 空白とcomment |
+| AST | `ast::AstProgram` / `parser::parse` | sourceに近い構文、名前、macro | 括弧など一部の表記差 |
+| expanded AST | `macro_expansion::expand` | 展開済みblock、fresh local identity | macro呼出し |
+| typed HIR | `hir::HirProgram` / `semantic::analyze` | 解決済みID、nominal型、layout、評価順序、構造化制御フロー | 名前探索、method call糖衣、`len`などのcompile-time構文 |
+| Continuation IR | `ContinuationProgram` / `continuation_lowering::lower_hir` | frame-relative storage、基本block相当のcontinuation、call/return/portal境界 | sourceのnominal型、local名、式木 |
+| BF IR | `BfProgram`または`AnnotatedBfProgram` / ABI backend | 相対pointer移動、cell加算、I/O、BF loop、任意のprofile provenance | function、frame、continuationという意味 |
+| BF source | `String` / `to_source` | `><+-.,[]`列 | IR node境界とprovenance |
+
+通常のprofileなし経路でも、ABI emitterは内部で`AnnotatedBfProgram`を組み立ててからplainな
+`BfProgram`へ変換する。profile付き経路はannotationを保ったままpeephole optimizationを行い、
+sidecar mapを作る。このannotationは新しい意味IRではなく、同じBF命令に出自を付けたvariantである。
+
+scalar関数、再帰、frame-relativeなローカル変数には、typed HIRとContinuation IRを使用する。
+chunked frame stack、call/return、pointer位置の規約は[ABI.md](ABI.md)に定義する。現在のsource
+frontendは、名前解決・型検査済みHIRから関数ごとのframe slotとContinuationを生成し、ABI backendへ
+渡す。低水準APIとして、静的`CellId`を使用する従来のCell IRとbackendも独立して残すが、これは
+source frontendまたは`bfc` CLIの途中に挟まる層ではない。
 
 公開APIでは`lower_source`が`ContinuationProgram`を返し、`compile_source`のbackend errorは
 `SourceCompileError::AbiCodegen`として報告する。以前の`Program`を返すsource lowering APIと
 `SourceCompileError::Codegen`からは互換性のない変更である。手動で構築した静的Cell IRには、
 引き続き`compile(&Program)`または`lower(&Program)`を使用する。
 
-IRを分ける目的は、ソース言語の意味、関数の制御フローとframe配置、Brainfuckの
-データポインタや相対移動を分離することである。
+IRを分ける目的は、ソース言語の意味、関数の制御フローとframe-relative storage、ABIの物理配置、
+Brainfuckのdata pointerと相対移動を分離することである。
 
 現在の実装はLANGUAGE.mdの第12段階までであり、以下のenum、struct、macro、多段projection、
 16-bit aggregate offsetを含むversion 1 IRを使用する。
@@ -39,11 +71,12 @@ IRを分ける目的は、ソース言語の意味、関数の制御フローと
 parserは型定義、文字列、field/index postfix、method call、macro定義・呼出しを保持したASTを
 作る。runtime IRへ進む前に次のcompile-time処理を順に行う。
 
-1. トップレベルの型、定数、macro、global、function名を収集する。
-2. block macroをfreshなlocal identityを持つblock ASTへ展開する。
-3. `receiver.function(args)`を`function(receiver, args)`へdesugarする。
-4. `cell[]`文字列宣言の長さを確定し、`len`と`const cell`を評価する。
-5. 名前解決と型検査を行い、nominal typeと評価順序を持つtyped HIRを作る。
+1. macro定義を収集し、block macroをfreshなlocal identityを持つblock ASTへ展開する。
+2. semantic analysisがトップレベルの型、定数、global、function名を収集する。
+3. type layoutと`cell[]`文字列宣言の長さを確定し、`len`と`const cell`を評価する。
+4. local/global/functionの名前解決と型検査を行う。
+5. `receiver.function(args)`をreceiverが先頭引数のfunction callへ変換し、nominal typeと評価順序を
+   持つtyped HIRを作る。
 
 macro、method call、`cell[]`、`len`はこの段階で消費され、Continuation IRまたはABIへ専用の
 runtime機構を追加しない。文字列リテラルは型確定後にaggregate定数初期化として残す。
@@ -52,20 +85,22 @@ arena、paged handle、多倍長整数も通常のstruct、array、global、func
 
 ### 型とlayout
 
-source型は概念的にstableな`TypeId`で参照し、layout tableを別に持つ。
+source型はcompilation unit内でstableな`TypeId`で参照する。`TypeTable`内の各`TypeDefinition`が
+nominal kindとflatten後のcell数を持ち、structの各fieldが自身のcell offsetを持つ。
 
 ```rust
 enum TypeKind {
     Cell,
-    Enum { variants: Vec<u8> },
+    Void,
+    Enum { variants: Vec<EnumVariant> },
     Struct { fields: Vec<Field> },
     Array { element: TypeId, length: usize },
-    Void,
 }
 
-struct TypeLayout {
+struct TypeDefinition {
+    name: String,
+    kind: TypeKind,
     cells: usize,
-    fields: Vec<FieldLayout>,
 }
 ```
 
@@ -90,11 +125,10 @@ struct HirPlace {
 
 enum Projection {
     Field {
-        field: FieldId,
         cell_offset: usize,
     },
     Index {
-        index: HirExpression,
+        index: ArrayIndex, // Constant(u8) | Dynamic(HirExpression)
         length: usize,
         element_cells: usize,
     },
@@ -106,15 +140,141 @@ enum Projection {
 projection順にそれぞれ1回評価し、aggregate rootからのlogical flat offsetをbackend用temporaryへ
 計算する。
 
-function callなどplaceでないaggregate式へfield/index postfixを適用する場合、base式を一度だけ
-評価してcompiler temporaryへmaterializeし、そのtemporaryをrootとする`HirPlace`へ変換する。
-`len` operandだけはunevaluatedなのでtemporaryを作らない。
+function callなどplaceでないaggregate式へfield/index postfixを適用する場合、HIRは
+`HirExpressionKind::Project { base, projections }`として保持する。Continuation loweringがbase式を
+一度だけcompiler temporaryへmaterializeし、そのregionにprojectionを適用する。`len`はsemantic
+analysisで消費され、runtime評価もtemporary生成も行わない。
 
 placeの読み出し結果が複数cellならaggregate value、1 cellならscalar valueになる。代入ではRHSを
 完全にsnapshotしてから、LHSの動的projectionを左から右に評価する。この規則により、RHSやindexが
 同じaggregateを参照する場合もsource semanticsを保つ。
 
-## セルIR
+HIRはcrate-privateであり、公開APIから直接取得できない。`lower_source`はASTとHIRを通過した後の、
+検証済み`ContinuationProgram`を返す。現行の独立したHIR optimizer passはない。
+`constant_cell_value`による副作用のないcell式の評価と、定数`if`/`while`の除去だけは、
+HIRからContinuation IRへのlowering中に行う。
+
+## Continuation IR
+
+`ContinuationProgram`は、source frontendが生成する公開IRである。関数とglobalのdescriptor、
+および全continuationを持ち、constructorで参照先、型、frame範囲、aggregate範囲、call/returnの
+整合性を検証する。
+
+```rust
+struct Continuation {
+    id: ContinuationId,
+    function: FunctionId,
+    body: Vec<FrameInstruction>,
+    terminator: Terminator,
+}
+```
+
+一つのcontinuationはdispatcherから見たstraight-line entryであり、末尾に必ず一つのterminatorを持つ。
+通常のCFGのbasic blockに近いが、`FrameInstruction::Loop`と`FrameInstruction::Branch`は
+BF templateへ直接落とすための構造化bodyを内部に持てるので、厳密なthree-address basic blockではない。
+
+### Storageと命令
+
+`Address`は物理tape位置ではなく、current frameの`FrameSlot`、static `GlobalId`、aggregateの定数要素、
+またはABI value cellを指す。`AggregateRegion`はcurrent frame、global、return outboxを区別する。
+sourceのenumやstructというnominal型は消え、`ValueType::Cell`またはcell数だけを持つ
+`ValueType::Aggregate`になる。
+
+`FrameInstruction`は次を表す。
+
+- `Set`、`AddConst`、破壊的な`Transfer`
+- protocol cellを除外した`AggregateCopy`
+- byte単位の`Input`と`Output`
+- BFへ構造的にloweringできる`Loop`と、条件を消費する`Branch`
+
+temporary cellはsource localと同じ`FrameSlot`として表される。現行lowererはlocal storageを先に割り当て、
+式評価で必要になるtemporary cellとaggregate regionを単調に追加する。生存期間に基づく再利用はまだ行わない。
+
+### TerminatorとCFG
+
+`Terminator`は次の制御境界を明示する。
+
+- 同一関数内の`Goto`と、条件cellを消費する`Branch`
+- frameを切り替える`Call`と`Return`
+- 動的offsetのaccessをportalへ渡す`AggregateLoad`と`AggregateStore`
+- 互換API用の単一cell `ArrayLoad`と`ArrayStore`
+- 即時停止する`Abort`と、mainの正常終了である`Halt`
+
+callの`return_to`とportal accessの`return_to`もcontinuation IDを実行時データとして使用する。
+したがってCFGを変形するときは、通常の`Goto`/`Branch` successorだけでなく、function entry、call return、
+portal resumeを含むすべてのID参照を書き換えなければならない。
+
+HIRからのloweringは、sourceの`if`、`while`、短絡論理演算、call、動的aggregate accessでcontinuationを
+分割し、同時にframe slot、aggregate region、continuation IDを割り当てる。この層の責務は、sourceの
+評価順序を、ABI backendが直接実装できるframe-relativeな制御フローと破壊的cell操作へ変換することである。
+
+### 現在の最適化pass
+
+現行実装には`ContinuationProgram → ContinuationProgram`の独立したoptimizer passはない。
+Continuation lowering中の定数条件除去を除けば、`ContinuationProgram`は生成直後にABI backendへ渡る。
+
+最近のdispatcherのhigh/low byte countdown化は、Continuation IRを書き換える処理ではない。
+ABI backendがuser continuationとhidden portal continuationからdispatch tableを組み立て、より短い
+BF templateを選ぶbackend最適化である。同様に、連続するaggregate cellのclearをrange templateへ
+融合する処理もABI backendにある。どちらも物理pointer位置とprotocolを知る必要があるため、配置は妥当である。
+
+## 最適化を置く層と追加IRの判断
+
+最適化は、必要な意味をまだ保持している最も低い層へ置く。
+
+| 最適化 | 置く層 | 理由 |
+|---|---|---|
+| source定数評価、pure式の簡約、評価順序を要する変形 | HIRまたはHIR lowering | nominal型、式木、副作用の順序が残る |
+| 到達不能continuation除去、jump threading、block結合、ID再採番 | Continuation IR | CFG、function所有者、call/portal resumeが見える |
+| dispatcher、call/return、portal、global navigation、pointer-aware template融合 | ABI backend | frame layout、protocol、entry/exit pointer条件を知る |
+| 隣接`Move`/`Add`、clear loopなど局所的なBF正規化 | BF IR | 上位の意味を必要としない |
+
+### 直近に追加するならIRではなくContinuation CFG pass
+
+次に実装する価値があるのは、新しい表現ではなく、既存の`ContinuationProgram`を入力と出力にする
+独立passである。最初の対象は次とする。
+
+1. function entry、通常successor、call return、portal resumeからの到達可能性を使うunreachable除去。
+2. 空の`Goto`に対するjump threading。
+3. successorが一つで、runtimeから直接addressされないcontinuationの安全な結合。
+4. 解析で定数と証明できるterminator `Branch`の簡約。
+5. 全参照を更新した後の密なID再採番。
+
+初版は全`FunctionDescriptor::entry`を到達可能性のrootにして、function内の到達不能continuationだけを
+除去する。将来unused functionも除去する場合はmain entryだけをrootにし、`Call::callee`からcalleeの
+function entryへのcall graph edgeを必ず辿る。
+
+function entry、callの`return_to`、aggregate portalの`return_to`はaddress-takenとして保守的に扱う。
+これらをthreadingまたは結合する場合は、backendが期待するcontextとresume protocolを保つことを
+個別に証明する。passの前後で`ContinuationProgram`のvalidationを行い、ID境界、再帰、portalを含む
+differential testを置く。
+
+temporaryの削減も新しい汎用IRを必要としない。まずlowering内でscopeごとにtemporaryを再利用するか、
+Continuation CFG上でlivenessを計算して`FrameSlot`をrenameする、独立したslot allocation passとして
+試す。ただし現在はsource localとtemporaryの区別をIRに残さないため、後者を行うならcompiler-owned
+temporaryというmetadataを追加する。
+
+### SSAは現時点では追加しない
+
+現状の主要なcostはdispatcher、frame/portal間の移動、BF templateであり、scalarの再計算を減らす
+古典的SSA最適化が直接解く問題ではない。またHIRのlocal/globalは可変storageであり、aggregate、
+動的projection、call、I/Oを含む。SSA化にはphiまたはblock parameterだけでなく、aliasとeffectの契約、
+memory操作、値を再びframe cellへ割り当てる処理が必要になる。SSA temporaryをspillしてframeを広げると、
+Brainfuckではpointer移動とframe costが悪化する可能性もある。
+
+したがって、次の条件がprofileと実例で満たされるまではSSA専用IRを追加しない。
+
+- CFG縮約、backend template改善、temporary再利用の後も、pure scalar式の再計算や不要copyが支配的である。
+- call、I/O、global、aggregate、dynamic projectionのeffect/alias分類を定義できている。
+- constant propagation、CSE、loop-invariant code motionなど、複数のpassで追加IRの維持費を回収できる。
+
+条件を満たした場合の候補は、全面的なmemory SSAではなく、HIRとContinuation IRの間だけに存在する
+内部`Value CFG`である。basic blockとblock parameter、typedなscalar virtual value、明示的な
+load/store/call/effectを持たせ、pure scalarだけをSSA対象とする。aggregate、global、dynamic portalは
+memory operationのまま保守的に扱い、最適化後にvirtual valueの生存期間を見てframe slotを割り当てる。
+この候補は現行pipelineの一部ではない。
+
+## 低水準API用Cell IR
 
 セルIRは、物理的なテープ位置を意識しない、構造化されたIRである。
 現在の `bf-compiler` crateに実装されている `Instruction` はこの層に相当する。
@@ -263,9 +423,10 @@ condition = 0
 使って複製する。`else_body`をBFで実現するためのフラグセルはコード生成器が
 割り当てる。
 
-## セルIRの最適化候補
+## 低水準Cell IRの最適化候補
 
-セルIRでは、ソース言語の意味を保ったまま次の最適化を行える。
+これは低水準APIに対する未実装の候補であり、source frontendのContinuation IR最適化とは別である。
+Cell IRでは次の局所最適化を行える。
 
 ```text
 Set(x, 10)
@@ -309,7 +470,8 @@ enum BfInstruction {
 `Add`は現在セルへのmod 256の加算である。例えば`Add(255)`は1減算と等価で、
 BF文字列へ変換するときは`-`として出力する。
 
-lowering自体は最適化を行わず、セルIRの各命令を機械的にBF IRへ変換する。
+lowering自体は独立したBF peephole passを実行せず、Cell IR backendまたはABI backendが各命令を
+BF IRへ変換する。
 したがって公開APIの`lower`と`lower_continuations`は、隣接する`Move`や`Add`、
 `Move(0)`や`Add(0)`もそのまま保持する。未加工の結果を検査・計測できるようにするためである。
 `Move(0)`と`Add(0)`を文字列化した結果は空文字列になる。
@@ -332,30 +494,32 @@ wrapping cellを必ず0にするため、`[+]`や`[-]`も含めて短い標準�
 I/Oや一般のloopを越えた並べ替えは行わない。
 相殺するポインタ移動の削除は、最適化前の実行がテープ境界を越えないことを前提とする。
 
-セルIRの各命令をBF IRへ変換する際に、コード生成器は次を担当する。
+低水準Cell IR backendは、各命令をBF IRへ変換する際に次を担当する。
 
 - `CellId`から物理テープ位置への変換
 - 必要な位置へのデータポインタ移動
 - `Branch`などが要求する一時セルの割り当て
-- 配列操作の具体的なテープ操作への展開
 - 命令終了時のデータポインタ位置の追跡
 - 30,000セルの範囲内に収まることの検査
+
+source本線のABI backendは別に、frame/static layout、dispatcher、call/return、aggregate portal、
+pointer位置の規約を具体的なBF操作へ展開する。
 
 ### BF IR最適化の今後の候補
 
 BF固有の分岐、比較、divmod、moving-indexなどのlowering候補とcost modelは
 [BF_OPTIMIZATION_NOTES.md](BF_OPTIMIZATION_NOTES.md)にまとめる。
 
-さらに、ループを解析してセルIR相当の操作へ戻せる場合には、最適なBF表現へ
-再構成できる。ただし、コンパイラ自身が生成したコードではセルIRの段階ですでに
-転送ループを認識しているため、BF IRの当面の責務はBrainfuckの構造を保持した
-中間表現と最終的な文字列化である。
+さらに、ループを解析してCell IRまたはFrameInstruction相当の操作へ戻せる場合には、最適なBF表現へ
+再構成できる。ただし、compiler backendは上位の意味を知った時点で転送loopなどを選択できるため、
+BF IRの当面の責務はBrainfuckの構造を保持した中間表現と最終的な文字列化である。
 
 ## Aggregate storageと動的projection
 
-現在実装済みの`cell[N]`は、定数添字だけを使うlocalなら個別の`FrameSlot`へscalarizeし、
-動的添字を使うlocal/globalなら[ABI.md](ABI.md)のaligned array portalへloweringする。
-セルフホスト拡張では、この仕組みをstruct、任意要素型配列、多次元配列へ一般化する。
+現在のstruct、固定長array、多次元arrayは、localならalignedな`FrameAggregateId`、globalなら
+static `GlobalId`のaggregate regionへ配置する。定数offsetのsubobjectはregion内の
+`Address::ArrayElement`として直接扱い、動的offsetのsubobjectは[ABI.md](ABI.md)のaggregate portalへ
+loweringする。version 0の`Array`という型名とterminatorは、公開Continuation IRの互換APIとして残る。
 
 ### 定数projection
 
@@ -367,9 +531,11 @@ pages[2][10]         → root + 2 * row_cells + 10
 nodes[3].kind        → root + 3 * cells(Node) + field_offset(kind)
 ```
 
-local aggregateをすべて定数offsetで使用できる場合、各leafを通常の`FrameSlot`へscalarizeしてよい。
-物理chunk flagを挟ぐかどうかはABI layoutが決め、source-levelの連続性やpointer値として観測
-できない。aggregate copyはlogical leaf順に行い、protocol cell、chunk head、paddingを含めない。
+現行実装は、local aggregateが定数offsetだけで使われる場合もregion全体を`FrameAggregateId`として
+確保する。将来scalarizeしてもよいが、source-levelの値渡しとsnapshot semanticsを保ち、動的accessの
+可能性がないことを証明する必要がある。物理chunk flagを挟ぐかどうかはABI layoutが決め、
+source-levelの連続性やpointer値として観測できない。aggregate copyはlogical leaf順に行い、
+protocol cell、chunk head、paddingを含めない。
 
 ### 動的projection
 
@@ -383,8 +549,11 @@ for each Index(index, element_cells):
     offset += index * element_cells
 ```
 
-各source indexは従来どおり1 cellであり、`0..=255`を表す。2 cellなのは最大30,000-cellの
-aggregate内offsetを保持するbackend内部値だけであり、sourceへ`u16`やpointerを追加しない。
+各source indexは従来どおり1 cellであり、`0..=255`を表す。2 cellなのは最大65,536 cellのpayload内で
+`0..=65,535`のoffsetを保持するcompiler-owned値だけであり、sourceへ`u16`やpointerを追加しない。
+通常compileではstatic領域とframe領域に30,000-cell tapeのcapacity checkも適用する。現行の
+`*_unbounded` APIが外すのはstatic layout側のcapacity checkであり、function frameは引き続き
+`FrameLayout`の30,000-cell上限を満たす必要がある。
 範囲外indexはLANGUAGE.mdどおり未定義動作である。
 
 Continuation IRでは配列専用identityをaggregate regionへ一般化する。
@@ -392,6 +561,7 @@ Continuation IRでは配列専用identityをaggregate regionへ一般化する�
 ```rust
 enum ValueType {
     Cell,
+    Array(usize), // version 0 compatibility
     Aggregate { cells: usize },
     Void,
 }
@@ -486,6 +656,14 @@ typed HIRは次を検証する。
 - assignment/call/returnのnominal型が一致し、各動的indexの評価順序が保持される。
 - macro、method call、`len`、`cell[]`がruntime HIRへ残っていない。
 
+Continuation IRのconstructorは次を検証する。
+
+- global、function、continuation IDが一意で、function entryとsuccessorの所有関係が正しい。
+- `FrameSlot`、global、aggregate subrange、logical offsetがdescriptorの範囲と型に一致する。
+- `Transfer`のsource/target、係数、`Branch`のconditionが破壊的命令の契約を満たす。
+- call argumentとreturn valueがcallee/callerの型、parameter location、outbox容量に一致する。
+- main、`Return`、`Halt`、`Abort`、portal terminatorの配置が制御規約を満たす。
+
 セルIRはコード生成前に全体を検証する。
 
 - 参照する`CellId`がプログラムのセル数以内である。
@@ -512,6 +690,9 @@ typed HIRは次を検証する。
 10. aggregate regionと16-bit logical offset portalをContinuation IR/ABIへ追加する。（完了）
 11. 文字列、`len`、`const cell`、method sugar、block macro、`abort`をfrontendへ追加する。（完了）
 12. BFCでstreaming lexer/parserを記述し、self-hostに不足する最小機能を実測から判断する。
-    （着手。`selfhost/stage2/compiler/`でLANGUAGE.mdの初期実装第1〜3段階をBF上から
+    （着手。`selfhost/stage2/compiler/`でLANGUAGE.mdの初期実装第1〜5段階をBF上から
     BFへコンパイルし、外部harnessで生成物を実行検証できる。）
-13. profileに基づき、BF固有templateとcost modelを段階的に追加する。
+13. profileに基づき、BF固有templateとcost modelを段階的に追加する。（着手）
+14. `ContinuationProgram → ContinuationProgram`のCFG縮約passを追加し、dispatcher case数と
+    continuation IDを削減する。
+15. profileが導入条件を満たした場合だけ、scalar `Value CFG`の試作を判断する。

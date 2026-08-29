@@ -6,7 +6,8 @@
 artifact、compiler provenance、interpreter、CLI、report、検証方法を定める。
 
 最適化の優先順位と導入手順は[BF_OPTIMIZATION_PLAN.md](BF_OPTIMIZATION_PLAN.md)に定める。
-この仕様は初期実装前のdesignであり、実装中に変更する場合はformat versionと本文を同時に更新する。
+この仕様のversion 1は実装済みである。未実装のsource span、self-host compiler自身からのmarker生成、
+profile比較toolは本文で明記する。wire formatを変更する場合はformat versionと本文を同時に更新する。
 
 ## 目的
 
@@ -635,17 +636,18 @@ profiling結果を混同しない。exact modeには一律のoverhead上限を�
 
 ## 導入順序
 
-1. `--timings`とphase timingを追加する。
-2. profile site tableとannotated BF IRを追加する。
-3. serializerからsidecar rangeを生成する。
-4. interpreterがsidecarを検証し、site別counterを収集する。
-5. ABI granularityでcurrent self-host workloadをprofileする。
-6. continuation、instruction granularityを追加する。
-7. sampling profilerを追加する。
-8. exact profilerをmicrobenchmarkへ追加する。
-9. embedded numeric markerを追加する。
+1. `--timings`とphase timingを追加する。（完了）
+2. profile site tableとannotated BF IRを追加する。（完了）
+3. serializerからsidecar rangeを生成する。（完了）
+4. interpreterがsidecarを検証し、site別counterを収集する。（完了）
+5. ABI granularityでcurrent self-host workloadをprofileする。（完了）
+6. continuation、instruction granularityを追加する。（完了。source granularityのsource spanは未実装）
+7. sampling profilerを追加する。（完了）
+8. exact profilerをmicrobenchmarkへ追加する。（完了）
+9. embedded numeric markerを追加する。（完了）
 10. base32 site dictionaryとself-host compilerからのmarker生成を追加する。
-11. profile比較toolと継続的なbaseline保存を追加する。
+    （Rust compilerのdictionary生成は完了。BFC製compilerからの生成は未実装）
+11. profile比較toolと継続的なbaseline保存を追加する。（未実装）
 
 最初の最適化判断には手順5まででも十分な情報が得られる。source-level debuggerに近い機能の完成を待たず、
 ABI category別counterとphase timingが利用可能になった時点でdispatcherとportalの調査を開始する。

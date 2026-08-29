@@ -1,6 +1,7 @@
 # Brainfuck backend最適化メモ
 
-この文書は、version 0の言語仕様やABIを変更しないbackend最適化と今後の候補を記録する。
+この文書は、source language semanticsと現行ABI contractを変更しないbackend最適化、および今後の
+候補を記録する。
 隣接する移動・加算の統合、zero命令の除去、clear loopの標準化など、意味を局所的に判定できる
 BF IR peephole最適化とcontinuation dispatcherの二段countdownは採用済みである。その他の高度な
 lowering手法は未採用であり、実装時には生成BFの長さ、実行step、追加cell数を現在のloweringと

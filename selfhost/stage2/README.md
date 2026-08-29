@@ -94,6 +94,10 @@ artifactは`bfc --unlimited-tape`で生成し、`bf-interpreter --unlimited-tape
 compilerを過度にmemory tuningしたりすることは目標にしない。セルフホスト経路が成立した後、
 必要なら別途profileを取り、有限target向けの現実的な構成を検討する。
 
+現行flagはstatic layoutとinterpreterの実行時上限を外すが、個々のfunction frameを作る
+`FrameLayout`には30,000-cell上限が残る。現在のcompiler frameはこの範囲内であり、大きなglobal arenaを
+static regionへ置くためにこのflagを使用している。
+
 現在のpacked AST arenaは16 page、4,096 logical cellである。handle自体はpage/slotの
 16-bit形式を保ち、容量超過はcompile errorにする。65,536-cell arenaは意味上は扱えるが、
 現ABI backendではglobalとframe間の絶対pointer移動により生成BFが過大になるため、static

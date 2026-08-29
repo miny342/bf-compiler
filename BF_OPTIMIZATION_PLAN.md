@@ -35,9 +35,18 @@ BFC source
 - clear loopの認識と`[-]`への正規化。
 - clearまたは加減算直後の`Input`による上書きの簡約。
 
-これらは生成BFのsource sizeへ大きく効く一方、RLE型target上の実行step削減は比較的小さい。
-今後の主な対象は、最終BFから意味を推測するpeepholeではなく、意味とpointer条件を保持している
-Continuation IRおよびABI backendとする。
+さらに、profile map、counter/sample/exact profiler、provenance付きBF IR、およびhigh/low byteの
+二段countdown dispatcherを実装済みである。dispatcherは密なID範囲に破壊的countdownを使い、
+疎な範囲だけequality scanへfallbackする。測定値とtemplate契約は
+[BF_OPTIMIZATION_NOTES.md](BF_OPTIMIZATION_NOTES.md)に記録する。
+
+現行checkoutには独立したContinuation IR optimizer passはない。HIR lowering中の定数条件除去、
+ABI backendでのdispatcher選択とaggregate clear融合、BF IR peepholeを区別する。各IRの正確な境界と、
+追加IRを判断する条件は[IR.md](IR.md)に定める。
+
+BF peepholeは生成BFのsource sizeへ大きく効く一方、RLE型target上の実行step削減は比較的小さい。
+今後の主な対象は、最終BFから意味を推測するpeepholeではなく、Continuation CFGの縮約と、意味および
+pointer条件を保持しているABI backendの改善とする。
 
 2026-08-28のrepository headで、release buildによるRust compiler自身の生成時間は約0.12秒、
 self-host production compilerの生成BFは約39,098,796 byte、内部test用生成BFは約53,238,909 byte
@@ -60,6 +69,10 @@ self-host production compilerの生成BFは約39,098,796 byte、内部test用生
 - dispatcher、call、return、portal、global navigationの問題はABI backendで解決する。
 - localなBF命令の冗長性だけをBF optimizerで解決する。
 - sourceの評価規則やlive/dead情報が必要な最適化はHIRまたはContinuation loweringで解決する。
+
+この分類は、Continuationを入力にする最適化をすべてContinuation IR optimizerと呼ぶ、という意味ではない。
+たとえばdispatcherの比較/countdown方式はABI fieldとpointer条件を使うためABI backendに置く。一方、
+unreachable除去やjump threadingは`ContinuationProgram`自体を書き換える独立passに置く。
 
 BF文字列から巨大なtemplateを再認識するpassは、他のpeepholeによるわずかな形の変化で壊れやすく、
 self-host compilerへも移植しにくいため主方式にしない。
@@ -90,16 +103,17 @@ objectをlinkする仕組みは現在存在しないため、一つの生成BF�
 RustとBFCで同一のBF文字列を生成する必要はないが、同一の契約testを通し、同じABI上の状態遷移を
 実現しなければならない。
 
-## Milestone 0: 実時間profiling基盤
+## Milestone 0: 実時間profiling基盤（完了）
 
-[BF_PROFILING_DESIGN.md](BF_PROFILING_DESIGN.md)に従い、次を実装する。
+[BF_PROFILING_DESIGN.md](BF_PROFILING_DESIGN.md)に従い、次を実装した。
 
 1. interpreterのload、parse、fast IR build、execute、output writeの区間計測。
 2. compiler内のBF命令へprofile site provenanceを保持するannotated BF IR。
 3. markerを含まないBFと対応するsidecar profile map。
 4. ABI template、function、continuation、FrameInstruction別の実行counter。
 5. 低overheadなsampling profilerとmicrobenchmark用exact profiler。
-6. self-host出力でも使用できる、BF命令以外の文字だけからなる埋め込みprofile marker。
+6. Rust compiler生成artifactで使用できる、BF命令以外の文字だけからなる埋め込みprofile marker。
+   BFC製self-host compiler自身からのmarker生成は未実装である。
 7. machine-readableなprofile reportと、inclusive/exclusive timeのtree表示。
 
 初回profileでは少なくとも次を分離する。
@@ -117,28 +131,32 @@ RustとBFCで同一のBF文字列を生成する必要はないが、同一の�
 この測定結果で後続milestoneの順序を再確認する。以下は現行実装から推定した優先順位であり、profileが
 異なる結果を示した場合は、実時間比率の高い項目を先にする。
 
-## Milestone 1: Dispatcher
+## Milestone 1: DispatcherとContinuation CFG
+
+ABI dispatcherの二段化とhigh/low byte countdownは完了した。Continuation CFGの縮約passは未実装である。
 
 ### 問題
 
-現行dispatcherはdispatch cycleごとに全continuationおよびhidden portal continuationを列挙し、
-各IDについてPC low/high byteをcopyして比較する。この方式はcontinuation数を`C`とすると、1遷移
-あたり概ね`O(C)`である。
+初期dispatcherはdispatch cycleごとに全continuationおよびhidden portal continuationを列挙し、
+各IDについてPC low/high byteをcopyして比較していた。この方式はcontinuation数を`C`とすると、
+1遷移あたり概ね`O(C)`だった。
 
-self-host compilerのABI codegenも同じ線形全件比較を生成しているため、Rust側の改善を移植しやすい。
+現行Rust backendはhigh byteでpageを選び、page内のlow byteを選ぶ。連続したpage/IDには破壊的countdown、
+疎な集合にはequality scanを使う。self-host compilerのABI codegenへの移植と、profileに基づく
+ID配置は残作業である。
 
-### 実装候補
+### 検討したdispatcher variant
 
-次を独立variantとして実装し、profile fixtureで比較する。
+次を独立variantとして比較し、2と3を組み合わせた方式を採用した。
 
-1. 現行のID equality scan。
+1. 旧ID equality scan。
 2. 255件以下を対象とした1段countdown dispatcher。
 3. high byteを選択してからlow byteを選ぶ2段countdown dispatcher。
 4. function IDとfunction-local continuation IDを分ける階層dispatcher。
 5. ABI上のmarker位置を遷移させるmoving-marker dispatcher。
 
-最初は1から2または3への置換を現行ABI内で試す。4または5が明確に有利で、現行PC fieldやframe
-headerが妨げになる場合はABI versionを分ける。
+4または5は未採用である。将来明確に有利と測定され、現行PC fieldやframe headerが妨げになる場合は
+ABI versionを分ける。
 
 ### Continuation IR側の縮小
 
@@ -365,4 +383,3 @@ fast IR認識、またはABI構造を再検討する。
 8. BFC実装への移植。
 
 旧variantは新variantがfull self-host verificationを安定して通り、比較用途が不要になるまで残す。
-

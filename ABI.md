@@ -4,16 +4,13 @@
 実験的な実行時ABIを定義する。
 
 ABI version 0と、その上に定義するセルフホスト拡張version 1の設計仕様である。
-現在の`bf-compiler`はversion 0を実装し、scalarと配列のframe、continuation
-dispatch、call/return、直接・相互再帰、static global、array portal、aggregate
-argument/returnにこのABIを適用している。定数添字はlayoutから直接解決し、動的添字は
-local/globalに共通のportal accessorを使用する。独立した低水準の検証コードは引き続き
+現在の`bf-compiler`はversion 1まで実装している。version 0のscalar/array frame、continuation
+dispatch、call/return、直接・相互再帰、static global、array portal、aggregate argument/returnに加え、
+enum、struct、任意要素型・多次元固定長配列のlogical aggregate layout、16-bit offset portal、
+任意のactivationからの`abort`を使用する。定数offsetはlayoutから直接解決し、動的offsetは
+local/globalに共通のportal accessorを使用する。sourceのmethod call、macro、文字列、`len`はfrontendで
+消費されるためABI機能を追加しない。独立した低水準の検証コードは引き続き
 `bf-frame-experiment` crateに置く。
-
-version 1はenum、struct、任意要素型・多次元固定長配列に必要なlogical aggregate layout、
-16-bit offset portal、任意のactivationからの`abort`を追加する。sourceのmethod call、macro、
-文字列、`len`はfrontendで消費されるためABI機能を追加しない。version 1を実装するまでは
-version 0の既存layoutと検証結果を基準とする。
 
 ## 目的
 
@@ -269,8 +266,9 @@ frame_address(F, K, q)
       + (q mod D)
 ```
 
-したがって、現在のframeにあるscalarと、通常の`FrameSlot`へscalarizeした定数projectionの
-aggregate leafは、frontierからの負のコンパイル時定数offsetとしてアクセスできる。
+したがって、現在のframeにあるscalar `FrameSlot`は、frontierからの負のコンパイル時定数offsetとして
+アクセスできる。aligned aggregate region内の定数projectionも、region baseとlogical offsetから
+物理位置をcompile timeに決定できる。
 
 frame内の大分類は低addressから次の順とする。
 
@@ -530,9 +528,10 @@ address(A, o) = A + chunk(o) * S + 1 + within(o)
 ```
 
 protocol prefix、chunk head、paddingはpayload cell数に含めず、aggregate copyでも読み書き
-しない。zero-size aggregateはregionを確保せず、copyも行わない。動的indexを一度も使わない
-local aggregateはversion 0と同様にscalarizeしてよい。動的projectionへ渡すrootだけをchunk headへ
-alignし、1個のrootにつき1個のprotocol prefixを置く。nested arrayごとにprefixを重ねない。
+しない。zero-size aggregateはregionを確保せず、copyも行わない。現行backendはlocal aggregateを
+一律にaligned regionへ置く。将来、動的indexを一度も使わないlocal aggregateをscalarizeしてよいが、
+これは解析を伴う未実装のlayout最適化である。regionは1個のrootにつき1個のprotocol prefixを置き、
+nested arrayごとにprefixを重ねない。
 
 ### Flat logical offset
 
@@ -545,9 +544,13 @@ for each dynamic array projection from outer to inner:
     o += index * cells(indexed element type)
 ```
 
-実体化できるaggregateは30,000-cell tapeより小さいため、`o`はlittle-endianの2 cellで十分である。
-この2 cell値はsourceから構築、保存、比較、returnできる整数型ではなく、portal呼出しの間だけ存在
-するcompiler-owned値である。
+Continuation IRが表現できるaggregate payloadは最大65,536 cellであり、`o`の値域は
+`0..=65,535`なのでlittle-endianの2 cellで十分である。この2 cell値はsourceから構築、保存、比較、
+returnできる整数型ではなく、portal呼出しの間だけ存在するcompiler-owned値である。
+
+通常compileではstatic領域と各frameの物理layoutに30,000-cell tapeのcapacity checkを適用する。
+現行の`*_unbounded` APIが外すのはstatic layout側のcapacity checkであり、function frameは引き続き
+30,000-cell上限を満たさなければならない。
 
 version 1では共通contextのlogical fieldを次のように解釈する。
 
@@ -658,8 +661,8 @@ a = update(a)         // ABI上の意味
 
 ## Aggregate value
 
-固定長配列とstructを、複数cellからなるaggregate valueとして扱う。version 0実装は
-`cell[N]`、version 1はenum leaf、struct、任意要素型・多次元配列へ一般化する。
+固定長配列とstructを、複数cellからなるaggregate valueとして扱う。version 0互換の`cell[N]`に加え、
+現行version 1実装はenum leaf、struct、任意要素型・多次元配列を扱う。
 
 ```text
 AggregateType {
@@ -860,7 +863,8 @@ return先はcalleeの`RETURN_PC`に保持するため、return addressを別のv
 calleeは自身のframe size `K`と、全frameで共通なcaller `VALUE`のfrontier相対位置を
 知っているため、callerの関数種類を知らなくても戻り値を転送できる。
 
-main frameからのreturnは特別扱いし、main frameの`ACTIVE`を0にしてprogramを終了する。
+source-levelのmainにある`return;`とmain末尾への到達は`Terminator::Halt`へloweringする。
+IR-levelの`Return`はmainでは不正であり、`Halt`がmain frameの`ACTIVE`を0にしてprogramを終了する。
 
 ## Continuation dispatcher
 
@@ -870,11 +874,16 @@ BFへ生成する。
 ```text
 Continuation:
     body instructions
-    terminator = Goto | Branch | Call | Return | Abort(v1) | Halt
+    terminator = Goto | Branch | Call | Return
+               | ArrayLoad | ArrayStore
+               | AggregateLoad | AggregateStore
+               | Abort(v1) | Halt
 ```
 
-初期dispatcherは、現在contextの16 bit `PC`を各continuation IDと照合して対象を選ぶ。
-選択時に`PC`を0へclearし、bodyが書いた`NEXT_PC`を反復末尾で`PC`へmoveする。
+dispatcherは、現在contextの16 bit `PC`をhigh byteのpageとpage内のlow byteへ分けて対象を選ぶ。
+user continuation、aggregate portal accessor、portal resumeを同じpage表へ入れる。連続したhigh-byte
+pageと、page内の連続したlow byteには破壊的countdownを使用し、疎な集合だけID equality scanへ
+fallbackする。選択時に`PC`を0へclearし、bodyが書いた`NEXT_PC`を反復末尾で`PC`へmoveする。
 
 ```text
 while current_context.ACTIVE != 0:
@@ -891,8 +900,13 @@ callee `ACTIVE`、return後はcaller `ACTIVE`にデータポインタを置い�
 dispatch contextを一時的に移し、accessor後のresume continuationがframeの`ACTIVE`と
 `PC`へ戻す。frameとarray portalは同じ16-field相対layoutを使う。
 
-backendは将来countdown dispatch用の専用IRとBF loweringへ置換してよい。初期の照合型
-dispatcherでは、頻繁に通るcontinuationへ小さいlow-byte IDを割り当てる。
+countdownは`PC`を破壊的に消費し、選択したcaseだけが共通のbranch flagを消費して実行される。
+case bodyがcall、return、portalによって別contextへpointerを移した場合、移動先contextの`PC`と
+branch flagは0でなければならない。これにより残りのcountdown caseを誤って実行しない。
+
+現行frontendは密なcontinuation IDを割り当てるが、公開Continuation IRは任意のnonzero `u16` IDを
+許す。このためbackendは疎な範囲へ巨大なcountdownを生成しない。profileに基づくhot continuationの
+ID配置は将来の最適化であり、source順の再現性とdebuggabilityを含めて評価する。
 
 ## Pointer position convention
 
@@ -1132,17 +1146,17 @@ scalar再帰深さ20では、8-cell版が7,196 bytes / 506,300 steps、16-cell�
 だけ生成する初期実装として許容する。array portal ABIを保ったまま、accessor内部を
 moving-index方式や別のdispatchへ後から交換する。
 
-## 実装時に再評価する最適化
+## 継続して評価する最適化
 
-次はABIの意味を変えないためversion 0実装を妨げない。実装・profiling後に再評価する。
+次はABIの意味を変えずに比較できる。実装・profiling後に再評価する。
 外部記事から収集した具体的なBF lowering候補、適用条件、benchmark順序は
 [BF_OPTIMIZATION_NOTES.md](BF_OPTIMIZATION_NOTES.md)に分離して記録する。
 
-- 照合型16 bit dispatcherをpage/slot countdownへ置換するか。
+- 照合型16 bit dispatcherのpage/slot countdownへの置換。（実装済み。疎なIDは照合型へfallback）
 - 二段静的array dispatchをmoving-index方式へ置換するか。
 - call graphと頻度推定を使うcontinuation ID割当。
 - aggregate copy elisionとoutboxを複数slotへ拡張する条件。
 - tail call optimization。
 - debug専用のstack overflow guard。
 
-これらを除くversion 0の項目とversion 1の節は、現在の実装基準である。
+これらの未実装候補を除くversion 0の項目とversion 1の節は、現在の実装基準である。

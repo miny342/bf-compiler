@@ -189,8 +189,8 @@ cell[8][255] pages;
 短絡するoperandは評価されないため、そのoperandが実行時の値を含んでいても式全体の
 値が決まる場合は定数添字とみなす。
 
-ただし、動的配列アクセスなど現在の実装段階で未対応のoperationは、短絡される
-operand内にあってもコンパイルエラーとして診断する。短絡によって未実装機能そのものが
+ただし、その実装段階で未対応のoperationは、短絡されるoperand内にあってもコンパイルエラーとして
+診断する。短絡によって未実装機能そのものが
 受理されるわけではない。
 
 ```c
@@ -990,3 +990,8 @@ aggregate portalを使用する。[ABI.md](ABI.md)のbackendは`D = 8`と`D = 16
 動的に拡張するテープまたは実質無制限のテープを使用してよい。この開発用targetでは、固定容量へ
 収めるためだけにversion 1の言語仕様を削ったり、セルフホストcompilerへ過度なmemory tuningを
 要求したりしない。有限テープとの互換性とセルフホストの成立確認は、別のtarget条件として扱う。
+
+現行の`bfc --unlimited-tape`はstatic layoutと、interpreter実行時の右端上限を外す。各function frameの
+`FrameLayout`にはまだ30,000-cell上限を適用するため、完全に無制限なcompile targetではない。
+現self-host workloadはこの制約内に収まる。frame自体が上限を超える構成が必要になった時点で、
+frame layoutのcapacity policyもtarget設定へ分離する。
