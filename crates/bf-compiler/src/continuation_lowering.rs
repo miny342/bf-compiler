@@ -1022,8 +1022,8 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 }
                 Projection::Index {
                     index,
+                    length,
                     element_cells,
-                    ..
                 } => match index {
                     ArrayIndex::Constant(index) => {
                         let contribution = usize::from(*index)
@@ -1036,7 +1036,9 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                                 invalid_hir(Some(self.source.id), "projection offset overflows")
                             })?;
                     }
-                    ArrayIndex::Dynamic(index) => dynamic.push((index.as_ref(), *element_cells)),
+                    ArrayIndex::Dynamic(index) => {
+                        dynamic.push((index.as_ref(), *length, *element_cells));
+                    }
                 },
             }
         }
@@ -1057,9 +1059,26 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             dst: high,
             value: ((constant_offset >> 8) & 0xff) as u8,
         });
-        for (index, stride) in dynamic {
+        let mut maximum_low = constant_offset & 0xff;
+        for (index, length, stride) in dynamic {
             let index = self.evaluate_scalar_temporary(index)?;
-            self.add_scaled_offset(index, stride, low, high);
+            let low_add = stride as u8;
+            // Out-of-bounds indexing is source-level undefined behavior, so a
+            // valid index is bounded by the declared length.  If that range
+            // cannot wrap the low offset byte, one transfer can multiply and
+            // add both stride bytes without a runtime carry branch.
+            let maximum_index = length.saturating_sub(1);
+            let maximum_add = maximum_index.checked_mul(usize::from(low_add));
+            let next_maximum_low = maximum_add
+                .and_then(|maximum_add| maximum_low.checked_add(maximum_add))
+                .filter(|maximum| *maximum <= usize::from(u8::MAX));
+            if let Some(next_maximum_low) = next_maximum_low {
+                self.add_scaled_offset_without_low_carry(index, stride, low, high);
+                maximum_low = next_maximum_low;
+            } else {
+                self.add_scaled_offset(index, stride, low, high);
+                maximum_low = usize::from(u8::MAX);
+            }
         }
         if root_cells == 0 {
             return Ok(ValueLocation::Undefined {
@@ -1130,6 +1149,34 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         self.emit(FrameInstruction::Loop {
             condition: counter,
             body,
+        });
+    }
+
+    fn add_scaled_offset_without_low_carry(
+        &mut self,
+        counter: Address,
+        stride: usize,
+        low: Address,
+        high: Address,
+    ) {
+        let mut targets = Vec::with_capacity(2);
+        let low_add = stride as u8;
+        if low_add != 0 {
+            targets.push(FrameTransferTarget {
+                dst: low,
+                factor: low_add,
+            });
+        }
+        let high_add = ((stride >> 8) & 0xff) as u8;
+        if high_add != 0 {
+            targets.push(FrameTransferTarget {
+                dst: high,
+                factor: high_add,
+            });
+        }
+        self.emit(FrameInstruction::Transfer {
+            src: counter,
+            targets,
         });
     }
 
@@ -1556,6 +1603,14 @@ mod tests {
         lower_hir(&hir).unwrap()
     }
 
+    fn contains_branch(instructions: &[FrameInstruction]) -> bool {
+        instructions.iter().any(|instruction| match instruction {
+            FrameInstruction::Loop { body, .. } => contains_branch(body),
+            FrameInstruction::Branch { .. } => true,
+            _ => false,
+        })
+    }
+
     #[test]
     fn lowers_nominal_aggregates_and_dynamic_flat_offsets() {
         let program = lower(
@@ -1570,6 +1625,35 @@ mod tests {
             program.globals()[0].value_type(),
             ValueType::Aggregate { cells: 300 }
         );
+    }
+
+    #[test]
+    fn dynamic_flat_offsets_skip_carry_branches_when_layout_proves_they_cannot_wrap() {
+        let no_carry = lower(
+            "cell[16][256] arena; \
+             void main() { arena[input()][input()] = 9; }",
+        );
+        let store = no_carry
+            .continuations()
+            .iter()
+            .find(|continuation| {
+                matches!(continuation.terminator(), Terminator::AggregateStore { .. })
+            })
+            .unwrap();
+        assert!(!contains_branch(store.body()));
+
+        let carry = lower(
+            "struct Padded { cell prefix; cell[256] data; } Padded value; \
+             void main() { value.data[input()] = 9; }",
+        );
+        let store = carry
+            .continuations()
+            .iter()
+            .find(|continuation| {
+                matches!(continuation.terminator(), Terminator::AggregateStore { .. })
+            })
+            .unwrap();
+        assert!(contains_branch(store.body()));
     }
 
     #[test]

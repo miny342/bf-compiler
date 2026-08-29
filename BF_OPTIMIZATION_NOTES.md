@@ -169,6 +169,41 @@ clock readを行うため、execute wall timeのうちsiteへ帰属した時間�
 inner `abi.frame.branch`だけでexclusive 14.47 s（21.65%）を占めた。次はhigh-byte dispatchではなく、
 low-byte ID配置/countdownと、このloop/branch loweringを優先して調べる。
 
+### dynamic projectionのcarry除去
+
+上記の`function.67`はstage 2 compilerの`allocate_cells`であり、最大のbranchは
+`arena_cells[arena_next.page][arena_next.slot]`のflat offset計算から発生していた。従来はdynamic indexを
+1ずつ消費してstrideをlow/high byteへ加え、low byteの加算ごとにwrapをbranchで判定していた。
+`[16][256]`ではpage indexのstrideが256、slot indexのstrideが1なので、validなindexについてはどちらも
+low byteのcarry判定が不要であるにもかかわらず、汎用templateを使っていた。
+
+projection loweringでは、HIRが保持するarray lengthとelement strideから、その時点のlow offset byteの
+最大値を追跡するようにした。source-levelで範囲外indexはundefined behaviorなので、valid indexの上限は
+`length - 1`と仮定できる。`maximum_low + (length - 1) * (stride & 0xff) <= 255`を証明できる場合は、
+index cellを1回の`Transfer`でlow/high byteへ直接分配する。証明できない場合は従来のcarry付きtemplateへ
+fallbackする。これにより`[16][256]`ではpageをhigh byteへ、slotをlow byteへ直接加算できる。
+
+併せて、else bodyが空のContinuation IR `Branch`はbranch flagを確保せず、condition cell自身をthen armの
+gateとして使うABI templateへ変更した。then bodyがconditionを書き戻しても破壊的branch契約を守るため、
+bodyの前後でconditionをclearする。これは単独では実時間差が測定noiseの範囲だったが、生成量とbranch用
+frame slotを減らし、carry付きfallbackにも適用できる。
+
+同じrelease binaryとrepository fast interpreterで`logs/tmp.bfc`を入力なしで実行した結果は次のとおり。
+出力は変更前後とも`ok\n`で、wall timeはwarm実行の中央値を使用した。
+
+| 指標 | 変更前 | carry除去後 | 削減率 |
+|---|---:|---:|---:|
+| BF source bytes | 52,633,798 | 52,542,234 | 0.17% |
+| 実行BF命令数 | 478,746,533,739 | 253,696,567,820 | 47.01% |
+| RLE型推定命令数 | 197,613,590,147 | 19,385,331,743 | 90.19% |
+| fast IR native operations | 2,611,618,596 | 1,023,292,188 | 60.82% |
+| execute wall time | 29.045 s | 22.226 s | 23.48% |
+
+最適化後にinstruction granularityの1 ms sample profileを取ると、`abi.frame.branch`のexclusive推定時間は
+0.381 s（executeの1.45%）まで下がった。次の最大項目は`abi.navigation.global`の19.779 s（75.41%）である。
+特に`function.161.continuation.3068`内の2個のglobal navigationが合わせて約9.96 sを占めるため、次の
+backend最適化ではglobal location間transferの移動距離と配置を調べる。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を

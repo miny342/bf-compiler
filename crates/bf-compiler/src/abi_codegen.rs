@@ -479,6 +479,11 @@ fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
                 then_body,
                 else_body,
                 ..
+            } if else_body.is_empty() => maximum_branch_depth(then_body),
+            FrameInstruction::Branch {
+                then_body,
+                else_body,
+                ..
             } => 1 + maximum_branch_depth(then_body).max(maximum_branch_depth(else_body)),
             _ => 0,
         })
@@ -1271,6 +1276,27 @@ impl<'a> AbiEmitter<'a> {
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
         let condition = self.address_location(condition, function)?;
+
+        // A missing else arm needs no flag: the condition cell itself gates
+        // the then arm.  Clearing it before and after the body preserves the
+        // destructive Branch contract even when the body writes it again.
+        if else_body.is_empty() {
+            self.move_context_to_location(condition);
+            let then_loop = self.capture(|emitter| {
+                emitter.clear_current();
+                emitter.move_location_to_context(condition);
+                emitter.with_instruction_path("then", |emitter| {
+                    emitter.emit_all(then_body, function)
+                })?;
+                emitter.clear_location(condition);
+                emitter.move_context_to_location(condition);
+                Ok(())
+            })?;
+            self.emit_loop(then_loop);
+            self.move_location_to_context(condition);
+            return Ok(());
+        }
+
         let flag = Location::Relative(self.acquire_branch_temporary(function)?);
         self.set_location(flag, 1);
 
@@ -3099,6 +3125,65 @@ mod tests {
             Instruction::Output { src: value },
         ];
         assert_eq!(execute_flat(instructions, 3, AbiConfig::default()), b"B");
+    }
+
+    #[test]
+    fn empty_else_branches_need_no_flag_and_still_consume_the_condition() {
+        let condition = CellId::new(0);
+        let value = CellId::new(1);
+        let instructions = vec![
+            Instruction::Set {
+                dst: value,
+                value: b'Z',
+            },
+            Instruction::Branch {
+                condition,
+                then_body: vec![Instruction::Set {
+                    dst: value,
+                    value: b'X',
+                }],
+                else_body: vec![],
+            },
+            Instruction::Output { src: value },
+            Instruction::Set {
+                dst: condition,
+                value: 2,
+            },
+            Instruction::Branch {
+                condition,
+                then_body: vec![
+                    Instruction::Set {
+                        dst: condition,
+                        value: 9,
+                    },
+                    Instruction::Set {
+                        dst: value,
+                        value: b'T',
+                    },
+                ],
+                else_body: vec![],
+            },
+            Instruction::Output { src: value },
+            Instruction::Output { src: condition },
+        ];
+
+        let empty_else = FrameInstruction::Branch {
+            condition: Address::Frame(FrameSlot::new(0)),
+            then_body: vec![],
+            else_body: vec![],
+        };
+        assert_eq!(maximum_branch_depth(&[empty_else]), 0);
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(
+                execute_flat(
+                    instructions.clone(),
+                    2,
+                    AbiConfig::new(chunk_cells).unwrap()
+                ),
+                &[b'Z', b'T', 0]
+            );
+        }
     }
 
     #[test]
