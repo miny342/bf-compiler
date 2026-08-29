@@ -204,6 +204,65 @@ frame slotを減らし、carry付きfallbackにも適用できる。
 特に`function.161.continuation.3068`内の2個のglobal navigationが合わせて約9.96 sを占めるため、次の
 backend最適化ではglobal location間transferの移動距離と配置を調べる。
 
+### scalar global copyのnibble搬送
+
+最適化後profileの`function.161`はtest harnessの`capture_compiler_output`であり、global scalar
+`test_capture_length`を保存しながらframe temporaryへ読む2個の`Transfer`が熱点だった。従来の
+non-destructive copyはsourceをdestinationとrestoreへ破壊的transferし、restoreからsourceへ戻す。
+sourceまたはdestinationがglobalの場合、byteを1減らす各反復でcurrent contextからanchorまでのstackを
+往復するため、値255のcopyはstack scanを数百回実行する。
+
+sourceを保存する操作を`FrameInstruction::Copy`としてContinuation IRに残し、ABI loweringまで
+`Transfer`列へ分解しないようにした。D=16のstatic layoutはscalar globalsとglobal aggregatesの間に
+9個の共有scratch cellを確保する。scalar globalからframeへのcopyではsourceをstatic側で8 bitへ分解し、
+それをlow/high nibble counterへ畳む。各counterを消費しながらsourceを復元し、同じ1または16をframe側へ
+加える。これによりstack往復回数はsource値に比例する二重transferから、2 nibbleの和（最大30）に制限
+される。scratchはcopyのentry/exitでzero、sourceは保存、destinationは上書きされる。D=8は9 cellを
+確保できないため従来templateへfallbackする。
+
+8個のbitを個別に搬送する版は往復を最大8回にでき、executeは約6.38 sまで短縮したが、navigation
+templateを8組展開するためBF sourceが92,693,059 byteへ76.42%増加した。nibble版は約4%遅い一方、
+生成量をほぼ維持できるためこちらを採用した。carry除去後のartifactとの比較は次のとおり。
+
+| 指標 | carry除去後 | nibble copy | 増減 |
+|---|---:|---:|---:|
+| BF source bytes | 52,542,234 | 53,170,123 | +1.19% |
+| 実行BF命令数 | 253,696,567,820 | 102,715,459,925 | -59.51% |
+| RLE型推定命令数 | 19,385,331,743 | 14,398,370,711 | -25.72% |
+| RLE operations | 5,180,773,955 | 2,673,971,876 | -48.39% |
+| scan steps | 4,576,378,022 | 2,076,876,082 | -54.62% |
+| execute wall time | 22.226 s | 10.629 s | -52.18% |
+
+最大tape位置は26,339から26,229へ減った。`Copy`がlowering時のrestore temporaryを不要にし、複数の
+function frameが縮小した効果も含む。global accessを無条件に高速化するものではなく、scalar globalから
+frameへの明示的copyだけを選択する。global aggregate portalやframeからglobalへのcopyは従来templateを
+使うため、生成量とのtrade-offを個別に測定してから適用範囲を広げる。
+最適化後の1 ms sample profileでは`abi.navigation.global`は8.272 s相当まで減ったが、execute推定時間の
+59.27%で依然最大だった。次はglobal portalのfield設定batch化、逆方向copy、frame compactionを比較する。
+
+### hot global aggregateのローカル保持
+
+残ったglobal navigationの大部分は、stage 2 compilerの`allocate_cells`が2 cellのglobal
+`arena_next`をloop内で繰り返し読んで更新する箇所だった。`arena_advance`は渡された値だけを更新し、
+`fail`は復帰せず、loop中に`arena_next`を観測する別の呼び出しもない。このため関数入口で
+`arena_next`をローカル`position`へ読み、loopをローカルだけで実行し、正常終了時に一度だけ書き戻すようにした。
+
+同じRust compilerと同じstage 2 self-test入力で、変更前後を生成し直した結果は次の通りである。
+実行時間はwarm-up後3回の中央値を使った。
+
+| 指標 | loop内global read/write | local保持 | 変化 |
+| --- | ---: | ---: | ---: |
+| 生成BF bytes | 53,170,123 | 53,101,153 | -0.13% |
+| 実行BF命令数 | 102,715,459,925 | 72,185,235,147 | -29.72% |
+| RLE型推定命令数 | 14,398,370,711 | 12,133,620,872 | -15.73% |
+| RLE operations | 2,673,971,876 | 1,525,890,459 | -42.94% |
+| scan steps | 2,076,876,082 | 948,925,708 | -54.31% |
+| execute wall time | 10.580 s | 6.102 s | -42.32% |
+
+これはglobal aggregate copy全般をbackendで特殊化するより、値が変わらない範囲をsourceで明示してglobal access
+自体をloopから外す方が大きく効く例である。一般の関数呼び出しをまたぐglobal cacheはalias/effect解析が必要だが、
+このように呼び出し先が対象globalを観測しないと確認できるhot loopでは、まずローカル保持を優先する。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を

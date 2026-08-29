@@ -1,10 +1,11 @@
 //! Checked physical layout of file-scope objects and the stack anchor.
 //!
-//! Scalar globals occupy ordinary tape cells at the low-address end. Global
-//! aggregate regions follow in declaration order. Every nonempty aggregate
-//! receives an aligned 16-cell portal prefix; zero-sized aggregates retain
-//! identity without consuming tape. The first cell after the static regions
-//! is the zero-valued stack anchor head.
+//! Scalar globals occupy ordinary tape cells at the low-address end. The D=16
+//! ABI reserves nine shared cells for bounded-cost copies from scalar globals,
+//! then global aggregate regions follow in declaration order. Every nonempty
+//! aggregate receives an aligned portal prefix; zero-sized aggregates retain
+//! identity without consuming tape. The first cell after the static regions is
+//! the zero-valued stack anchor head.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -19,8 +20,11 @@ pub struct StaticLayout {
     config: AbiConfig,
     globals: Vec<GlobalLayout>,
     scalar_cells: usize,
+    remote_copy_scratch_start: Option<usize>,
     anchor_head: usize,
 }
+
+pub(crate) const REMOTE_COPY_SCRATCH_CELLS: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GlobalLayout {
@@ -87,7 +91,14 @@ impl StaticLayout {
             }
         }
 
-        let mut next_head = scalar_cells;
+        let remote_copy_scratch_start =
+            (config.chunk_cells() >= REMOTE_COPY_SCRATCH_CELLS).then_some(scalar_cells);
+        let scratch_cells = remote_copy_scratch_start
+            .map(|_| REMOTE_COPY_SCRATCH_CELLS)
+            .unwrap_or(0);
+        let mut next_head = scalar_cells
+            .checked_add(scratch_cells)
+            .ok_or(StaticLayoutError::SizeOverflow)?;
         for descriptor in descriptors {
             let cells = match descriptor.value_type() {
                 ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
@@ -119,6 +130,7 @@ impl StaticLayout {
             config,
             globals,
             scalar_cells,
+            remote_copy_scratch_start,
             anchor_head: next_head,
         };
         if check_capacity {
@@ -133,6 +145,12 @@ impl StaticLayout {
 
     pub const fn scalar_cells(&self) -> usize {
         self.scalar_cells
+    }
+
+    pub(crate) fn remote_copy_scratch_position(&self, index: usize) -> Option<usize> {
+        self.remote_copy_scratch_start
+            .filter(|_| index < REMOTE_COPY_SCRATCH_CELLS)
+            .and_then(|start| start.checked_add(index))
     }
 
     /// Absolute position of the stack anchor head.
@@ -470,13 +488,17 @@ mod tests {
         assert_eq!(d16.scalar_cells(), 2);
         assert_eq!(d16.scalar_position(GlobalId::new(1)), Ok(0));
         assert_eq!(d16.scalar_position(GlobalId::new(3)), Ok(1));
-        assert_eq!(d16.array_base_head(GlobalId::new(0)), Ok(2));
+        assert_eq!(d16.remote_copy_scratch_position(0), Some(2));
+        assert_eq!(d16.remote_copy_scratch_position(8), Some(10));
+        assert_eq!(d16.remote_copy_scratch_position(9), None);
+        assert_eq!(d16.array_base_head(GlobalId::new(0)), Ok(11));
         assert_eq!(d16.array_chunk_count(GlobalId::new(0)), Ok(2));
-        assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(36));
+        assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(45));
         assert_eq!(d16.array_chunk_count(GlobalId::new(2)), Ok(3));
-        assert_eq!(d16.anchor_head(), 87);
+        assert_eq!(d16.anchor_head(), 96);
 
         let d8 = StaticLayout::new(AbiConfig::new(8).unwrap(), &descriptors).unwrap();
+        assert_eq!(d8.remote_copy_scratch_position(0), None);
         assert_eq!(d8.array_base_head(GlobalId::new(0)), Ok(2));
         assert_eq!(d8.array_chunk_count(GlobalId::new(0)), Ok(3));
         assert_eq!(d8.array_base_head(GlobalId::new(2)), Ok(29));
@@ -524,10 +546,15 @@ mod tests {
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = StaticLayout::new(config, &descriptor).unwrap();
             let expected_chunks = (PROTOCOL_CELLS + 256).div_ceil(chunk_cells);
+            let scratch_cells = if chunk_cells >= REMOTE_COPY_SCRATCH_CELLS {
+                REMOTE_COPY_SCRATCH_CELLS
+            } else {
+                0
+            };
             assert_eq!(layout.array_chunk_count(global), Ok(expected_chunks));
             assert_eq!(
                 layout.array_element_position(global, 255).unwrap(),
-                config.logical_offset_from_head(PROTOCOL_CELLS + 255)
+                scratch_cells + config.logical_offset_from_head(PROTOCOL_CELLS + 255)
             );
             assert_eq!(
                 layout.array_element_position(global, 256),
@@ -537,7 +564,10 @@ mod tests {
                     cells: 256,
                 })
             );
-            assert_eq!(layout.anchor_head(), expected_chunks * config.stride());
+            assert_eq!(
+                layout.anchor_head(),
+                scratch_cells + expected_chunks * config.stride()
+            );
         }
     }
 

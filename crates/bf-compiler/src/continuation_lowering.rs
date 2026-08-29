@@ -1443,10 +1443,10 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
     }
 
     fn copy_cell(&mut self, source: Address, destination: Address) {
-        let restore = self.temporary_cell();
-        for instruction in copy_instructions(source, destination, restore) {
-            self.emit(instruction);
-        }
+        self.emit(FrameInstruction::Copy {
+            src: source,
+            dst: destination,
+        });
     }
 
     fn boolean_from(&mut self, value: Address, destination: Address, nonzero: u8, zero: u8) {
@@ -1609,6 +1609,22 @@ mod tests {
             FrameInstruction::Branch { .. } => true,
             _ => false,
         })
+    }
+
+    #[test]
+    fn scalar_copies_remain_nondestructive_copy_instructions() {
+        let program = lower("cell source; void main() { cell destination = source; }");
+        assert!(program.continuations().iter().any(|continuation| {
+            continuation.body().iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    FrameInstruction::Copy {
+                        src: Address::Global(_),
+                        dst: Address::Frame(_),
+                    }
+                )
+            })
+        }));
     }
 
     #[test]

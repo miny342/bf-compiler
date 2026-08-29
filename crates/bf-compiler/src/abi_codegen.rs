@@ -495,6 +495,7 @@ fn instruction_kind(instruction: &FrameInstruction) -> &'static str {
     match instruction {
         FrameInstruction::Set { .. } => "set",
         FrameInstruction::AddConst { .. } => "add_const",
+        FrameInstruction::Copy { .. } => "copy",
         FrameInstruction::Transfer { .. } => "transfer",
         FrameInstruction::AggregateCopy { .. } => "aggregate_copy",
         FrameInstruction::Input { .. } => "input",
@@ -1226,6 +1227,20 @@ impl<'a> AbiEmitter<'a> {
                 self.move_context_to_location(dst);
                 self.adjust(*value);
                 self.move_location_to_context(dst);
+            }
+            FrameInstruction::Copy { src, dst } => {
+                let source_address = *src;
+                let src = self.address_location(source_address, function)?;
+                let dst = self.address_location(*dst, function)?;
+                let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+                if matches!(source_address, Address::Global(_))
+                    && let (Location::Global(source), Location::Relative(destination)) = (src, dst)
+                    && self.config.chunk_cells() >= 9
+                {
+                    self.copy_global_to_relative_bits(source, destination);
+                } else {
+                    self.copy_locations(src, dst, restore);
+                }
             }
             FrameInstruction::Transfer { src, targets } => {
                 self.transfer(*src, targets, function)?;
@@ -2435,6 +2450,122 @@ impl<'a> AbiEmitter<'a> {
         self.emit_loop(body);
         self.move_location_to_context(src);
         self.move_location(restore, src);
+    }
+
+    /// Copy one static byte into the current frame without crossing the live
+    /// stack once per source unit.  Nine shared static cells hold a temporary
+    /// carry and eight binary digits.  The bits are folded into two nibbles,
+    /// bounding stack crossings by the sum of those digits (at most 30)
+    /// instead of expanding eight separate navigation templates.  The D=8
+    /// compatibility layout reserves no scratch and uses the generic copy.
+    fn copy_global_to_relative_bits(&mut self, source: usize, destination: isize) {
+        debug_assert!(self.config.chunk_cells() >= 9);
+        let context_chunks = self.config.portal_chunks();
+        let source = source as isize;
+        let scratch =
+            self.static_layout
+                .remote_copy_scratch_position(0)
+                .expect("D=16 static layout must reserve remote-copy scratch") as isize;
+        let temporary = scratch - source;
+        let bits = std::array::from_fn::<_, 8, _>(|index| scratch + 1 + index as isize - source);
+
+        // Destination is frame-relative while the pointer still uses the
+        // current context as its origin.
+        self.clear(destination);
+        self.emit_context_to_global(source as usize, context_chunks);
+
+        // Scratch is shared by all copies, so establish and restore its zero
+        // contract locally even if public Continuation IR supplied the copy.
+        self.clear(temporary);
+        for bit in bits {
+            self.clear(bit);
+        }
+
+        // Consume the source into an eight-bit counter.  All movement here is
+        // within static storage; recursive carry never scans the live stack.
+        self.move_to(0);
+        let decompose = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.increment_static_bits(&bits, temporary, 0, 0);
+        });
+        self.emit_loop(decompose);
+
+        // Fold the binary digits into low/high nibble counters while staying
+        // in static storage.  Reuse bit 0 and bit 4 as the digit cells.
+        for index in 1..4 {
+            self.move_static_value(bits[index], bits[0], 1_u8 << index);
+        }
+        for index in 5..8 {
+            self.move_static_value(bits[index], bits[4], 1_u8 << (index - 4));
+        }
+
+        // Restore the source and build the destination one nibble unit at a
+        // time.  Only these two loop bodies contain stack-navigation code.
+        for (digit, contribution) in [(bits[0], 1_u8), (bits[4], 16_u8)] {
+            self.move_to(digit);
+            let transport = self.capture_infallible(|emitter| {
+                emitter.adjust(255);
+                emitter.move_to(0);
+                emitter.adjust(contribution);
+                emitter.emit_global_to_context(source as usize, context_chunks);
+                emitter.move_to(destination);
+                emitter.adjust(contribution);
+                emitter.move_to(0);
+                emitter.emit_context_to_global(source as usize, context_chunks);
+                emitter.move_to(digit);
+            });
+            self.emit_loop(transport);
+            self.move_to(0);
+        }
+        self.emit_global_to_context(source as usize, context_chunks);
+    }
+
+    fn move_static_value(&mut self, source: isize, destination: isize, factor: u8) {
+        self.move_to(source);
+        let body = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(destination);
+            emitter.adjust(factor);
+            emitter.move_to(source);
+        });
+        self.emit_loop(body);
+        self.move_to(0);
+    }
+
+    /// Increment a little-endian Boolean bit vector in static storage.  The
+    /// temporary is zero on entry and exit; `return_to` is the pointer offset
+    /// required by the surrounding BF loop.
+    fn increment_static_bits(
+        &mut self,
+        bits: &[isize; 8],
+        temporary: isize,
+        index: usize,
+        return_to: isize,
+    ) {
+        let bit = bits[index];
+        self.move_to(bit);
+        let was_set = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(temporary);
+            emitter.adjust(1);
+            emitter.move_to(bit);
+        });
+        self.emit_loop(was_set);
+        self.adjust(1);
+
+        self.move_to(temporary);
+        let carry = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(bit);
+            emitter.adjust(255);
+            if index + 1 < bits.len() {
+                emitter.increment_static_bits(bits, temporary, index + 1, temporary);
+            } else {
+                emitter.move_to(temporary);
+            }
+        });
+        self.emit_loop(carry);
+        self.move_to(return_to);
     }
 
     fn move_location(&mut self, src: Location, dst: Location) {
@@ -3749,6 +3880,56 @@ mod tests {
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 &[2, 1, 3, b'B']
+            );
+        }
+    }
+
+    #[test]
+    fn global_to_frame_copy_preserves_every_value_in_both_geometries() {
+        let main = FunctionId::new(0);
+        let global = crate::GlobalId::new(0);
+        let entry = id(1);
+        let slot = FrameSlot::new(0);
+        let function = FunctionDescriptor::new(main, vec![], 1, ValueType::Void, entry);
+        let mut body = Vec::new();
+        for value in 0..=u8::MAX {
+            body.extend([
+                FrameInstruction::Set {
+                    dst: Address::Global(global),
+                    value,
+                },
+                FrameInstruction::Set {
+                    dst: Address::Frame(slot),
+                    value: 99,
+                },
+                FrameInstruction::Copy {
+                    src: Address::Global(global),
+                    dst: Address::Frame(slot),
+                },
+                FrameInstruction::Output {
+                    src: Address::Frame(slot),
+                },
+                FrameInstruction::Output {
+                    src: Address::Global(global),
+                },
+            ]);
+        }
+        let program = ContinuationProgram::new_with_globals(
+            main,
+            vec![crate::GlobalDescriptor::cell(global)],
+            vec![function],
+            vec![Continuation::new(entry, main, body, Terminator::Halt)],
+        )
+        .unwrap();
+
+        let expected = (0..=u8::MAX)
+            .flat_map(|value| [value, value])
+            .collect::<Vec<_>>();
+        for chunk_cells in [8, 16] {
+            assert_eq!(
+                execute_continuations(&program, chunk_cells),
+                expected,
+                "D={chunk_cells}"
             );
         }
     }

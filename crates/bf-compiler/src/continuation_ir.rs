@@ -254,6 +254,15 @@ pub enum FrameInstruction {
         dst: Address,
         value: u8,
     },
+    /// Replace `dst` with `src` while preserving `src`.
+    ///
+    /// Unlike [`Self::Transfer`], this operation is non-destructive.  Keeping
+    /// it explicit lets the ABI backend choose an efficient implementation for
+    /// copies that cross the activation-frame/static-storage boundary.
+    Copy {
+        src: Address,
+        dst: Address,
+    },
     /// Add `src * factor` to every target, then clear `src`.
     Transfer {
         src: Address,
@@ -1332,6 +1341,10 @@ fn validate_instructions(
             FrameInstruction::Output { src } => {
                 validate_address(*src, continuation, function, globals)?;
             }
+            FrameInstruction::Copy { src, dst } => {
+                validate_address(*src, continuation, function, globals)?;
+                validate_address(*dst, continuation, function, globals)?;
+            }
             FrameInstruction::Transfer { src, targets } => {
                 validate_address(*src, continuation, function, globals)?;
                 let mut seen = HashSet::with_capacity(targets.len());
@@ -2027,6 +2040,28 @@ mod tests {
             Err(ContinuationIrError::TransferSourceIsTarget {
                 continuation: cid(1),
                 address,
+            })
+        );
+    }
+
+    #[test]
+    fn validates_copy_addresses() {
+        let main = descriptor(0, vec![], 1, ValueType::Void, 1);
+        let body = vec![FrameInstruction::Copy {
+            src: Address::Frame(FrameSlot::new(0)),
+            dst: Address::Frame(FrameSlot::new(1)),
+        }];
+
+        assert_eq!(
+            ContinuationProgram::new(
+                FunctionId::new(0),
+                vec![main],
+                vec![continuation(1, 0, body, Terminator::Halt)],
+            ),
+            Err(ContinuationIrError::FrameSlotOutOfBounds {
+                continuation: cid(1),
+                slot: FrameSlot::new(1),
+                frame_slots: 1,
             })
         );
     }

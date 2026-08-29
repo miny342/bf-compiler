@@ -113,20 +113,22 @@ NodeId allocate_cells(cell count) {
     if (arena_exhausted || count == 0) {
         fail();
     }
-    NodeId result = arena_next;
+    NodeId position = arena_next;
+    NodeId result = position;
     while (count != 0) {
-        arena_cells[arena_next.page][arena_next.slot] = 0;
-        if (arena_next.page == ARENA_LAST_PAGE && arena_next.slot == 0xff) {
+        arena_cells[position.page][position.slot] = 0;
+        if (position.page == ARENA_LAST_PAGE && position.slot == 0xff) {
             arena_exhausted = 1;
             count -= 1;
             if (count != 0) {
                 fail();
             }
         } else {
-            arena_next = arena_advance(arena_next, 1);
+            position = arena_advance(position, 1);
             count -= 1;
         }
     }
+    arena_next = position;
     return result;
 }
 

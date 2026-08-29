@@ -182,7 +182,7 @@ sourceのenumやstructというnominal型は消え、`ValueType::Cell`またはc
 
 `FrameInstruction`は次を表す。
 
-- `Set`、`AddConst`、破壊的な`Transfer`
+- `Set`、`AddConst`、sourceを保存する`Copy`、破壊的な`Transfer`
 - protocol cellを除外した`AggregateCopy`
 - byte単位の`Input`と`Output`
 - BFへ構造的にloweringできる`Loop`と、条件を消費する`Branch`
@@ -660,7 +660,7 @@ Continuation IRのconstructorは次を検証する。
 
 - global、function、continuation IDが一意で、function entryとsuccessorの所有関係が正しい。
 - `FrameSlot`、global、aggregate subrange、logical offsetがdescriptorの範囲と型に一致する。
-- `Transfer`のsource/target、係数、`Branch`のconditionが破壊的命令の契約を満たす。
+- `Copy`のsource/destination、`Transfer`のsource/targetと係数、`Branch`のconditionが各命令の契約を満たす。
 - call argumentとreturn valueがcallee/callerの型、parameter location、outbox容量に一致する。
 - main、`Return`、`Halt`、`Abort`、portal terminatorの配置が制御規約を満たす。
 
