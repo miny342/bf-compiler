@@ -1,0 +1,29 @@
+cell[] stage6_array_test_source = "void main(){cell before;cell[4] values;values[1+2]=7;output(values[3]);values[1||input()]+=1;}";
+
+void test_stage6_arrays() {
+    reset_test_input(7);
+    parse_ast_program();
+
+    NodeId function = first_function;
+    NodeId before = node_a(node_b(function));
+    NodeId declaration = node_next(before);
+    NodeId assignment = node_next(declaration);
+    NodeId output_statement = node_next(assignment);
+    NodeId short_assignment = node_next(output_statement);
+    NodeId indexed = node_a(assignment);
+
+    expect_test(node_kind(declaration) == NODE_DECLARATION
+        && node_tag(declaration) == AST_DECLARATION_ARRAY
+        && node_value(declaration) == 4, 'D');
+    expect_test(node_kind(indexed) == NODE_INDEX_EXPRESSION, 'E');
+    ConstantValue folded = evaluate_constant_expression(node_a(indexed));
+    expect_test(folded.known && folded.value == 3, 'G');
+
+    analyze_ast_program();
+    expect_test(node_value(node_c(function)) == 5, 'H');
+    expect_test(node_value(indexed) == 4, 'I');
+    expect_test(node_value(node_a(short_assignment)) == 2, 'J');
+
+    lower_ast_program();
+    expect_test(node_value(node_c(function)) > 5, 'K');
+}

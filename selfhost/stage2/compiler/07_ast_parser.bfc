@@ -1,4 +1,4 @@
-// 第5段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
+// 第6段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
 
 const cell AST_TYPE_VOID = 0;
 const cell AST_TYPE_CELL = 1;
@@ -18,6 +18,8 @@ const cell AST_BINARY_LOGICAL_OR = 9;
 const cell AST_ASSIGNMENT_SET = 0;
 const cell AST_ASSIGNMENT_ADD = 1;
 const cell AST_ASSIGNMENT_SUBTRACT = 2;
+const cell AST_DECLARATION_SCALAR = 0;
+const cell AST_DECLARATION_ARRAY = 1;
 
 NodeId parse_ast_expression() {
     return parse_ast_logical_or();
@@ -68,6 +70,9 @@ NodeId parse_ast_call(NodeId name) {
 
 NodeId parse_ast_primary() {
     if (token_kind == TokenKind::Number) {
+        if (token_number_is_256) {
+            fail();
+        }
         NodeId result = allocate_node(NODE_LITERAL_EXPRESSION);
         node_set_value(result, token_value);
         next_token();
@@ -88,6 +93,14 @@ NodeId parse_ast_primary() {
         }
         NodeId result = allocate_node(NODE_NAME_EXPRESSION);
         node_set_name(result, name);
+        if (token_kind == TokenKind::LeftBracket) {
+            next_token();
+            NodeId index = allocate_node(NODE_INDEX_EXPRESSION);
+            node_set_name(index, name);
+            node_set_a(index, parse_ast_expression());
+            consume(TokenKind::RightBracket);
+            return index;
+        }
         return result;
     }
     if (token_kind == TokenKind::LeftParen) {
@@ -220,13 +233,33 @@ NodeId parse_ast_statement() {
     }
     if (token_kind == TokenKind::Identifier && token_is_cell()) {
         next_token();
+        cell declaration_kind = AST_DECLARATION_SCALAR;
+        cell array_length;
+        if (token_kind == TokenKind::LeftBracket) {
+            declaration_kind = AST_DECLARATION_ARRAY;
+            next_token();
+            if (token_kind != TokenKind::Number
+                || (!token_number_is_256 && token_value == 0)) {
+                fail();
+            }
+            // 0 encodes 256, which is rejected later if it cannot fit the
+            // bootstrap compiler's explicitly bounded uniform frame.
+            array_length = token_value;
+            next_token();
+            consume(TokenKind::RightBracket);
+        }
         if (token_kind != TokenKind::Identifier || token_is_reserved()) {
             fail();
         }
         NodeId declaration = allocate_node(NODE_DECLARATION);
+        node_set_tag(declaration, declaration_kind);
+        node_set_value(declaration, array_length);
         node_set_name(declaration, intern_token_name());
         next_token();
         if (token_kind == TokenKind::Assign) {
+            if (declaration_kind == AST_DECLARATION_ARRAY) {
+                fail();
+            }
             next_token();
             node_set_a(declaration, parse_ast_expression());
         }
@@ -277,7 +310,8 @@ NodeId parse_ast_statement() {
     NodeId left = parse_ast_expression();
     if (token_kind == TokenKind::Assign || token_kind == TokenKind::PlusAssign
         || token_kind == TokenKind::MinusAssign) {
-        if (node_kind(left) != NODE_NAME_EXPRESSION) {
+        if (node_kind(left) != NODE_NAME_EXPRESSION
+            && node_kind(left) != NODE_INDEX_EXPRESSION) {
             fail();
         }
         TokenKind operator = token_kind;

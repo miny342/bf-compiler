@@ -58,6 +58,7 @@ void read_name() {
 
 void read_number() {
     token_value = 0;
+    token_number_is_256 = 0;
     if (current_char == '0') {
         read_character();
         if (current_char == 'x' || current_char == 'X') {
@@ -66,12 +67,18 @@ void read_number() {
                 fail();
             }
             while (is_hex_digit(current_char)) {
-                // A further hexadecimal digit would exceed one cell.
-                if (token_value > 15) {
+                cell digit = hex_digit_value(current_char);
+                // Tokenization preserves exactly 256 for an array length.
+                if (token_number_is_256 || token_value > 16
+                    || (token_value == 16 && digit != 0)) {
                     fail();
                 }
-                token_value = times_sixteen(token_value)
-                    + hex_digit_value(current_char);
+                if (token_value == 16) {
+                    token_value = 0;
+                    token_number_is_256 = 1;
+                } else {
+                    token_value = times_sixteen(token_value) + digit;
+                }
                 read_character();
             }
             if (is_name_continue(current_char)) {
@@ -84,10 +91,16 @@ void read_number() {
 
     while (is_digit(current_char)) {
         cell digit = current_char - '0';
-        if (token_value > 25 || (token_value == 25 && digit > 5)) {
+        if (token_number_is_256 || token_value > 25
+            || (token_value == 25 && digit > 6)) {
             fail();
         }
-        token_value = times_ten(token_value) + digit;
+        if (token_value == 25 && digit == 6) {
+            token_value = 0;
+            token_number_is_256 = 1;
+        } else {
+            token_value = times_ten(token_value) + digit;
+        }
         read_character();
     }
     if (is_name_continue(current_char)) {
@@ -151,11 +164,13 @@ void read_character_literal() {
     }
     read_character();
     token_kind = TokenKind::Number;
+    token_number_is_256 = 0;
 }
 
 void next_token() {
     skip_trivia();
     token_length = 0;
+    token_number_is_256 = 0;
 
     if (current_char == 0) {
         token_kind = TokenKind::Eof;
@@ -176,6 +191,12 @@ void next_token() {
         read_character();
     } else if (current_char == '}') {
         token_kind = TokenKind::RightBrace;
+        read_character();
+    } else if (current_char == '[') {
+        token_kind = TokenKind::LeftBracket;
+        read_character();
+    } else if (current_char == ']') {
+        token_kind = TokenKind::RightBracket;
         read_character();
     } else if (current_char == ',') {
         token_kind = TokenKind::Comma;

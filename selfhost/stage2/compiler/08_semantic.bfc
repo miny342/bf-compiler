@@ -1,11 +1,15 @@
-// 第5段階scalar programのfile-scope収集、名前解決、型検査。
+// 第6段階programのfile-scope収集、名前解決、型検査。
 
 NodeId[256] semantic_local_names;
 cell[256] semantic_local_slots;
+cell[256] semantic_local_is_array;
+cell[256] semantic_local_lengths;
 cell semantic_local_count;
+cell semantic_next_slot;
 cell semantic_max_local_count;
 cell semantic_scope_depth;
 cell[16] semantic_scope_base;
+cell[16] semantic_scope_slot_base;
 NodeId semantic_current_function;
 NodeId main_function;
 cell function_count;
@@ -22,19 +26,19 @@ NodeId find_function_by_name(NodeId name) {
     return null_node();
 }
 
-cell find_local_slot(NodeId name) {
+cell find_local_binding(NodeId name) {
     cell index = semantic_local_count;
     while (index != 0) {
         index -= 1;
         if (node_equals(semantic_local_names[index], name)) {
-            return semantic_local_slots[index];
+            return index;
         }
     }
     fail();
     return 0;
 }
 
-cell add_semantic_local(NodeId name) {
+cell add_semantic_local(NodeId name, cell is_array, cell length) {
     if (semantic_local_count == 0xff) {
         fail();
     }
@@ -46,12 +50,27 @@ cell add_semantic_local(NodeId name) {
         }
         probe += 1;
     }
-    cell slot = semantic_local_count;
+    cell cells = 1;
+    if (is_array) {
+        // Array length 256 is represented by zero.  It cannot fit this
+        // bootstrap backend's 239-cell uniform data frame.
+        if (length == 0 || length > 0xef) {
+            fail();
+        }
+        cells = length;
+    }
+    if (semantic_next_slot > 0xef - cells) {
+        fail();
+    }
+    cell slot = semantic_next_slot;
     semantic_local_names[semantic_local_count] = name;
     semantic_local_slots[semantic_local_count] = slot;
+    semantic_local_is_array[semantic_local_count] = is_array;
+    semantic_local_lengths[semantic_local_count] = length;
     semantic_local_count += 1;
-    if (semantic_local_count > semantic_max_local_count) {
-        semantic_max_local_count = semantic_local_count;
+    semantic_next_slot += cells;
+    if (semantic_next_slot > semantic_max_local_count) {
+        semantic_max_local_count = semantic_next_slot;
     }
     return slot;
 }
@@ -61,12 +80,88 @@ void enter_semantic_scope() {
         fail();
     }
     semantic_scope_base[semantic_scope_depth] = semantic_local_count;
+    semantic_scope_slot_base[semantic_scope_depth] = semantic_next_slot;
     semantic_scope_depth += 1;
 }
 
 void leave_semantic_scope() {
     semantic_scope_depth -= 1;
     semantic_local_count = semantic_scope_base[semantic_scope_depth];
+    semantic_next_slot = semantic_scope_slot_base[semantic_scope_depth];
+}
+
+struct ConstantValue {
+    cell known;
+    cell value;
+}
+
+ConstantValue evaluate_constant_expression(NodeId expression) {
+    ConstantValue result;
+    cell kind = node_kind(expression);
+    if (kind == NODE_LITERAL_EXPRESSION) {
+        result.known = 1;
+        result.value = node_value(expression);
+        return result;
+    }
+    if (kind == NODE_UNARY_EXPRESSION) {
+        result = evaluate_constant_expression(node_a(expression));
+        if (!result.known) {
+            return result;
+        }
+        cell operator = node_tag(expression);
+        if (operator == AST_UNARY_NEGATE) {
+            result.value = 0 - result.value;
+        } else if (operator == AST_UNARY_NOT) {
+            result.value = result.value == 0;
+        }
+        return result;
+    }
+    if (kind == NODE_BINARY_EXPRESSION) {
+        ConstantValue left = evaluate_constant_expression(node_a(expression));
+        if (!left.known) {
+            return result;
+        }
+        cell operator = node_tag(expression);
+        if (operator == AST_BINARY_LOGICAL_AND && left.value == 0) {
+            result.known = 1;
+            result.value = 0;
+            return result;
+        }
+        if (operator == AST_BINARY_LOGICAL_OR && left.value != 0) {
+            result.known = 1;
+            result.value = 1;
+            return result;
+        }
+        ConstantValue right = evaluate_constant_expression(node_b(expression));
+        if (!right.known) {
+            return result;
+        }
+        result.known = 1;
+        if (operator == AST_BINARY_ADD) {
+            result.value = left.value + right.value;
+        } else if (operator == AST_BINARY_SUBTRACT) {
+            result.value = left.value - right.value;
+        } else if (operator == AST_BINARY_LESS) {
+            result.value = left.value < right.value;
+        } else if (operator == AST_BINARY_LESS_EQUAL) {
+            result.value = left.value <= right.value;
+        } else if (operator == AST_BINARY_GREATER) {
+            result.value = left.value > right.value;
+        } else if (operator == AST_BINARY_GREATER_EQUAL) {
+            result.value = left.value >= right.value;
+        } else if (operator == AST_BINARY_EQUAL) {
+            result.value = left.value == right.value;
+        } else if (operator == AST_BINARY_NOT_EQUAL) {
+            result.value = left.value != right.value;
+        } else if (operator == AST_BINARY_LOGICAL_AND
+            || operator == AST_BINARY_LOGICAL_OR) {
+            result.value = right.value != 0;
+        } else {
+            fail();
+        }
+        return result;
+    }
+    return result;
 }
 
 cell analyze_ast_expression(NodeId expression) {
@@ -75,7 +170,31 @@ cell analyze_ast_expression(NodeId expression) {
         return AST_TYPE_CELL;
     }
     if (kind == NODE_NAME_EXPRESSION) {
-        node_set_value(expression, find_local_slot(node_name(expression)));
+        cell binding = find_local_binding(node_name(expression));
+        if (semantic_local_is_array[binding]) {
+            fail();
+        }
+        node_set_value(expression, semantic_local_slots[binding]);
+        return AST_TYPE_CELL;
+    }
+    if (kind == NODE_INDEX_EXPRESSION) {
+        cell binding = find_local_binding(node_name(expression));
+        if (!semantic_local_is_array[binding]) {
+            fail();
+        }
+        NodeId index = node_a(expression);
+        if (analyze_ast_expression(index) != AST_TYPE_CELL) {
+            fail();
+        }
+        ConstantValue constant = evaluate_constant_expression(index);
+        if (!constant.known
+            || constant.value >= semantic_local_lengths[binding]) {
+            fail();
+        }
+        node_set_value(
+            expression,
+            semantic_local_slots[binding] + constant.value
+        );
         return AST_TYPE_CELL;
     }
     if (kind == NODE_UNARY_EXPRESSION) {
@@ -136,8 +255,15 @@ cell analyze_ast_statement(NodeId statement) {
         return guaranteed;
     }
     if (kind == NODE_DECLARATION) {
-        cell slot = add_semantic_local(node_name(statement));
-        node_set_value(statement, slot);
+        cell is_array = node_tag(statement) == AST_DECLARATION_ARRAY;
+        cell slot = add_semantic_local(
+            node_name(statement),
+            is_array,
+            node_value(statement)
+        );
+        // Declaration value remains its encoded array length.  Its resolved
+        // frame base uses an otherwise unused scalar field.
+        arena_write(statement, FIELD_C_PAGE, slot);
         if (!node_is_null(node_a(statement))
             && analyze_ast_expression(node_a(statement)) != AST_TYPE_CELL) {
             fail();
@@ -259,12 +385,16 @@ void analyze_ast_program() {
     while (!node_is_null(function)) {
         semantic_current_function = function;
         semantic_local_count = 0;
+        semantic_next_slot = 0;
         semantic_max_local_count = 0;
         semantic_scope_depth = 0;
         enter_semantic_scope();
         NodeId parameter = node_a(function);
         while (!node_is_null(parameter)) {
-            node_set_value(parameter, add_semantic_local(node_name(parameter)));
+            node_set_value(
+                parameter,
+                add_semantic_local(node_name(parameter), 0, 0)
+            );
             parameter = node_next(parameter);
         }
         cell returns = analyze_ast_statement(node_b(function));

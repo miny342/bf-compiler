@@ -28,40 +28,58 @@ cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
 printf 'void main(){cell value;if(value&1);}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
-        >"$work_dir/invalid-stage5-lexer.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE5_ERROR' "$work_dir/invalid-stage5-lexer.actual"; then
-    echo "stage-5 compiler accepted a single ampersand" >&2
+        >"$work_dir/invalid-stage6-lexer.actual"
+if ! LC_ALL=C grep -q 'BFC_STAGE6_ERROR' "$work_dir/invalid-stage6-lexer.actual"; then
+    echo "stage-6 compiler accepted a single ampersand" >&2
     exit 1
 fi
 
 printf 'cell broken(cell value){if(value)return 1;}void main(){}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
-        >"$work_dir/invalid-stage5-return.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE5_ERROR' "$work_dir/invalid-stage5-return.actual"; then
-    echo "stage-5 compiler accepted a missing scalar return path" >&2
+        >"$work_dir/invalid-stage6-return.actual"
+if ! LC_ALL=C grep -q 'BFC_STAGE6_ERROR' "$work_dir/invalid-stage6-return.actual"; then
+    echo "stage-6 compiler accepted a missing scalar return path" >&2
     exit 1
 fi
 
-stage5_bf="$work_dir/stage5-functions.bf"
+printf 'void main(){cell[4] values;cell index;output(values[index]);}' | \
+    cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
+        -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
+        >"$work_dir/invalid-stage6-dynamic-index.actual"
+if ! LC_ALL=C grep -q 'BFC_STAGE6_ERROR' "$work_dir/invalid-stage6-dynamic-index.actual"; then
+    echo "stage-6 compiler accepted a dynamic array index" >&2
+    exit 1
+fi
+
+printf 'void main(){cell[4] values;output(values[4]);}' | \
+    cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
+        -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
+        >"$work_dir/invalid-stage6-bounds.actual"
+if ! LC_ALL=C grep -q 'BFC_STAGE6_ERROR' "$work_dir/invalid-stage6-bounds.actual"; then
+    echo "stage-6 compiler accepted an out-of-bounds constant index" >&2
+    exit 1
+fi
+
+stage6_bf="$work_dir/stage6-arrays.bf"
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
-    <"$repo_dir/selfhost/stage2/examples/stage5_functions.bfc" >"$stage5_bf"
-if LC_ALL=C grep -q 'BFC_STAGE5_ERROR' "$stage5_bf"; then
-    echo "stage-5 compiler rejected stage5_functions.bfc" >&2
+    <"$repo_dir/selfhost/stage2/examples/stage6_arrays.bfc" >"$stage6_bf"
+if LC_ALL=C grep -q 'BFC_STAGE6_ERROR' "$stage6_bf"; then
+    echo "stage-6 compiler rejected stage6_arrays.bfc" >&2
     exit 1
 fi
-if LC_ALL=C grep -q '[^][<>+.,-]' "$stage5_bf"; then
-    echo "stage-5 compiler emitted a non-Brainfuck byte" >&2
+if LC_ALL=C grep -q '[^][<>+.,-]' "$stage6_bf"; then
+    echo "stage-6 compiler emitted a non-Brainfuck byte" >&2
     exit 1
 fi
 
-printf 'AB' | cargo run --quiet --release \
+printf 'Z' | cargo run --quiet --release \
     --manifest-path "$repo_dir/Cargo.toml" \
-    -p bf-interpreter --bin bf-interpreter -- "$stage5_bf" \
-    >"$work_dir/stage5-functions.actual"
-printf '\006\001\001AA\001\000A\000\001B' \
-    >"$work_dir/stage5-functions.expected"
-cmp "$work_dir/stage5-functions.expected" "$work_dir/stage5-functions.actual"
+    -p bf-interpreter --bin bf-interpreter -- "$stage6_bf" \
+    >"$work_dir/stage6-arrays.actual"
+printf '\000\010BA\011C\006\000\000Z' \
+    >"$work_dir/stage6-arrays.expected"
+cmp "$work_dir/stage6-arrays.expected" "$work_dir/stage6-arrays.actual"
 
-echo "stage-5 self-host verification passed"
+echo "stage-6 self-host verification passed"

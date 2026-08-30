@@ -2,6 +2,7 @@ cell[] lexer_test_source =
     " \t/* skip */ cell name=0x2A; output('\\x21'); // tail\n";
 cell[] lexer_stage3_source = "if(!value!=0)while(value){}else";
 cell[] lexer_stage4_source = "a==b<=c>=d<e>f&&g||h";
+cell[] lexer_stage6_source = "cell[256] first; cell[0x100] second;";
 
 void test_lexer() {
     reset_test_input(1);
@@ -103,4 +104,31 @@ void test_lexer_stage4() {
     expect_test(token_kind == TokenKind::Identifier, '`');
     next_token();
     expect_test(token_kind == TokenKind::Eof, '{');
+}
+
+void test_lexer_stage6() {
+    reset_test_input(6);
+    read_character();
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier && token_is_cell(), 'a');
+    next_token();
+    expect_test(token_kind == TokenKind::LeftBracket, 'b');
+    next_token();
+    expect_test(token_kind == TokenKind::Number
+        && token_number_is_256 && token_value == 0, 'c');
+    next_token();
+    expect_test(token_kind == TokenKind::RightBracket, 'd');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier, 'e');
+    next_token();
+    expect_test(token_kind == TokenKind::Semicolon, 'q');
+    next_token();
+    expect_test(token_kind == TokenKind::Identifier && token_is_cell(), 'r');
+    next_token();
+    expect_test(token_kind == TokenKind::LeftBracket, 's');
+    next_token();
+    expect_test(token_kind == TokenKind::Number
+        && token_number_is_256 && token_value == 0, 't');
+    next_token();
+    expect_test(token_kind == TokenKind::RightBracket, 'u');
 }

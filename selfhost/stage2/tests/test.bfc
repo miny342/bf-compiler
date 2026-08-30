@@ -27,6 +27,16 @@ void read_character() {
             current_char = ast_test_source[test_input_position];
             test_input_position += 1;
         }
+    } else if (test_input_kind == 6) {
+        if (test_input_position < len(lexer_stage6_source)) {
+            current_char = lexer_stage6_source[test_input_position];
+            test_input_position += 1;
+        }
+    } else if (test_input_kind == 7) {
+        if (test_input_position < len(stage6_array_test_source)) {
+            current_char = stage6_array_test_source[test_input_position];
+            test_input_position += 1;
+        }
     }
 }
 
@@ -64,12 +74,14 @@ void main() {
     test_lexer();
     test_lexer_stage3();
     test_lexer_stage4();
+    test_lexer_stage6();
     test_symbols();
     test_codegen();
     test_parser();
     test_arena_page_boundary();
     test_continuation_dispatch_ids();
     test_ast_parser();
+    test_stage6_arrays();
 
     if (test_failures == 0) {
         output('o');

@@ -49,6 +49,7 @@ const cell NODE_FUNCTION_DESCRIPTOR = 19;
 const cell NODE_CONTINUATION = 20;
 const cell NODE_INSTRUCTION = 21;
 const cell NODE_CALL_ARGUMENT = 22;
+const cell NODE_INDEX_EXPRESSION = 23;
 
 cell[16][256] arena_cells;
 NodeId arena_next;

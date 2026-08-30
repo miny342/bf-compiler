@@ -1,4 +1,4 @@
-// typed ASTからscalar Continuation IRを構築する。
+// typed ASTから第6段階Continuation IRを構築する。
 
 const cell TERM_NONE = 0;
 const cell TERM_GOTO = 1;
@@ -148,7 +148,7 @@ void lower_ast_expression(NodeId expression, cell destination) {
         append_ir_instruction(IR_SET, destination, node_value(expression));
         return;
     }
-    if (kind == NODE_NAME_EXPRESSION) {
+    if (kind == NODE_NAME_EXPRESSION || kind == NODE_INDEX_EXPRESSION) {
         append_ir_instruction(IR_COPY, destination, node_value(expression));
         return;
     }
@@ -265,8 +265,16 @@ void lower_ast_statement(NodeId statement) {
         return;
     }
     if (kind == NODE_DECLARATION) {
-        cell slot = node_value(statement);
-        append_ir_instruction(IR_SET, slot, 0);
+        cell slot = arena_read(statement, FIELD_C_PAGE);
+        cell cells = 1;
+        if (node_tag(statement) == AST_DECLARATION_ARRAY) {
+            cells = node_value(statement);
+        }
+        cell index;
+        while (index < cells) {
+            append_ir_instruction(IR_SET, slot + index, 0);
+            index += 1;
+        }
         if (!node_is_null(node_a(statement))) {
             lower_ast_expression(node_a(statement), slot);
         }

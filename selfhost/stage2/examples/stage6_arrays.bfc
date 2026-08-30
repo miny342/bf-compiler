@@ -1,0 +1,39 @@
+cell recursive_sum(cell depth) {
+    cell[4] values;
+    values[1 + 2] = depth;
+    if (depth == 0) {
+        return values[3];
+    }
+    return values[3] + recursive_sum(depth - 1);
+}
+
+void main() {
+    cell[6] values;
+    output(values[5]);
+    values[1 + 2] = 7;
+    values[3] += 2;
+    values[3] -= 1;
+    values[255 + 1] = 8;
+    values[1 || input()] = 'A';
+    values[0 && input()] = 'B';
+    values[!0 + 3] = 9;
+    output(values[3]);
+    output(values[0]);
+    output(values[1]);
+    output(values[4]);
+    {
+        cell[2] values;
+        values[1] = 'C';
+        output(values[1]);
+    }
+    output(recursive_sum(3));
+
+    cell rounds = 2;
+    while (rounds != 0) {
+        cell[2] temporary;
+        output(temporary[1]);
+        temporary[1] = 9;
+        rounds -= 1;
+    }
+    output(input());
+}
