@@ -1,4 +1,4 @@
-// 第6段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
+// 第7段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
 
 const cell AST_TYPE_VOID = 0;
 const cell AST_TYPE_CELL = 1;
@@ -352,15 +352,10 @@ cell parse_ast_type() {
     return AST_TYPE_VOID;
 }
 
-NodeId parse_ast_function() {
-    cell return_type = parse_ast_type();
-    if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-        fail();
-    }
+NodeId parse_ast_function_after_name(cell return_type, NodeId name) {
     NodeId function = allocate_node(NODE_FUNCTION);
     node_set_tag(function, return_type);
-    node_set_name(function, intern_token_name());
-    next_token();
+    node_set_name(function, name);
     consume(TokenKind::LeftParen);
 
     NodeId first_parameter;
@@ -397,17 +392,80 @@ NodeId parse_ast_function() {
     return function;
 }
 
+void append_ast_function(NodeId function) {
+    if (node_is_null(first_function)) {
+        first_function = function;
+    } else {
+        node_set_next(last_function, function);
+    }
+    last_function = function;
+}
+
+void append_ast_global(NodeId global) {
+    if (node_is_null(first_global)) {
+        first_global = global;
+    } else {
+        node_set_next(last_global, global);
+    }
+    last_global = global;
+}
+
+void parse_ast_top_level_item() {
+    cell value_type = parse_ast_type();
+    cell declaration_kind = AST_DECLARATION_SCALAR;
+    cell array_length;
+    if (token_kind == TokenKind::LeftBracket) {
+        if (value_type != AST_TYPE_CELL) {
+            fail();
+        }
+        declaration_kind = AST_DECLARATION_ARRAY;
+        next_token();
+        if (token_kind != TokenKind::Number
+            || (!token_number_is_256 && token_value == 0)) {
+            fail();
+        }
+        array_length = token_value;
+        next_token();
+        consume(TokenKind::RightBracket);
+    }
+    if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+        fail();
+    }
+    NodeId name = intern_token_name();
+    next_token();
+
+    if (token_kind == TokenKind::LeftParen) {
+        // Aggregate parameters and returns begin in stage 8.
+        if (declaration_kind == AST_DECLARATION_ARRAY) {
+            fail();
+        }
+        append_ast_function(parse_ast_function_after_name(value_type, name));
+        return;
+    }
+
+    if (value_type != AST_TYPE_CELL) {
+        fail();
+    }
+    NodeId global = allocate_node(NODE_GLOBAL);
+    node_set_tag(global, declaration_kind);
+    node_set_value(global, array_length);
+    node_set_name(global, name);
+    if (token_kind == TokenKind::Assign) {
+        if (declaration_kind == AST_DECLARATION_ARRAY) {
+            fail();
+        }
+        next_token();
+        node_set_a(global, parse_ast_expression());
+    }
+    consume(TokenKind::Semicolon);
+    append_ast_global(global);
+}
+
 void parse_ast_program() {
     reset_ast_arena();
     read_character();
     next_token();
     while (token_kind != TokenKind::Eof) {
-        NodeId function = parse_ast_function();
-        if (node_is_null(first_function)) {
-            first_function = function;
-        } else {
-            node_set_next(last_function, function);
-        }
-        last_function = function;
+        parse_ast_top_level_item();
     }
 }

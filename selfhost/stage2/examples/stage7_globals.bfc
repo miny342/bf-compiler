@@ -1,0 +1,48 @@
+cell calls;
+cell early = initialize();
+cell later;
+
+cell initialize() {
+    calls += 1;
+    later = 99;
+    global_values[1] = 88;
+    return 7;
+}
+
+cell[6] global_values;
+
+cell recursive_sum(cell depth) {
+    cell[6] local_values;
+    local_values[depth] = depth + 1;
+    global_values[depth] = local_values[depth];
+    calls += 1;
+    if (depth == 0) {
+        return local_values[depth];
+    }
+    return local_values[depth] + recursive_sum(depth - 1);
+}
+
+void main() {
+    output(early);
+    output(later);
+    output(global_values[1]);
+    output(calls);
+
+    cell[6] local_values;
+    cell index = input();
+    global_values[index] = 10;
+    local_values[index] = global_values[index];
+    local_values[index] += 3;
+    global_values[index] -= 4;
+    output(local_values[index]);
+    output(global_values[index]);
+    output(index);
+
+    output(recursive_sum(3));
+    output(calls);
+    global_values[input()] = input();
+    output(global_values[4]);
+    global_values[5] = 'A';
+    output(global_values[5]);
+    output(input());
+}

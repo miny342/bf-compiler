@@ -50,6 +50,7 @@ const cell NODE_CONTINUATION = 20;
 const cell NODE_INSTRUCTION = 21;
 const cell NODE_CALL_ARGUMENT = 22;
 const cell NODE_INDEX_EXPRESSION = 23;
+const cell NODE_GLOBAL = 24;
 
 cell[16][256] arena_cells;
 NodeId arena_next;
@@ -58,6 +59,8 @@ NodeId first_name;
 NodeId last_name;
 NodeId first_function;
 NodeId last_function;
+NodeId first_global;
+NodeId last_global;
 
 NodeId null_node() {
     NodeId result;
@@ -110,6 +113,8 @@ void reset_ast_arena() {
     last_name = null_node();
     first_function = null_node();
     last_function = null_node();
+    first_global = null_node();
+    last_global = null_node();
 }
 
 NodeId allocate_cells(cell count) {

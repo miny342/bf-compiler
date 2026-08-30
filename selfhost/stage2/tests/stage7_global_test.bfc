@@ -1,0 +1,33 @@
+cell[] stage7_global_test_source = "cell total=1;cell[4] shared;cell bump(cell value){total+=value;return total;}void main(){cell[4] local;cell index=input();shared[index]=bump(2);local[index]=shared[index];output(local[index]);}";
+
+void test_stage7_globals() {
+    reset_test_input(8);
+    parse_ast_program();
+
+    NodeId scalar_global = first_global;
+    NodeId array_global = node_next(scalar_global);
+    expect_test(node_kind(scalar_global) == NODE_GLOBAL
+        && node_tag(scalar_global) == AST_DECLARATION_SCALAR, 'L');
+    expect_test(node_kind(array_global) == NODE_GLOBAL
+        && node_tag(array_global) == AST_DECLARATION_ARRAY
+        && node_value(array_global) == 4, 'M');
+
+    analyze_ast_program();
+    expect_test(stage7_static_cells == 5
+        && arena_read(scalar_global, FIELD_C_PAGE) == 0
+        && arena_read(array_global, FIELD_C_PAGE) == 1, 'N');
+
+    NodeId main = node_next(first_function);
+    NodeId local = node_a(node_b(main));
+    NodeId index_declaration = node_next(local);
+    NodeId global_assignment = node_next(index_declaration);
+    NodeId local_assignment = node_next(global_assignment);
+    expect_test(node_tag(node_a(global_assignment))
+        == RESOLVED_GLOBAL_DYNAMIC, 'O');
+    expect_test(node_tag(node_a(local_assignment))
+        == RESOLVED_LOCAL_DYNAMIC, 'P');
+
+    lower_ast_program();
+    NodeId main_entry = node_a(node_c(main));
+    expect_test(node_tag(node_a(main_entry)) == IR_SET_GLOBAL, 'F');
+}

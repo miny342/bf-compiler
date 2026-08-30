@@ -1,8 +1,8 @@
-# 第6段階bootstrap compiler
+# 第7段階bootstrap compiler
 
 このディレクトリには、最初に実行可能になったセルフホスト用の小さなコンパイラを置く。
 まずRust版コンパイラでBFC製コンパイラをBrainfuckへ変換し、そのBrainfuckプログラムで
-初期実装第1〜6段階のBFCをBrainfuckへ変換する。
+初期実装第1〜7段階のBFCをBrainfuckへ変換する。
 
 ## ファイル構成
 
@@ -15,10 +15,10 @@
 - `compiler/04_codegen.bfc`: Brainfuckのcell移動、copy、加減算、制御loopの生成
 - `compiler/05_parser.bfc`: 式、宣言、代入、block、`if`、`while`の構文解析
 - `compiler/06_arena.bfc`: 16-bit handle、packed arena、identifier intern
-- `compiler/07_ast_parser.bfc`: 第6段階surface syntaxのfull AST構築
+- `compiler/07_ast_parser.bfc`: 第7段階surface syntaxのfull AST構築
 - `compiler/08_semantic.bfc`: function収集、名前解決、scalar/array型検査
 - `compiler/09_continuation_ir.bfc`: typed ASTからContinuation IRへのlowering
-- `compiler/10_abi_codegen.bfc`: arrayをflattenしたuniform frame、二段countdown dispatcher、call/return ABI
+- `compiler/10_abi_codegen.bfc`: static global、array countdown portal、uniform frame、call/return ABI
 - `compiler/main.bfc`: production標準入出力とentry point
 
 Rust版`bfc`へは、これらを番号順に複数sourceとして直接渡してもよい。BF上で動くBFC製
@@ -48,18 +48,20 @@ production実装を変えずに次をBF上で検証できる。
 - `if`、`else`、`while`、`!`、比較を含む第4段階direct parser
 - arena page境界、full AST、前方callの名前解決、Continuation IR、ABI出力
 - local配列の連続slot配置、定数式添字の畳み込み、宣言ごとのゼロ初期化
+- static global layout、宣言順initializer、local/global配列の動的添字
 
 内部testの追加時は任意の`*_test.bfc`へtest関数を定義し、`tests/test.bfc`の`main`から明示的に
 呼び出す。
 
 ## 対応する入力
 
-`LANGUAGE.md`の初期実装第1〜6段階から、次を受理する。
+`LANGUAGE.md`の初期実装第1〜7段階から、次を受理する。
 
 - ちょうど1つの`void main()`とscalar/void function定義
 - scalar parameter、前方call、直接・相互再帰、`return`
 - nested block、空文、scalar `cell`宣言
-- 長さ1から256の1次元local `cell`配列宣言（frame容量内）、定数式添字による要素アクセス
+- scalar/1次元`cell`配列のglobalと、宣言順に実行するscalar initializer
+- 長さ1から256の1次元local/global `cell`配列宣言（layout容量内）、定数/動的添字による要素アクセス
 - 10進・16進整数リテラルと文字リテラル
 - `input()`、`output`、`=`、`+=`、`-=`
 - 単項および二項の`+`、`-`
@@ -69,16 +71,21 @@ production実装を変えずに次をBF上で検証できる。
 - ASCII空白、行コメント、blockコメント
 
 production経路には、identifier 64 byte、function 255個、block nesting 16段、uniform
-frameのlocal/temporary 239 cell、packed AST/IR arena 4,096 cellという明示的な制限がある。
-配列長256の構文は認識するが、このframe容量には収まらないため現backendでは拒否する。
-制限超過または後段階の構文を検出すると`BFC_STAGE6_ERROR`を出力して停止する。runtime演算は
+frameのlocal/temporary 239 cell、static global 255 cell、packed AST/IR arena 4,096 cellという
+明示的な制限がある。配列長256の構文は認識するが、現layout容量には収まらないため拒否する。
+制限超過または後段階の構文を検出すると`BFC_STAGE7_ERROR`を出力して停止する。runtime演算は
 通常のBFCと同じくmod 256でwrapする。旧第4段階direct parserは内部回帰test用に残している。
-動的添字、global配列、配列引数/return、配列全体代入は後段階まで拒否する。
+配列引数/returnと配列全体代入は第8段階まで拒否する。
 
 Continuationにはarena上の`NodeId`とは別に1始まりの密な16-bit dispatch IDを割り当てる。
 ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的countdownでdispatchし、
 caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
 dispatch cycle末までは`Pc`を0に保つ。
+
+static globalsの右にzero anchorを置き、各activationの`Active`をallocation flagとして保存する。
+global accessはcurrent frameからanchorへ左走査し、処理後にanchorからfrontierへ右走査して同じ
+activationへ戻るため、再帰深度によらず単一のstatic領域を参照する。動的添字はsource indexを
+一度だけframe temporaryへ評価し、local/global共通の破壊的countdown portalで対象要素を選択する。
 
 ## 検証
 
@@ -90,8 +97,9 @@ scripts/verify-stage2-selfhost.sh
 
 検証scriptは最初に`test.bfc`版をBFへ変換して内部testの`ok`を確認する。続いて`main.bfc`版を
 連結して二段階のコンパイルを実行する。生成結果にエラーmarkerやBrainfuck以外のbyteがないことを
-調べた後、再帰、local配列のゼロ初期化、定数式添字のwrappingと短絡、要素の読み書きを含む
-生成programを実行し、期待するbinary出力と比較する。動的添字と定数範囲外アクセスも拒否を確認する。
+調べた後、global initializerの宣言順、再帰中のglobal共有、local/global動的添字、RHSを先に行う
+評価順、要素の読み書きを含む生成programを実行し、期待するbinary出力と比較する。配列全体の
+scalar利用と定数範囲外アクセスも拒否を確認する。
 
 ## セルフホスト時のテープ容量
 

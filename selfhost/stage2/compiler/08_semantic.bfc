@@ -1,4 +1,4 @@
-// 第6段階programのfile-scope収集、名前解決、型検査。
+// 第7段階programのfile-scope収集、名前解決、型検査。
 
 NodeId[256] semantic_local_names;
 cell[256] semantic_local_slots;
@@ -13,6 +13,12 @@ cell[16] semantic_scope_slot_base;
 NodeId semantic_current_function;
 NodeId main_function;
 cell function_count;
+cell stage7_static_cells;
+
+const cell RESOLVED_LOCAL = 0;
+const cell RESOLVED_GLOBAL = 1;
+const cell RESOLVED_LOCAL_DYNAMIC = 2;
+const cell RESOLVED_GLOBAL_DYNAMIC = 3;
 
 NodeId find_function_by_name(NodeId name) {
     NodeId function = first_function;
@@ -26,16 +32,26 @@ NodeId find_function_by_name(NodeId name) {
     return null_node();
 }
 
-cell find_local_binding(NodeId name) {
+cell find_local_binding_or_zero(NodeId name) {
     cell index = semantic_local_count;
     while (index != 0) {
         index -= 1;
         if (node_equals(semantic_local_names[index], name)) {
-            return index;
+            return index + 1;
         }
     }
-    fail();
     return 0;
+}
+
+NodeId find_global_by_name_or_null(NodeId name) {
+    NodeId global = first_global;
+    while (!node_is_null(global)) {
+        if (node_equals(node_name(global), name)) {
+            return global;
+        }
+        global = node_next(global);
+    }
+    return null_node();
 }
 
 cell add_semantic_local(NodeId name, cell is_array, cell length) {
@@ -170,31 +186,66 @@ cell analyze_ast_expression(NodeId expression) {
         return AST_TYPE_CELL;
     }
     if (kind == NODE_NAME_EXPRESSION) {
-        cell binding = find_local_binding(node_name(expression));
-        if (semantic_local_is_array[binding]) {
+        cell encoded_binding = find_local_binding_or_zero(node_name(expression));
+        if (encoded_binding != 0) {
+            cell binding = encoded_binding - 1;
+            if (semantic_local_is_array[binding]) {
+                fail();
+            }
+            node_set_tag(expression, RESOLVED_LOCAL);
+            node_set_value(expression, semantic_local_slots[binding]);
+            return AST_TYPE_CELL;
+        }
+        NodeId global = find_global_by_name_or_null(node_name(expression));
+        if (node_is_null(global) || node_tag(global) == AST_DECLARATION_ARRAY) {
             fail();
         }
-        node_set_value(expression, semantic_local_slots[binding]);
+        node_set_tag(expression, RESOLVED_GLOBAL);
+        node_set_value(expression, arena_read(global, FIELD_C_PAGE));
         return AST_TYPE_CELL;
     }
     if (kind == NODE_INDEX_EXPRESSION) {
-        cell binding = find_local_binding(node_name(expression));
-        if (!semantic_local_is_array[binding]) {
-            fail();
+        cell encoded_binding = find_local_binding_or_zero(node_name(expression));
+        cell storage = RESOLVED_LOCAL;
+        cell base;
+        cell length;
+        if (encoded_binding != 0) {
+            cell binding = encoded_binding - 1;
+            if (!semantic_local_is_array[binding]) {
+                fail();
+            }
+            base = semantic_local_slots[binding];
+            length = semantic_local_lengths[binding];
+        } else {
+            NodeId global = find_global_by_name_or_null(node_name(expression));
+            if (node_is_null(global)
+                || node_tag(global) != AST_DECLARATION_ARRAY) {
+                fail();
+            }
+            storage = RESOLVED_GLOBAL;
+            base = arena_read(global, FIELD_C_PAGE);
+            length = node_value(global);
         }
         NodeId index = node_a(expression);
         if (analyze_ast_expression(index) != AST_TYPE_CELL) {
             fail();
         }
         ConstantValue constant = evaluate_constant_expression(index);
-        if (!constant.known
-            || constant.value >= semantic_local_lengths[binding]) {
+        if (constant.known && constant.value >= length) {
             fail();
         }
-        node_set_value(
-            expression,
-            semantic_local_slots[binding] + constant.value
-        );
+        if (constant.known) {
+            node_set_tag(expression, storage);
+            node_set_value(expression, base + constant.value);
+        } else {
+            if (storage == RESOLVED_LOCAL) {
+                node_set_tag(expression, RESOLVED_LOCAL_DYNAMIC);
+            } else {
+                node_set_tag(expression, RESOLVED_GLOBAL_DYNAMIC);
+            }
+            node_set_value(expression, base);
+            arena_write(expression, FIELD_C_PAGE, length);
+        }
         return AST_TYPE_CELL;
     }
     if (kind == NODE_UNARY_EXPRESSION) {
@@ -324,11 +375,44 @@ cell analyze_ast_statement(NodeId statement) {
     return 0;
 }
 
-void collect_function_declarations() {
+void collect_file_declarations() {
+    stage7_static_cells = 0;
+    NodeId global = first_global;
+    while (!node_is_null(global)) {
+        NodeId earlier_global = first_global;
+        while (!node_equals(earlier_global, global)) {
+            if (node_equals(node_name(earlier_global), node_name(global))) {
+                fail();
+            }
+            earlier_global = node_next(earlier_global);
+        }
+        cell cells = 1;
+        if (node_tag(global) == AST_DECLARATION_ARRAY) {
+            cells = node_value(global);
+            // 256 is encoded as zero and exceeds this bootstrap static layout.
+            if (cells == 0) {
+                fail();
+            }
+        }
+        if (stage7_static_cells > 0xff - cells) {
+            fail();
+        }
+        arena_write(global, FIELD_C_PAGE, stage7_static_cells);
+        stage7_static_cells += cells;
+        global = node_next(global);
+    }
+
     function_count = 0;
     main_function = null_node();
     NodeId function = first_function;
     while (!node_is_null(function)) {
+        global = first_global;
+        while (!node_is_null(global)) {
+            if (node_equals(node_name(global), node_name(function))) {
+                fail();
+            }
+            global = node_next(global);
+        }
         NodeId earlier = first_function;
         while (!node_equals(earlier, function)) {
             if (node_equals(node_name(earlier), node_name(function))) {
@@ -380,7 +464,19 @@ void collect_function_declarations() {
 }
 
 void analyze_ast_program() {
-    collect_function_declarations();
+    collect_file_declarations();
+    semantic_local_count = 0;
+    semantic_next_slot = 0;
+    semantic_scope_depth = 0;
+    semantic_current_function = main_function;
+    NodeId global = first_global;
+    while (!node_is_null(global)) {
+        if (!node_is_null(node_a(global))
+            && analyze_ast_expression(node_a(global)) != AST_TYPE_CELL) {
+            fail();
+        }
+        global = node_next(global);
+    }
     NodeId function = first_function;
     while (!node_is_null(function)) {
         semantic_current_function = function;
