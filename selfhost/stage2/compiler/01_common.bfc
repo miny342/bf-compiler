@@ -12,7 +12,7 @@ void fail() {
     compiler_output!('A');
     compiler_output!('G');
     compiler_output!('E');
-    compiler_output!('7');
+    compiler_output!('8');
     compiler_output!('_');
     compiler_output!('E');
     compiler_output!('R');

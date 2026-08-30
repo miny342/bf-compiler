@@ -1,4 +1,4 @@
-// static globalとarray portalを持つ第7段階Continuation ABI backend。
+// aggregate outboxを持つ第8段階Continuation ABI backend。
 // 全functionを同じframe幅にすることで、直接・相互再帰を同じcall/return
 // sequenceで扱う。PCとreturn PCはNodeIdのpage/slotをそのまま使う。
 
@@ -19,7 +19,9 @@ const cell FRAME_SCRATCH_2 = 13;
 const cell FRAME_SCRATCH_3 = 14;
 const cell FRAME_DATA_BASE = 16;
 
-cell stage7_frame_cells;
+cell stage8_frame_cells;
+cell stage8_outbox_base;
+cell stage8_outbox_cells;
 
 cell physical_frame_slot(cell slot) {
     return FRAME_DATA_BASE + slot;
@@ -410,7 +412,7 @@ void emit_array_instruction(NodeId instruction) {
         0,
         storage,
         length - 1,
-        stage7_frame_cells
+        stage8_frame_cells
     );
 }
 
@@ -424,6 +426,13 @@ void emit_ir_instruction(NodeId instruction) {
         emit_frame_copy(source, destination);
     } else if (kind == IR_COPY_ABI_VALUE) {
         emit_frame_copy(FRAME_VALUE, destination);
+    } else if (kind == IR_COPY_OUTBOX) {
+        emit_frame_copy(
+            physical_frame_slot(
+                stage8_outbox_base + instruction_source(instruction)
+            ),
+            destination
+        );
     } else if (kind == IR_INPUT) {
         emit_input(destination);
     } else if (kind == IR_OUTPUT) {
@@ -439,13 +448,13 @@ void emit_ir_instruction(NodeId instruction) {
         emit_global_constant(
             node_value(instruction),
             instruction_source(instruction),
-            stage7_frame_cells
+            stage8_frame_cells
         );
     } else if (kind == IR_COPY_GLOBAL) {
         emit_global_copy(
             instruction_source(instruction),
             destination,
-            stage7_frame_cells
+            stage8_frame_cells
         );
     } else if (kind == IR_STORE_GLOBAL || kind == IR_ADD_GLOBAL
         || kind == IR_SUBTRACT_GLOBAL) {
@@ -454,7 +463,7 @@ void emit_ir_instruction(NodeId instruction) {
             node_value(instruction),
             kind == IR_SUBTRACT_GLOBAL,
             kind == IR_STORE_GLOBAL,
-            stage7_frame_cells
+            stage8_frame_cells
         );
     } else if (kind == IR_ARRAY_LOAD || kind == IR_ARRAY_STORE
         || kind == IR_ARRAY_ADD || kind == IR_ARRAY_SUBTRACT) {
@@ -494,7 +503,7 @@ void emit_call_terminator(NodeId continuation) {
     NodeId entry_id = continuation_dispatch_id(entry);
     NodeId resume_id = continuation_dispatch_id(resume);
 
-    cell frame_cells = stage7_frame_cells;
+    cell frame_cells = stage8_frame_cells;
     emit_next_context(frame_cells);
     cell position;
     while (position < frame_cells) {
@@ -510,20 +519,46 @@ void emit_call_terminator(NodeId continuation) {
 
     NodeId argument = node_c(continuation);
     while (!node_is_null(argument)) {
-        emit_copy_to_next_context(
-            physical_frame_slot(node_value(argument)),
-            physical_frame_slot(node_tag(argument)),
-            frame_cells
-        );
+        cell source = node_value(argument);
+        cell destination = arena_read(argument, FIELD_B_PAGE);
+        cell cells = 1;
+        if (node_tag(argument) == AST_DECLARATION_ARRAY) {
+            cells = arena_read(argument, FIELD_A_PAGE);
+        }
+        cell index;
+        while (index < cells) {
+            emit_copy_to_next_context(
+                physical_frame_slot(source + index),
+                physical_frame_slot(destination + index),
+                frame_cells
+            );
+            index += 1;
+        }
         argument = node_next(argument);
     }
     emit_next_context(frame_cells);
 }
 
 void emit_return_terminator(NodeId continuation) {
-    cell frame_cells = stage7_frame_cells;
+    cell frame_cells = stage8_frame_cells;
     cell slot = node_value(continuation);
-    if (slot == VOID_RETURN_SLOT) {
+    if (node_tag(continuation) == TERM_RETURN_ARRAY) {
+        cell length = arena_read(continuation, FIELD_NAME_PAGE);
+        cell index;
+        while (index < length) {
+            emit_frame_copy(physical_frame_slot(slot + index), FRAME_VALUE);
+            emit_clear_previous_context(
+                physical_frame_slot(stage8_outbox_base + index),
+                frame_cells
+            );
+            emit_transfer_to_previous_context(
+                FRAME_VALUE,
+                physical_frame_slot(stage8_outbox_base + index),
+                frame_cells
+            );
+            index += 1;
+        }
+    } else if (slot == VOID_RETURN_SLOT) {
         emit_clear_previous_context(FRAME_VALUE, frame_cells);
     } else {
         emit_frame_copy(physical_frame_slot(slot), FRAME_VALUE);
@@ -575,7 +610,7 @@ void emit_continuation_terminator(NodeId continuation) {
         emit_loop_close(condition);
     } else if (kind == TERM_CALL) {
         emit_call_terminator(continuation);
-    } else if (kind == TERM_RETURN) {
+    } else if (kind == TERM_RETURN || kind == TERM_RETURN_ARRAY) {
         emit_return_terminator(continuation);
     } else if (kind == TERM_HALT) {
         emit_clear(FRAME_ACTIVE);
@@ -686,27 +721,37 @@ void emit_dispatch_countdown(NodeId first, NodeId last) {
     emit_page_countdown_level(first, last_id.page - first_id.page);
 }
 
-void calculate_stage7_frame_size() {
+void calculate_stage8_frame_size() {
     cell maximum;
+    stage8_outbox_cells = 0;
     NodeId function = first_function;
     while (!node_is_null(function)) {
-        cell slots = node_value(node_c(function));
+        NodeId descriptor = node_c(function);
+        cell slots = node_value(descriptor);
         if (slots > maximum) {
             maximum = slots;
         }
+        if (node_tag(function) == AST_TYPE_ARRAY) {
+            cell return_length = arena_read(descriptor, FIELD_B_PAGE);
+            if (return_length > stage8_outbox_cells) {
+                stage8_outbox_cells = return_length;
+            }
+        }
         function = node_next(function);
     }
-    if (maximum > 0xef) {
+    if (stage8_outbox_cells > 0xef
+        || maximum > 0xef - stage8_outbox_cells) {
         fail();
     }
-    stage7_frame_cells = FRAME_DATA_BASE + maximum;
+    stage8_outbox_base = maximum;
+    stage8_frame_cells = FRAME_DATA_BASE + maximum + stage8_outbox_cells;
 }
 
 void emit_continuation_program() {
-    calculate_stage7_frame_size();
+    calculate_stage8_frame_size();
     // static globals | zero anchor | one frame-stride gap | root frame
     emit_repeat_character('>', stage7_static_cells);
-    emit_repeat_character('>', stage7_frame_cells);
+    emit_repeat_character('>', stage8_frame_cells);
     target_position = 0;
     NodeId main_entry = node_a(node_c(main_function));
     NodeId main_entry_id = continuation_dispatch_id(main_entry);
@@ -725,7 +770,7 @@ void emit_continuation_program() {
     compiler_output!(']');
 }
 
-void compile_program_stage7() {
+void compile_program_stage8() {
     parse_ast_program();
     analyze_ast_program();
     lower_ast_program();

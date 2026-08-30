@@ -1,4 +1,4 @@
-// 第7段階programのfile-scope収集、名前解決、型検査。
+// 第8段階programのfile-scope収集、名前解決、型検査。
 
 NodeId[256] semantic_local_names;
 cell[256] semantic_local_slots;
@@ -189,19 +189,28 @@ cell analyze_ast_expression(NodeId expression) {
         cell encoded_binding = find_local_binding_or_zero(node_name(expression));
         if (encoded_binding != 0) {
             cell binding = encoded_binding - 1;
-            if (semantic_local_is_array[binding]) {
-                fail();
-            }
             node_set_tag(expression, RESOLVED_LOCAL);
             node_set_value(expression, semantic_local_slots[binding]);
+            if (semantic_local_is_array[binding]) {
+                arena_write(
+                    expression,
+                    FIELD_C_PAGE,
+                    semantic_local_lengths[binding]
+                );
+                return AST_TYPE_ARRAY;
+            }
             return AST_TYPE_CELL;
         }
         NodeId global = find_global_by_name_or_null(node_name(expression));
-        if (node_is_null(global) || node_tag(global) == AST_DECLARATION_ARRAY) {
+        if (node_is_null(global)) {
             fail();
         }
         node_set_tag(expression, RESOLVED_GLOBAL);
         node_set_value(expression, arena_read(global, FIELD_C_PAGE));
+        if (node_tag(global) == AST_DECLARATION_ARRAY) {
+            arena_write(expression, FIELD_C_PAGE, node_value(global));
+            return AST_TYPE_ARRAY;
+        }
         return AST_TYPE_CELL;
     }
     if (kind == NODE_INDEX_EXPRESSION) {
@@ -268,18 +277,33 @@ cell analyze_ast_expression(NodeId expression) {
         }
         node_set_b(expression, function);
         NodeId descriptor = node_c(function);
-        cell expected = node_tag(descriptor);
-        cell actual;
         NodeId argument = node_a(expression);
-        while (!node_is_null(argument)) {
-            if (analyze_ast_expression(argument) != AST_TYPE_CELL) {
+        NodeId parameter = node_a(function);
+        while (!node_is_null(argument) && !node_is_null(parameter)) {
+            cell actual_type = analyze_ast_expression(argument);
+            cell expected_type = AST_TYPE_CELL;
+            if (node_tag(parameter) == AST_DECLARATION_ARRAY) {
+                expected_type = AST_TYPE_ARRAY;
+            }
+            if (actual_type != expected_type) {
                 fail();
             }
-            actual += 1;
+            if (actual_type == AST_TYPE_ARRAY
+                && arena_read(argument, FIELD_C_PAGE) != node_value(parameter)) {
+                fail();
+            }
             argument = node_next(argument);
+            parameter = node_next(parameter);
         }
-        if (actual != expected) {
+        if (!node_is_null(argument) || !node_is_null(parameter)) {
             fail();
+        }
+        if (node_tag(function) == AST_TYPE_ARRAY) {
+            arena_write(
+                expression,
+                FIELD_C_PAGE,
+                arena_read(descriptor, FIELD_B_PAGE)
+            );
         }
         return node_tag(function);
     }
@@ -307,6 +331,15 @@ cell analyze_ast_statement(NodeId statement) {
     }
     if (kind == NODE_DECLARATION) {
         cell is_array = node_tag(statement) == AST_DECLARATION_ARRAY;
+        if (!node_is_null(node_a(statement))) {
+            cell initializer_type = analyze_ast_expression(node_a(statement));
+            if ((!is_array && initializer_type != AST_TYPE_CELL)
+                || (is_array && (initializer_type != AST_TYPE_ARRAY
+                    || arena_read(node_a(statement), FIELD_C_PAGE)
+                        != node_value(statement)))) {
+                fail();
+            }
+        }
         cell slot = add_semantic_local(
             node_name(statement),
             is_array,
@@ -315,10 +348,6 @@ cell analyze_ast_statement(NodeId statement) {
         // Declaration value remains its encoded array length.  Its resolved
         // frame base uses an otherwise unused scalar field.
         arena_write(statement, FIELD_C_PAGE, slot);
-        if (!node_is_null(node_a(statement))
-            && analyze_ast_expression(node_a(statement)) != AST_TYPE_CELL) {
-            fail();
-        }
         return 0;
     }
     if (kind == NODE_OUTPUT_STATEMENT) {
@@ -328,9 +357,17 @@ cell analyze_ast_statement(NodeId statement) {
         return 0;
     }
     if (kind == NODE_ASSIGNMENT) {
-        if (analyze_ast_expression(node_a(statement)) != AST_TYPE_CELL
-            || analyze_ast_expression(node_b(statement)) != AST_TYPE_CELL) {
+        cell value_type = analyze_ast_expression(node_b(statement));
+        cell target_type = analyze_ast_expression(node_a(statement));
+        if (value_type != target_type) {
             fail();
+        }
+        if (target_type == AST_TYPE_ARRAY) {
+            if (node_tag(statement) != AST_ASSIGNMENT_SET
+                || arena_read(node_a(statement), FIELD_C_PAGE)
+                    != arena_read(node_b(statement), FIELD_C_PAGE)) {
+                fail();
+            }
         }
         return 0;
     }
@@ -347,9 +384,20 @@ cell analyze_ast_statement(NodeId statement) {
             if (!node_is_null(value)) {
                 fail();
             }
-        } else if (node_is_null(value)
-            || analyze_ast_expression(value) != AST_TYPE_CELL) {
-            fail();
+        } else {
+            if (node_is_null(value)
+                || analyze_ast_expression(value)
+                    != node_tag(semantic_current_function)) {
+                fail();
+            }
+            if (node_tag(semantic_current_function) == AST_TYPE_ARRAY
+                && arena_read(value, FIELD_C_PAGE)
+                    != arena_read(
+                        node_c(semantic_current_function),
+                        FIELD_B_PAGE
+                    )) {
+                fail();
+            }
         }
         return 1;
     }
@@ -426,8 +474,13 @@ void collect_file_declarations() {
         node_set_value(function, function_count);
         function_count += 1;
 
+        cell return_length = arena_read(function, FIELD_C_PAGE);
+        if (node_tag(function) == AST_TYPE_ARRAY && return_length == 0) {
+            fail();
+        }
         NodeId descriptor = allocate_node(NODE_FUNCTION_DESCRIPTOR);
         node_set_c(function, descriptor);
+        arena_write(descriptor, FIELD_B_PAGE, return_length);
         NodeId parameter = node_a(function);
         cell parameter_count;
         while (!node_is_null(parameter)) {
@@ -471,9 +524,18 @@ void analyze_ast_program() {
     semantic_current_function = main_function;
     NodeId global = first_global;
     while (!node_is_null(global)) {
-        if (!node_is_null(node_a(global))
-            && analyze_ast_expression(node_a(global)) != AST_TYPE_CELL) {
-            fail();
+        if (!node_is_null(node_a(global))) {
+            cell initializer_type = analyze_ast_expression(node_a(global));
+            cell expected_type = AST_TYPE_CELL;
+            if (node_tag(global) == AST_DECLARATION_ARRAY) {
+                expected_type = AST_TYPE_ARRAY;
+            }
+            if (initializer_type != expected_type
+                || (expected_type == AST_TYPE_ARRAY
+                    && arena_read(node_a(global), FIELD_C_PAGE)
+                        != node_value(global))) {
+                fail();
+            }
         }
         global = node_next(global);
     }
@@ -487,14 +549,17 @@ void analyze_ast_program() {
         enter_semantic_scope();
         NodeId parameter = node_a(function);
         while (!node_is_null(parameter)) {
-            node_set_value(
-                parameter,
-                add_semantic_local(node_name(parameter), 0, 0)
+            cell is_array = node_tag(parameter) == AST_DECLARATION_ARRAY;
+            cell slot = add_semantic_local(
+                node_name(parameter),
+                is_array,
+                node_value(parameter)
             );
+            arena_write(parameter, FIELD_C_PAGE, slot);
             parameter = node_next(parameter);
         }
         cell returns = analyze_ast_statement(node_b(function));
-        if (node_tag(function) == AST_TYPE_CELL && !returns) {
+        if (node_tag(function) != AST_TYPE_VOID && !returns) {
             fail();
         }
         node_set_value(node_c(function), semantic_max_local_count);

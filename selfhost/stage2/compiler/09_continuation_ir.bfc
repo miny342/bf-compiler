@@ -1,4 +1,4 @@
-// typed ASTから第7段階Continuation IRを構築する。
+// typed ASTから第8段階Continuation IRを構築する。
 
 const cell TERM_NONE = 0;
 const cell TERM_GOTO = 1;
@@ -6,6 +6,7 @@ const cell TERM_BRANCH = 2;
 const cell TERM_CALL = 3;
 const cell TERM_RETURN = 4;
 const cell TERM_HALT = 5;
+const cell TERM_RETURN_ARRAY = 6;
 
 const cell IR_SET = 1;
 const cell IR_COPY = 2;
@@ -32,6 +33,7 @@ const cell IR_ARRAY_LOAD = 22;
 const cell IR_ARRAY_STORE = 23;
 const cell IR_ARRAY_ADD = 24;
 const cell IR_ARRAY_SUBTRACT = 25;
+const cell IR_COPY_OUTBOX = 26;
 
 const cell VOID_RETURN_SLOT = 0xff;
 // Continuation records extend the common 13-cell node with a dense dispatch ID.
@@ -149,6 +151,19 @@ cell allocate_lowering_temp() {
     return result;
 }
 
+cell allocate_lowering_cells(cell count) {
+    if (count == 0 || count > 0xef
+        || lowering_temp_next > 0xef - count) {
+        fail();
+    }
+    cell result = lowering_temp_next;
+    lowering_temp_next += count;
+    if (lowering_temp_next > lowering_temp_max) {
+        lowering_temp_max = lowering_temp_next;
+    }
+    return result;
+}
+
 void release_lowering_temp(cell slot) {
     lowering_temp_next = slot;
 }
@@ -172,6 +187,90 @@ void finish_return(cell slot) {
         node_set_tag(lowering_current_continuation, TERM_RETURN);
     }
     node_set_value(lowering_current_continuation, slot);
+}
+
+void finish_array_return(cell slot, cell length) {
+    node_set_tag(lowering_current_continuation, TERM_RETURN_ARRAY);
+    node_set_value(lowering_current_continuation, slot);
+    arena_write(lowering_current_continuation, FIELD_NAME_PAGE, length);
+}
+
+void lower_ast_call(NodeId expression) {
+    cell temporary_base = lowering_temp_next;
+    NodeId first_argument;
+    NodeId last_argument;
+    NodeId argument = node_a(expression);
+    NodeId function = node_b(expression);
+    NodeId parameter = node_a(function);
+    while (!node_is_null(argument)) {
+        NodeId ir_argument = allocate_node(NODE_CALL_ARGUMENT);
+        cell destination = arena_read(parameter, FIELD_C_PAGE);
+        arena_write(ir_argument, FIELD_B_PAGE, destination);
+        if (node_tag(parameter) == AST_DECLARATION_ARRAY) {
+            cell length = node_value(parameter);
+            cell slot = allocate_lowering_cells(length);
+            lower_array_expression(argument, slot, length);
+            node_set_tag(ir_argument, AST_DECLARATION_ARRAY);
+            node_set_value(ir_argument, slot);
+            arena_write(ir_argument, FIELD_A_PAGE, length);
+        } else {
+            cell slot = allocate_lowering_temp();
+            lower_ast_expression(argument, slot);
+            node_set_tag(ir_argument, AST_DECLARATION_SCALAR);
+            node_set_value(ir_argument, slot);
+        }
+        if (node_is_null(first_argument)) {
+            first_argument = ir_argument;
+        } else {
+            node_set_next(last_argument, ir_argument);
+        }
+        last_argument = ir_argument;
+        argument = node_next(argument);
+        parameter = node_next(parameter);
+    }
+
+    NodeId resume = new_continuation();
+    node_set_tag(lowering_current_continuation, TERM_CALL);
+    node_set_name(lowering_current_continuation, function);
+    node_set_b(lowering_current_continuation, resume);
+    node_set_c(lowering_current_continuation, first_argument);
+    select_continuation(resume);
+    lowering_temp_next = temporary_base;
+}
+
+void lower_array_expression(NodeId expression, cell destination, cell length) {
+    cell kind = node_kind(expression);
+    if (kind == NODE_NAME_EXPRESSION) {
+        cell source = node_value(expression);
+        cell index;
+        while (index < length) {
+            if (node_tag(expression) == RESOLVED_GLOBAL) {
+                append_ir_instruction(
+                    IR_COPY_GLOBAL,
+                    destination + index,
+                    source + index
+                );
+            } else {
+                append_ir_instruction(
+                    IR_COPY,
+                    destination + index,
+                    source + index
+                );
+            }
+            index += 1;
+        }
+        return;
+    }
+    if (kind == NODE_CALL_EXPRESSION) {
+        lower_ast_call(expression);
+        cell index;
+        while (index < length) {
+            append_ir_instruction(IR_COPY_OUTBOX, destination + index, index);
+            index += 1;
+        }
+        return;
+    }
+    fail();
 }
 
 void lower_ast_expression(NodeId expression, cell destination) {
@@ -220,35 +319,8 @@ void lower_ast_expression(NodeId expression, cell destination) {
         return;
     }
     if (kind == NODE_CALL_EXPRESSION) {
-        cell temporary_base = lowering_temp_next;
-        NodeId first_argument;
-        NodeId last_argument;
-        NodeId argument = node_a(expression);
-        cell parameter;
-        while (!node_is_null(argument)) {
-            cell slot = allocate_lowering_temp();
-            lower_ast_expression(argument, slot);
-            NodeId ir_argument = allocate_node(NODE_CALL_ARGUMENT);
-            node_set_value(ir_argument, slot);
-            node_set_tag(ir_argument, parameter);
-            if (node_is_null(first_argument)) {
-                first_argument = ir_argument;
-            } else {
-                node_set_next(last_argument, ir_argument);
-            }
-            last_argument = ir_argument;
-            parameter += 1;
-            argument = node_next(argument);
-        }
-
-        NodeId resume = new_continuation();
-        node_set_tag(lowering_current_continuation, TERM_CALL);
-        node_set_name(lowering_current_continuation, node_b(expression));
-        node_set_b(lowering_current_continuation, resume);
-        node_set_c(lowering_current_continuation, first_argument);
-        select_continuation(resume);
+        lower_ast_call(expression);
         append_ir_instruction(IR_COPY_ABI_VALUE, destination, 0);
-        lowering_temp_next = temporary_base;
         return;
     }
     if (kind == NODE_UNARY_EXPRESSION) {
@@ -339,7 +411,11 @@ void lower_ast_statement(NodeId statement) {
             index += 1;
         }
         if (!node_is_null(node_a(statement))) {
-            lower_ast_expression(node_a(statement), slot);
+            if (node_tag(statement) == AST_DECLARATION_ARRAY) {
+                lower_array_expression(node_a(statement), slot, cells);
+            } else {
+                lower_ast_expression(node_a(statement), slot);
+            }
         }
         return;
     }
@@ -352,6 +428,31 @@ void lower_ast_statement(NodeId statement) {
     }
     if (kind == NODE_ASSIGNMENT) {
         NodeId left = node_a(statement);
+        cell array_length = arena_read(left, FIELD_C_PAGE);
+        if (node_kind(left) == NODE_NAME_EXPRESSION
+            && array_length != 0) {
+            cell snapshot = allocate_lowering_cells(array_length);
+            lower_array_expression(node_b(statement), snapshot, array_length);
+            cell index;
+            while (index < array_length) {
+                if (node_tag(left) == RESOLVED_GLOBAL) {
+                    append_ir_instruction(
+                        IR_STORE_GLOBAL,
+                        node_value(left) + index,
+                        snapshot + index
+                    );
+                } else {
+                    append_ir_instruction(
+                        IR_COPY,
+                        node_value(left) + index,
+                        snapshot + index
+                    );
+                }
+                index += 1;
+            }
+            release_lowering_temp(snapshot);
+            return;
+        }
         cell source = allocate_lowering_temp();
         lower_ast_expression(node_b(statement), source);
         cell operator = node_tag(statement);
@@ -405,6 +506,14 @@ void lower_ast_statement(NodeId statement) {
     if (kind == NODE_RETURN_STATEMENT) {
         if (node_is_null(node_a(statement))) {
             finish_return(VOID_RETURN_SLOT);
+        } else if (node_tag(lowering_current_function) == AST_TYPE_ARRAY) {
+            cell length = arena_read(
+                node_c(lowering_current_function),
+                FIELD_B_PAGE
+            );
+            cell slot = allocate_lowering_cells(length);
+            lower_array_expression(node_a(statement), slot, length);
+            finish_array_return(slot, length);
         } else {
             cell slot = allocate_lowering_temp();
             lower_ast_expression(node_a(statement), slot);
@@ -486,10 +595,25 @@ void lower_global_initializers() {
             index += 1;
         }
         if (!node_is_null(node_a(global))) {
-            cell source = allocate_lowering_temp();
-            lower_ast_expression(node_a(global), source);
-            append_ir_instruction(IR_STORE_GLOBAL, base, source);
-            release_lowering_temp(source);
+            if (node_tag(global) == AST_DECLARATION_ARRAY) {
+                cell source = allocate_lowering_cells(cells);
+                lower_array_expression(node_a(global), source, cells);
+                index = 0;
+                while (index < cells) {
+                    append_ir_instruction(
+                        IR_STORE_GLOBAL,
+                        base + index,
+                        source + index
+                    );
+                    index += 1;
+                }
+                release_lowering_temp(source);
+            } else {
+                cell source = allocate_lowering_temp();
+                lower_ast_expression(node_a(global), source);
+                append_ir_instruction(IR_STORE_GLOBAL, base, source);
+                release_lowering_temp(source);
+            }
         }
         global = node_next(global);
     }

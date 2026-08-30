@@ -690,7 +690,7 @@ Continuation IRのconstructorは次を検証する。
 10. aggregate regionと16-bit logical offset portalをContinuation IR/ABIへ追加する。（完了）
 11. 文字列、`len`、`const cell`、method sugar、block macro、`abort`をfrontendへ追加する。（完了）
 12. BFCでstreaming lexer/parserを記述し、self-hostに不足する最小機能を実測から判断する。
-    （着手。`selfhost/stage2/compiler/`でLANGUAGE.mdの初期実装第1〜7段階をBF上から
+    （着手。`selfhost/stage2/compiler/`でLANGUAGE.mdの初期実装第1〜8段階をBF上から
     BFへコンパイルし、外部harnessで生成物を実行検証できる。）
 13. profileに基づき、BF固有templateとcost modelを段階的に追加する。（着手）
 14. `ContinuationProgram → ContinuationProgram`のCFG縮約passを追加し、dispatcher case数と

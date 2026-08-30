@@ -1,0 +1,48 @@
+cell[4] initialized = make_seed();
+cell[4] saved;
+
+cell[4] make_seed() {
+    cell[4] result;
+    result[0] = 1;
+    result[1] = 2;
+    result[2] = 3;
+    result[3] = 4;
+    return result;
+}
+
+cell[4] mutate(cell[4] value) {
+    value[0] += 10;
+    saved = value;
+    return value;
+}
+
+cell[4] descend(cell depth, cell[4] value) {
+    value[depth] = depth + 10;
+    if (depth == 0) {
+        return value;
+    }
+    return descend(depth - 1, value);
+}
+
+void main() {
+    output(initialized[0]);
+    output(initialized[1]);
+    output(initialized[2]);
+    output(initialized[3]);
+
+    cell[4] source = initialized;
+    cell[4] changed = mutate(source);
+    output(source[0]);
+    output(changed[0]);
+    output(saved[0]);
+    saved = source;
+    output(saved[0]);
+
+    cell[4] recursive = descend(3, source);
+    output(source[0]);
+    output(recursive[0]);
+    output(recursive[1]);
+    output(recursive[2]);
+    output(recursive[3]);
+
+}

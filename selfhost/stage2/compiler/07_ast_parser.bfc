@@ -1,7 +1,8 @@
-// 第7段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
+// 第8段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
 
 const cell AST_TYPE_VOID = 0;
 const cell AST_TYPE_CELL = 1;
+const cell AST_TYPE_ARRAY = 2;
 const cell AST_UNARY_PLUS = 0;
 const cell AST_UNARY_NEGATE = 1;
 const cell AST_UNARY_NOT = 2;
@@ -257,9 +258,6 @@ NodeId parse_ast_statement() {
         node_set_name(declaration, intern_token_name());
         next_token();
         if (token_kind == TokenKind::Assign) {
-            if (declaration_kind == AST_DECLARATION_ARRAY) {
-                fail();
-            }
             next_token();
             node_set_a(declaration, parse_ast_expression());
         }
@@ -352,9 +350,14 @@ cell parse_ast_type() {
     return AST_TYPE_VOID;
 }
 
-NodeId parse_ast_function_after_name(cell return_type, NodeId name) {
+NodeId parse_ast_function_after_name(
+    cell return_type,
+    cell return_length,
+    NodeId name
+) {
     NodeId function = allocate_node(NODE_FUNCTION);
     node_set_tag(function, return_type);
+    arena_write(function, FIELD_C_PAGE, return_length);
     node_set_name(function, name);
     consume(TokenKind::LeftParen);
 
@@ -363,11 +366,28 @@ NodeId parse_ast_function_after_name(cell return_type, NodeId name) {
     if (token_kind != TokenKind::RightParen) {
         cell more = 1;
         while (more) {
-            if (parse_ast_type() != AST_TYPE_CELL
-                || token_kind != TokenKind::Identifier || token_is_reserved()) {
+            if (parse_ast_type() != AST_TYPE_CELL) {
+                fail();
+            }
+            cell parameter_kind = AST_DECLARATION_SCALAR;
+            cell parameter_length;
+            if (token_kind == TokenKind::LeftBracket) {
+                parameter_kind = AST_DECLARATION_ARRAY;
+                next_token();
+                if (token_kind != TokenKind::Number
+                    || (!token_number_is_256 && token_value == 0)) {
+                    fail();
+                }
+                parameter_length = token_value;
+                next_token();
+                consume(TokenKind::RightBracket);
+            }
+            if (token_kind != TokenKind::Identifier || token_is_reserved()) {
                 fail();
             }
             NodeId parameter = allocate_node(NODE_PARAMETER);
+            node_set_tag(parameter, parameter_kind);
+            node_set_value(parameter, parameter_length);
             node_set_name(parameter, intern_token_name());
             next_token();
             if (node_is_null(first_parameter)) {
@@ -419,6 +439,7 @@ void parse_ast_top_level_item() {
             fail();
         }
         declaration_kind = AST_DECLARATION_ARRAY;
+        value_type = AST_TYPE_ARRAY;
         next_token();
         if (token_kind != TokenKind::Number
             || (!token_number_is_256 && token_value == 0)) {
@@ -435,15 +456,13 @@ void parse_ast_top_level_item() {
     next_token();
 
     if (token_kind == TokenKind::LeftParen) {
-        // Aggregate parameters and returns begin in stage 8.
-        if (declaration_kind == AST_DECLARATION_ARRAY) {
-            fail();
-        }
-        append_ast_function(parse_ast_function_after_name(value_type, name));
+        append_ast_function(
+            parse_ast_function_after_name(value_type, array_length, name)
+        );
         return;
     }
 
-    if (value_type != AST_TYPE_CELL) {
+    if (value_type == AST_TYPE_VOID) {
         fail();
     }
     NodeId global = allocate_node(NODE_GLOBAL);
@@ -451,9 +470,6 @@ void parse_ast_top_level_item() {
     node_set_value(global, array_length);
     node_set_name(global, name);
     if (token_kind == TokenKind::Assign) {
-        if (declaration_kind == AST_DECLARATION_ARRAY) {
-            fail();
-        }
         next_token();
         node_set_a(global, parse_ast_expression());
     }
