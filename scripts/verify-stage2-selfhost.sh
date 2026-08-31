@@ -267,4 +267,32 @@ printf '\007\011\005\005\004\004\010\014\002\143\006' \
 cmp "$work_dir/stage12-macros-abort.expected" \
     "$work_dir/stage12-macros-abort.actual"
 
+# 400 empty statements occupy more than the former 4,096-cell AST arena,
+# while lowering to a tiny program.  Keep this as a capacity regression
+# without making the generated Brainfuck artifact unnecessarily large.
+large_ast_source="$work_dir/stage13-large-ast.bfc"
+large_ast_bf="$work_dir/stage13-large-ast.bf"
+{
+    printf 'void main(){'
+    for ((statement = 0; statement < 400; statement += 1)); do
+        printf ';'
+    done
+    printf '}\n'
+} >"$large_ast_source"
+cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
+    -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
+    <"$large_ast_source" >"$large_ast_bf"
+if LC_ALL=C grep -q 'BFC_STAGE12_ERROR' "$large_ast_bf" \
+    || LC_ALL=C grep -q '[^][<>+.,-]' "$large_ast_bf"; then
+    echo "stage-12 compiler exhausted the expanded AST arena" >&2
+    exit 1
+fi
+cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
+    -p bf-interpreter --bin bf-interpreter -- "$large_ast_bf" \
+    >"$work_dir/stage13-large-ast.actual"
+if [[ -s "$work_dir/stage13-large-ast.actual" ]]; then
+    echo "large AST regression program unexpectedly produced output" >&2
+    exit 1
+fi
+
 echo "stage-12 self-host verification passed"

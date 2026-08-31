@@ -1,10 +1,10 @@
 // ASTと後続IRで共有する16-bit handleとpacked arena。
-// 一つのcell[256][256] regionへnode recordとidentifier byteを置く。
+// 一つのcell[64][256] regionへnode recordとidentifier byteを置く。
 // fieldごとに巨大なglobal regionを作ると、absolute pointer移動を埋め込む
 // backendでは生成BF自体が数GBになるため、regionを一つに保つ。
 
 const cell NODE_CELLS = 13;
-const cell ARENA_LAST_PAGE = 15;
+const cell ARENA_LAST_PAGE = 63;
 const cell FIELD_KIND = 0;
 const cell FIELD_TAG = 1;
 const cell FIELD_VALUE = 2;
@@ -72,7 +72,7 @@ const cell TYPE_STRUCT = 4;
 const cell TYPE_ARRAY = 5;
 const cell TYPE_INFERRED = 6;
 
-cell[16][256] arena_cells;
+cell[64][256] arena_cells;
 NodeId arena_next;
 cell arena_exhausted;
 NodeId first_name;

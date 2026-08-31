@@ -86,7 +86,7 @@ production実装を変えずに次をBF上で検証できる。
 
 production経路には、identifier 64 byte、function 255個、block nesting 16段、uniform
 frameのlocal/temporary 239 cell、static global 255 cell、型layout 255 cell、packed AST/IR arena
-4,096 cellという明示的な制限がある。配列長256の構文は認識するが、zero-cell要素以外は
+16,384 cellという明示的な制限がある。配列長256の構文は認識するが、zero-cell要素以外は
 現在の1 byte layout容量には収まらないため拒否する。streaming parserは、function bodyの
 local宣言を開始するnominal型定義がそのfunctionより前に現れることを要求する。
 制限超過または後段階の構文を検出すると`BFC_STAGE12_ERROR`を出力して停止する。runtime演算は
@@ -122,6 +122,7 @@ return、引数snapshot、enum/struct、多次元配列、定数/動的field/ind
 `const cell`、method、macro、`abort`を含む生成programを
 実行し、期待するbinary出力と比較する。配列のscalar利用、長さの型不一致、定数範囲外アクセス、
 enumのzero variant欠落、再帰struct layout、定数循環、不正な配列長推論、macro循環も拒否を確認する。
+さらに旧4,096-cell arenaを超える400 statementの入力をコンパイルし、拡張容量を回帰検証する。
 
 ## セルフホスト時のテープ容量
 
@@ -137,7 +138,8 @@ compilerを過度にmemory tuningしたりすることは目標にしない。�
 `FrameLayout`には30,000-cell上限が残る。現在のcompiler frameはこの範囲内であり、大きなglobal arenaを
 static regionへ置くためにこのflagを使用している。
 
-現在のpacked AST arenaは16 page、4,096 logical cellである。handle自体はpage/slotの
-16-bit形式を保ち、容量超過はcompile errorにする。65,536-cell arenaは意味上は扱えるが、
-現ABI backendではglobalとframe間の絶対pointer移動により生成BFが過大になるため、static
-region navigationを距離非依存にしてからpage数を引き上げる。
+現在のpacked AST arenaは64 page、16,384 logical cellである。handle自体はpage/slotの
+16-bit形式を保ち、容量超過はcompile errorにする。第13段階の実測ではcompiler source
+177,228 byteのうち12,580 byteを読んだ時点でこのarenaを使い切った。同じ密度で単純外挿すると
+約230,000 cellとなり、16-bit handleの65,536-cell上限も超える。次の容量拡張は、巨大な単一portalを
+増やすのではなく、segmented arenaまたはfunction単位のstreaming loweringと組み合わせる。

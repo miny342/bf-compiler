@@ -981,7 +981,9 @@ globalは宣言順に初期化し、local/global aggregateの動的projectionに
 aggregate portalを使用する。[ABI.md](ABI.md)のbackendは`D = 8`と`D = 16`の両chunk geometryを
 サポートする。第13段階には着手しており、`selfhost/stage2/compiler/`のbootstrap compilerが
 初期実装第1〜12段階のsubsetをBF上でコンパイルできる。全version 1を入力として自身を再生成する
-完全なself-host compilerは未実装である。
+完全なself-host compilerは未実装である。packed AST/IR arenaは第13段階の容量回帰として
+4,096 cellから16,384 cellへ拡張した。compiler全体の実測値はこの上限も超えるため、後続では
+segmented arenaまたはstreaming loweringが必要になる。
 
 ### セルフホスト用targetのテープ容量
 
