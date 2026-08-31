@@ -108,7 +108,9 @@ arena recordは固定13 cellではなく、`next`と頻出fieldを前方へ置�
 使用する。Continuationだけはdispatch IDを含む15 cellである。literal、input、unary、binary、
 `len`の結果型は`cell`から自明なのでhandleを保存しない。その他のexpressionはsemantic解決後に
 source名fieldを型handleとして再利用する。これによりaddress幅やarena portalを増やさず、profileした
-node領域を30.5%削減する。
+node領域を30.5%削減する。scalar literalは値を短いrecord内へ詰め、parse時に連続して確保された
+右辺literalはbinary recordの未使用fieldへ即値として埋め込む。両辺literalのbinary式とliteralへの
+unary式はその場で畳み込み、不要になった末尾recordをarenaへ戻す。
 
 static globalsの右にzero anchorを置き、各activationの`Active`をallocation flagとして保存する。
 global accessはcurrent frameからanchorへ左走査し、処理後にanchorからfrontierへ右走査して同じ
@@ -150,9 +152,10 @@ static regionへ置くためにこのflagを使用している。
 
 現在のpacked AST arenaは64 page、16,384 logical cellである。handle自体はpage/slotの
 16-bit形式を保ち、容量超過はcompile errorにする。第13段階の自己入力計測では、固定13-cell
-recordが12,567 byteでarenaを使い切ったのに対し、compact recordは15,454 byteまで到達し、同じ
-16,384-cell容量で22.97%改善した。さらに旧direct parser専用sourceをproduction連結から除外し、
-production sourceを約177 KBから165,134 byte、Rust-bootstrap BFを約225 MBから199 MBへ削減した。
-compact後の密度で全sourceへ単純外挿すると依然約176,000 cellとなり、16-bit handleの65,536-cell
-上限も超える。次の削減は、function単位のscratch arena、streaming lowering、またはcompact IRと
-組み合わせる必要がある。
+recordが12,567 byteでarenaを使い切ったのに対し、kind別compact recordは15,454 byteまで到達し、
+同じ容量で22.97%改善した。旧direct parser専用sourceをproduction連結から除外すると、この構成の
+到達位置は15,431 byte、production sourceは165,134 byte、Rust-bootstrap BFは約199 MBになった。
+さらに4-cell literal、binary右辺即値、parse時定数畳み込みを導入すると、169,294-byteのproduction
+sourceに対して17,726 byteまで到達し、直前構成から14.87%改善した。現在の密度で全sourceへ単純外挿
+すると約156,000 cellであり、依然16-bit handleの65,536-cell上限を超える。次の削減は、function単位の
+scratch arena、streaming lowering、またはcompact IRと組み合わせる必要がある。

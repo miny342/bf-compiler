@@ -67,7 +67,10 @@ void validate_macro_expression_names(NodeId expression) {
     } else if (kind == NODE_BINARY_EXPRESSION
         || kind == NODE_INDEX_EXPRESSION) {
         validate_macro_expression_names(node_a(expression));
-        validate_macro_expression_names(node_b(expression));
+        if (kind == NODE_INDEX_EXPRESSION
+            || !binary_has_immediate(expression)) {
+            validate_macro_expression_names(node_b(expression));
+        }
     }
 }
 
@@ -256,7 +259,7 @@ NodeId clone_macro_expression(NodeId expression, cell preserve_names) {
 
     NodeId result = allocate_node(kind);
     if (kind == NODE_LITERAL_EXPRESSION) {
-        node_set_value(result, node_value(expression));
+        set_literal_value(result, literal_value(expression));
     } else if (kind == NODE_STRING_EXPRESSION) {
         node_set_value(result, node_value(expression));
         node_set_a(result, node_a(expression));
@@ -300,10 +303,14 @@ NodeId clone_macro_expression(NodeId expression, cell preserve_names) {
             result,
             clone_macro_expression(node_a(expression), preserve_names)
         );
-        node_set_b(
-            result,
-            clone_macro_expression(node_b(expression), preserve_names)
-        );
+        if (binary_has_immediate(expression)) {
+            node_set_value(result, binary_immediate(expression));
+        } else {
+            node_set_b(
+                result,
+                clone_macro_expression(node_b(expression), preserve_names)
+            );
+        }
     } else if (kind == NODE_INDEX_EXPRESSION) {
         node_set_a(
             result,

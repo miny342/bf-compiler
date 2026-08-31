@@ -201,8 +201,10 @@ cell node_cell_count(cell kind) {
     if (kind == NODE_UNARY_EXPRESSION) {
         return 6;
     }
-    if (kind == NODE_NAME_RECORD || kind == NODE_LITERAL_EXPRESSION
-        || kind == NODE_LEN_EXPRESSION) {
+    if (kind == NODE_LITERAL_EXPRESSION) {
+        return 4;
+    }
+    if (kind == NODE_NAME_RECORD || kind == NODE_LEN_EXPRESSION) {
         return 7;
     }
     if (kind == NODE_CALL_ARGUMENT) {
@@ -239,6 +241,17 @@ cell node_cell_count(cell kind) {
     return 0;
 }
 
+cell release_last_node(NodeId id) {
+    cell kind = node_kind(id);
+    NodeId after = arena_advance(id, node_cell_count(kind));
+    if (!node_equals(after, arena_next)) {
+        return 0;
+    }
+    arena_next = id;
+    arena_exhausted = 0;
+    return 1;
+}
+
 NodeId allocate_node(cell kind) {
     NodeId result = allocate_cells(node_cell_count(kind));
     arena_write(result, FIELD_KIND, kind);
@@ -259,6 +272,14 @@ void node_set_tag(NodeId id, cell value) {
 
 cell node_value(NodeId id) {
     return arena_read(id, FIELD_VALUE);
+}
+
+cell literal_value(NodeId id) {
+    return arena_read(id, FIELD_A_PAGE);
+}
+
+void set_literal_value(NodeId id, cell value) {
+    arena_write(id, FIELD_A_PAGE, value);
 }
 
 void node_set_value(NodeId id, cell value) {

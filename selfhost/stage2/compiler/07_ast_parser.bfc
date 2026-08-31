@@ -181,7 +181,64 @@ NodeId parse_ast_expression() {
     return parse_ast_logical_or();
 }
 
+cell fold_unary_literal(cell operator, cell value) {
+    if (operator == AST_UNARY_PLUS) {
+        return value;
+    }
+    if (operator == AST_UNARY_NEGATE) {
+        return 0 - value;
+    }
+    if (operator == AST_UNARY_NOT) {
+        return value == 0;
+    }
+    fail();
+    return 0;
+}
+
+cell fold_binary_literals(cell operator, cell left, cell right) {
+    if (operator == AST_BINARY_ADD) {
+        return left + right;
+    }
+    if (operator == AST_BINARY_SUBTRACT) {
+        return left - right;
+    }
+    if (operator == AST_BINARY_LESS) {
+        return left < right;
+    }
+    if (operator == AST_BINARY_LESS_EQUAL) {
+        return left <= right;
+    }
+    if (operator == AST_BINARY_GREATER) {
+        return left > right;
+    }
+    if (operator == AST_BINARY_GREATER_EQUAL) {
+        return left >= right;
+    }
+    if (operator == AST_BINARY_EQUAL) {
+        return left == right;
+    }
+    if (operator == AST_BINARY_NOT_EQUAL) {
+        return left != right;
+    }
+    if (operator == AST_BINARY_LOGICAL_AND) {
+        return left != 0 && right != 0;
+    }
+    if (operator == AST_BINARY_LOGICAL_OR) {
+        return left != 0 || right != 0;
+    }
+    fail();
+    return 0;
+}
+
 NodeId make_unary(cell operator, NodeId operand) {
+    if (node_kind(operand) == NODE_LITERAL_EXPRESSION) {
+        cell value = fold_unary_literal(operator, literal_value(operand));
+        if (release_last_node(operand)) {
+            NodeId folded = allocate_node(NODE_LITERAL_EXPRESSION);
+            set_literal_value(folded, value);
+            return folded;
+        }
+    }
     NodeId result = allocate_node(NODE_UNARY_EXPRESSION);
     node_set_tag(result, operator);
     node_set_a(result, operand);
@@ -189,11 +246,41 @@ NodeId make_unary(cell operator, NodeId operand) {
 }
 
 NodeId make_binary(cell operator, NodeId left, NodeId right) {
+    if (node_kind(right) == NODE_LITERAL_EXPRESSION) {
+        cell right_value = literal_value(right);
+        if (release_last_node(right)) {
+            if (node_kind(left) == NODE_LITERAL_EXPRESSION) {
+                cell value = fold_binary_literals(
+                    operator,
+                    literal_value(left),
+                    right_value
+                );
+                if (release_last_node(left)) {
+                    NodeId folded = allocate_node(NODE_LITERAL_EXPRESSION);
+                    set_literal_value(folded, value);
+                    return folded;
+                }
+            }
+            NodeId immediate = allocate_node(NODE_BINARY_EXPRESSION);
+            node_set_tag(immediate, operator);
+            node_set_a(immediate, left);
+            node_set_value(immediate, right_value);
+            return immediate;
+        }
+    }
     NodeId result = allocate_node(NODE_BINARY_EXPRESSION);
     node_set_tag(result, operator);
     node_set_a(result, left);
     node_set_b(result, right);
     return result;
+}
+
+cell binary_has_immediate(NodeId expression) {
+    return node_is_null(node_b(expression));
+}
+
+cell binary_immediate(NodeId expression) {
+    return node_value(expression);
 }
 
 NodeId parse_ast_call(NodeId name) {
@@ -230,7 +317,7 @@ NodeId parse_ast_primary() {
             fail();
         }
         NodeId result = allocate_node(NODE_LITERAL_EXPRESSION);
-        node_set_value(result, token_value);
+        set_literal_value(result, token_value);
         next_token();
         return result;
     }

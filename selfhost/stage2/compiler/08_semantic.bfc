@@ -255,7 +255,7 @@ ConstantValue evaluate_constant_expression(NodeId expression) {
     cell kind = node_kind(expression);
     if (kind == NODE_LITERAL_EXPRESSION) {
         result.known = 1;
-        result.value = node_value(expression);
+        result.value = literal_value(expression);
         return result;
     }
     if (kind == NODE_NAME_EXPRESSION) {
@@ -317,7 +317,13 @@ ConstantValue evaluate_constant_expression(NodeId expression) {
             result.value = 1;
             return result;
         }
-        ConstantValue right = evaluate_constant_expression(node_b(expression));
+        ConstantValue right;
+        if (binary_has_immediate(expression)) {
+            right.known = 1;
+            right.value = binary_immediate(expression);
+        } else {
+            right = evaluate_constant_expression(node_b(expression));
+        }
         if (!right.known) {
             return result;
         }
@@ -676,7 +682,10 @@ NodeId analyze_ast_expression(NodeId expression) {
     }
     if (kind == NODE_BINARY_EXPRESSION) {
         NodeId left = analyze_ast_expression(node_a(expression));
-        NodeId right = analyze_ast_expression(node_b(expression));
+        NodeId right = cell_type;
+        if (!binary_has_immediate(expression)) {
+            right = analyze_ast_expression(node_b(expression));
+        }
         cell operator = node_tag(expression);
         if (operator == AST_BINARY_EQUAL || operator == AST_BINARY_NOT_EQUAL) {
             if (!types_equal(left, right)

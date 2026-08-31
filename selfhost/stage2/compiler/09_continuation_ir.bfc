@@ -440,8 +440,11 @@ void lower_aggregate_expression(NodeId expression, cell destination, cell length
 
 void lower_ast_expression(NodeId expression, cell destination) {
     cell kind = node_kind(expression);
-    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_ENUM_EXPRESSION
-        || kind == NODE_LEN_EXPRESSION) {
+    if (kind == NODE_LITERAL_EXPRESSION) {
+        append_ir_instruction(IR_SET, destination, literal_value(expression));
+        return;
+    }
+    if (kind == NODE_ENUM_EXPRESSION || kind == NODE_LEN_EXPRESSION) {
         append_ir_instruction(IR_SET, destination, node_value(expression));
         return;
     }
@@ -540,7 +543,15 @@ void lower_ast_expression(NodeId expression, cell destination) {
             }
             release_lowering_temp(branch_condition);
             select_continuation(right);
-            lower_ast_expression(node_b(expression), destination);
+            if (binary_has_immediate(expression)) {
+                append_ir_instruction(
+                    IR_SET,
+                    destination,
+                    binary_immediate(expression)
+                );
+            } else {
+                lower_ast_expression(node_b(expression), destination);
+            }
             append_ir_instruction(IR_BOOLEANIZE, destination, 0);
             finish_goto(join);
             select_continuation(join);
@@ -549,7 +560,15 @@ void lower_ast_expression(NodeId expression, cell destination) {
 
         lower_ast_expression(node_a(expression), destination);
         cell right_slot = allocate_lowering_temp();
-        lower_ast_expression(node_b(expression), right_slot);
+        if (binary_has_immediate(expression)) {
+            append_ir_instruction(
+                IR_SET,
+                right_slot,
+                binary_immediate(expression)
+            );
+        } else {
+            lower_ast_expression(node_b(expression), right_slot);
+        }
         cell instruction = IR_ADD;
         if (operator == AST_BINARY_SUBTRACT) {
             instruction = IR_SUBTRACT;
