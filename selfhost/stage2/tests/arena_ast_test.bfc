@@ -61,7 +61,7 @@ void test_ast_parser() {
 
     analyze_ast_program();
     expect_test(node_equals(node_b(call), second), 's');
-    expect_test(node_value(node_a(first)) == 0
+    expect_test(node_value(node_a(first)) == 1
         && node_tag(node_c(first)) == 1, 't');
     expect_test(node_value(node_c(first)) == 1
         && node_value(node_c(main_function)) == 1, 'u');

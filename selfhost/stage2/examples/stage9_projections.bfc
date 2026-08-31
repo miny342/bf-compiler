@@ -1,0 +1,34 @@
+enum Kind {
+    Empty,
+    End,
+}
+
+struct Point {
+    cell x;
+    cell y;
+}
+
+struct Wrapper {
+    Kind kind;
+    Point point;
+    cell[2][3] matrix;
+}
+
+Wrapper saved;
+
+Wrapper echo(Wrapper value) {
+    return value;
+}
+
+void main() {
+    Wrapper value;
+    value.kind = Kind::End;
+    value.point.x = 11;
+    value.matrix[1][0] = 9;
+    saved = value;
+    Wrapper copied = echo(saved);
+    output(copied.kind == Kind::End);
+    output(copied.point.x);
+    output(copied.matrix[1][0]);
+    output(echo(copied).point.x);
+}

@@ -1,0 +1,36 @@
+cell[] stage9_type_test_source = "enum E{Zero,Five=5,Six}struct P{cell x;cell y;}struct W{E e;P p;cell[2][3] a;}W id(W v){return v;}void main(){W w;w.e=E::Six;w.p.x=7;w.a[1][2]=9;W q=id(w);output(q.p.x);}";
+
+void test_stage9_types() {
+    reset_test_input(10);
+    parse_ast_program();
+
+    NodeId enum_type = node_next(node_next(first_type));
+    NodeId point_type = node_next(enum_type);
+    NodeId wrapper_type = node_next(point_type);
+    expect_test(node_tag(enum_type) == TYPE_ENUM
+        && node_tag(point_type) == TYPE_STRUCT
+        && node_tag(wrapper_type) == TYPE_STRUCT, '3');
+
+    analyze_ast_program();
+    NodeId five = node_next(node_a(enum_type));
+    NodeId six = node_next(five);
+    expect_test(node_value(five) == 5 && node_value(six) == 6, '4');
+    expect_test(node_value(point_type) == 2
+        && node_value(wrapper_type) == 9, '5');
+    NodeId point_field = node_next(node_a(wrapper_type));
+    NodeId array_field = node_next(point_field);
+    expect_test(node_value(point_field) == 1
+        && node_value(array_field) == 3, '6');
+
+    NodeId main = node_next(first_function);
+    NodeId declaration = node_a(node_b(main));
+    NodeId enum_assignment = node_next(declaration);
+    NodeId enum_target = node_a(enum_assignment);
+    expect_test(node_kind(enum_target) == NODE_FIELD_EXPRESSION
+        && node_value(enum_target) == 0
+        && types_equal(expression_type(enum_target), enum_type), '7');
+
+    lower_ast_program();
+    expect_test(node_tag(node_a(node_c(first_function)))
+        == TERM_RETURN_ARRAY, '8');
+}

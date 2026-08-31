@@ -1,4 +1,4 @@
-// aggregate outboxを持つ第8段階Continuation ABI backend。
+// aggregate outboxを持つ第9段階Continuation ABI backend。
 // 全functionを同じframe幅にすることで、直接・相互再帰を同じcall/return
 // sequenceで扱う。PCとreturn PCはNodeIdのpage/slotをそのまま使う。
 
@@ -770,7 +770,7 @@ void emit_continuation_program() {
     compiler_output!(']');
 }
 
-void compile_program_stage8() {
+void compile_program_stage9() {
     parse_ast_program();
     analyze_ast_program();
     lower_ast_program();

@@ -1,0 +1,36 @@
+enum Kind {
+    Empty,
+    Pair = 4,
+    End,
+}
+
+struct Point {
+    cell x;
+    cell y;
+}
+
+Kind choose(Kind value) {
+    return value;
+}
+
+Point bump(Point value) {
+    value.x += 1;
+    value.y += 2;
+    return value;
+}
+
+void main() {
+    Kind kind = Kind::Pair;
+    output(choose(kind) == Kind::Pair);
+
+    Point point;
+    point.x = 10;
+    point.y = 20;
+    Point changed = bump(point);
+    output(changed.x);
+    output(changed.y);
+
+    Point[2] points;
+    points[1] = changed;
+    output(points[1].y);
+}

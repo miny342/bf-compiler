@@ -13,10 +13,10 @@ void test_stage6_arrays() {
     NodeId indexed = node_a(assignment);
 
     expect_test(node_kind(declaration) == NODE_DECLARATION
-        && node_tag(declaration) == AST_DECLARATION_ARRAY
-        && node_value(declaration) == 4, 'D');
+        && node_tag(node_b(declaration)) == TYPE_ARRAY
+        && arena_read(node_b(declaration), FIELD_C_PAGE) == 4, 'D');
     expect_test(node_kind(indexed) == NODE_INDEX_EXPRESSION, 'E');
-    ConstantValue folded = evaluate_constant_expression(node_a(indexed));
+    ConstantValue folded = evaluate_constant_expression(node_b(indexed));
     expect_test(folded.known && folded.value == 3, 'G');
 
     analyze_ast_program();

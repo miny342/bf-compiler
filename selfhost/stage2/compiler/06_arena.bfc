@@ -51,6 +51,18 @@ const cell NODE_INSTRUCTION = 21;
 const cell NODE_CALL_ARGUMENT = 22;
 const cell NODE_INDEX_EXPRESSION = 23;
 const cell NODE_GLOBAL = 24;
+const cell NODE_TYPE = 25;
+const cell NODE_ENUM_VARIANT = 26;
+const cell NODE_STRUCT_FIELD = 27;
+const cell NODE_FIELD_EXPRESSION = 28;
+const cell NODE_ENUM_EXPRESSION = 29;
+
+const cell TYPE_UNRESOLVED = 0;
+const cell TYPE_CELL = 1;
+const cell TYPE_VOID = 2;
+const cell TYPE_ENUM = 3;
+const cell TYPE_STRUCT = 4;
+const cell TYPE_ARRAY = 5;
 
 cell[16][256] arena_cells;
 NodeId arena_next;
@@ -61,6 +73,10 @@ NodeId first_function;
 NodeId last_function;
 NodeId first_global;
 NodeId last_global;
+NodeId first_type;
+NodeId last_type;
+NodeId cell_type;
+NodeId void_type;
 
 NodeId null_node() {
     NodeId result;
@@ -115,6 +131,19 @@ void reset_ast_arena() {
     last_function = null_node();
     first_global = null_node();
     last_global = null_node();
+    first_type = null_node();
+    last_type = null_node();
+
+    cell_type = allocate_node(NODE_TYPE);
+    node_set_tag(cell_type, TYPE_CELL);
+    node_set_value(cell_type, 1);
+    first_type = cell_type;
+    last_type = cell_type;
+
+    void_type = allocate_node(NODE_TYPE);
+    node_set_tag(void_type, TYPE_VOID);
+    node_set_next(last_type, void_type);
+    last_type = void_type;
 }
 
 NodeId allocate_cells(cell count) {

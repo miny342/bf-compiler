@@ -1,4 +1,4 @@
-// 第8段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
+// 第9段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
 
 const cell AST_TYPE_VOID = 0;
 const cell AST_TYPE_CELL = 1;
@@ -21,6 +21,130 @@ const cell AST_ASSIGNMENT_ADD = 1;
 const cell AST_ASSIGNMENT_SUBTRACT = 2;
 const cell AST_DECLARATION_SCALAR = 0;
 const cell AST_DECLARATION_ARRAY = 1;
+
+void append_ast_type(NodeId ty) {
+    if (node_is_null(first_type)) {
+        first_type = ty;
+    } else {
+        node_set_next(last_type, ty);
+    }
+    last_type = ty;
+}
+
+NodeId find_named_type_or_null(NodeId name) {
+    NodeId ty = first_type;
+    while (!node_is_null(ty)) {
+        if (!node_is_null(node_name(ty))
+            && node_equals(node_name(ty), name)) {
+            return ty;
+        }
+        ty = node_next(ty);
+    }
+    return null_node();
+}
+
+NodeId get_or_create_named_type(NodeId name) {
+    NodeId ty = find_named_type_or_null(name);
+    if (!node_is_null(ty)) {
+        return ty;
+    }
+    ty = allocate_node(NODE_TYPE);
+    node_set_name(ty, name);
+    append_ast_type(ty);
+    return ty;
+}
+
+cell token_is_known_type() {
+    NodeId ty = first_type;
+    while (!node_is_null(ty)) {
+        if (!node_is_null(node_name(ty)) && token_matches_name(node_name(ty))) {
+            return 1;
+        }
+        ty = node_next(ty);
+    }
+    return 0;
+}
+
+NodeId make_array_type(NodeId element, cell length, cell is_256) {
+    NodeId existing = first_type;
+    while (!node_is_null(existing)) {
+        if (node_tag(existing) == TYPE_ARRAY
+            && node_equals(node_a(existing), element)
+            && arena_read(existing, FIELD_C_PAGE) == length
+            && arena_read(existing, FIELD_C_SLOT) == is_256) {
+            return existing;
+        }
+        existing = node_next(existing);
+    }
+    NodeId ty = allocate_node(NODE_TYPE);
+    node_set_tag(ty, TYPE_ARRAY);
+    node_set_a(ty, element);
+    arena_write(ty, FIELD_C_PAGE, length);
+    arena_write(ty, FIELD_C_SLOT, is_256);
+    append_ast_type(ty);
+    return ty;
+}
+
+NodeId parse_ast_complete_type(cell allow_void) {
+    if (token_kind != TokenKind::Identifier) {
+        fail();
+    }
+    NodeId ty;
+    if (token_is_void()) {
+        if (!allow_void) {
+            fail();
+        }
+        ty = void_type;
+        next_token();
+        return ty;
+    }
+    if (token_is_cell()) {
+        ty = cell_type;
+    } else {
+        if (token_is_reserved()) {
+            fail();
+        }
+        ty = get_or_create_named_type(intern_token_name());
+    }
+    next_token();
+
+    cell[16] lengths;
+    cell[16] lengths_are_256;
+    cell dimension_count;
+    while (token_kind == TokenKind::LeftBracket) {
+        if (dimension_count == 16) {
+            fail();
+        }
+        next_token();
+        if (token_kind != TokenKind::Number) {
+            fail();
+        }
+        lengths[dimension_count] = token_value;
+        lengths_are_256[dimension_count] = token_number_is_256;
+        dimension_count += 1;
+        next_token();
+        consume(TokenKind::RightBracket);
+    }
+    while (dimension_count != 0) {
+        dimension_count -= 1;
+        ty = make_array_type(
+            ty,
+            lengths[dimension_count],
+            lengths_are_256[dimension_count]
+        );
+    }
+    return ty;
+}
+
+cell parser_type_class(NodeId ty) {
+    if (node_equals(ty, void_type)) {
+        return AST_TYPE_VOID;
+    }
+    if (node_equals(ty, cell_type) || node_tag(ty) == TYPE_ENUM) {
+        return AST_TYPE_CELL;
+    }
+    return AST_TYPE_ARRAY;
+}
 
 NodeId parse_ast_expression() {
     return parse_ast_logical_or();
@@ -89,19 +213,22 @@ NodeId parse_ast_primary() {
         }
         NodeId name = intern_token_name();
         next_token();
+        if (token_kind == TokenKind::ColonColon) {
+            next_token();
+            if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+                fail();
+            }
+            NodeId result = allocate_node(NODE_ENUM_EXPRESSION);
+            node_set_name(result, name);
+            node_set_a(result, intern_token_name());
+            next_token();
+            return result;
+        }
         if (token_kind == TokenKind::LeftParen) {
             return parse_ast_call(name);
         }
         NodeId result = allocate_node(NODE_NAME_EXPRESSION);
         node_set_name(result, name);
-        if (token_kind == TokenKind::LeftBracket) {
-            next_token();
-            NodeId index = allocate_node(NODE_INDEX_EXPRESSION);
-            node_set_name(index, name);
-            node_set_a(index, parse_ast_expression());
-            consume(TokenKind::RightBracket);
-            return index;
-        }
         return result;
     }
     if (token_kind == TokenKind::LeftParen) {
@@ -112,6 +239,34 @@ NodeId parse_ast_primary() {
     }
     fail();
     return null_node();
+}
+
+NodeId parse_ast_postfix() {
+    NodeId result = parse_ast_primary();
+    cell more = 1;
+    while (more) {
+        if (token_kind == TokenKind::LeftBracket) {
+            next_token();
+            NodeId index = allocate_node(NODE_INDEX_EXPRESSION);
+            node_set_a(index, result);
+            node_set_b(index, parse_ast_expression());
+            consume(TokenKind::RightBracket);
+            result = index;
+        } else if (token_kind == TokenKind::Dot) {
+            next_token();
+            if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+                fail();
+            }
+            NodeId field = allocate_node(NODE_FIELD_EXPRESSION);
+            node_set_a(field, result);
+            node_set_name(field, intern_token_name());
+            next_token();
+            result = field;
+        } else {
+            more = 0;
+        }
+    }
+    return result;
 }
 
 NodeId parse_ast_unary() {
@@ -127,7 +282,7 @@ NodeId parse_ast_unary() {
         next_token();
         return make_unary(AST_UNARY_NEGATE, parse_ast_unary());
     }
-    return parse_ast_primary();
+    return parse_ast_postfix();
 }
 
 NodeId parse_ast_additive() {
@@ -232,29 +387,14 @@ NodeId parse_ast_statement() {
         node_set_a(block, first);
         return block;
     }
-    if (token_kind == TokenKind::Identifier && token_is_cell()) {
-        next_token();
-        cell declaration_kind = AST_DECLARATION_SCALAR;
-        cell array_length;
-        if (token_kind == TokenKind::LeftBracket) {
-            declaration_kind = AST_DECLARATION_ARRAY;
-            next_token();
-            if (token_kind != TokenKind::Number
-                || (!token_number_is_256 && token_value == 0)) {
-                fail();
-            }
-            // 0 encodes 256, which is rejected later if it cannot fit the
-            // bootstrap compiler's explicitly bounded uniform frame.
-            array_length = token_value;
-            next_token();
-            consume(TokenKind::RightBracket);
-        }
+    if (token_kind == TokenKind::Identifier
+        && (token_is_cell() || token_is_known_type())) {
+        NodeId declaration_type = parse_ast_complete_type(0);
         if (token_kind != TokenKind::Identifier || token_is_reserved()) {
             fail();
         }
         NodeId declaration = allocate_node(NODE_DECLARATION);
-        node_set_tag(declaration, declaration_kind);
-        node_set_value(declaration, array_length);
+        node_set_b(declaration, declaration_type);
         node_set_name(declaration, intern_token_name());
         next_token();
         if (token_kind == TokenKind::Assign) {
@@ -309,7 +449,8 @@ NodeId parse_ast_statement() {
     if (token_kind == TokenKind::Assign || token_kind == TokenKind::PlusAssign
         || token_kind == TokenKind::MinusAssign) {
         if (node_kind(left) != NODE_NAME_EXPRESSION
-            && node_kind(left) != NODE_INDEX_EXPRESSION) {
+            && node_kind(left) != NODE_INDEX_EXPRESSION
+            && node_kind(left) != NODE_FIELD_EXPRESSION) {
             fail();
         }
         TokenKind operator = token_kind;
@@ -334,30 +475,13 @@ NodeId parse_ast_statement() {
     return statement;
 }
 
-cell parse_ast_type() {
-    if (token_kind != TokenKind::Identifier) {
-        fail();
-    }
-    if (token_is_void()) {
-        next_token();
-        return AST_TYPE_VOID;
-    }
-    if (token_is_cell()) {
-        next_token();
-        return AST_TYPE_CELL;
-    }
-    fail();
-    return AST_TYPE_VOID;
-}
-
 NodeId parse_ast_function_after_name(
-    cell return_type,
-    cell return_length,
+    NodeId return_type,
     NodeId name
 ) {
     NodeId function = allocate_node(NODE_FUNCTION);
-    node_set_tag(function, return_type);
-    arena_write(function, FIELD_C_PAGE, return_length);
+    node_set_tag(function, parser_type_class(return_type));
+    node_set_c(function, return_type);
     node_set_name(function, name);
     consume(TokenKind::LeftParen);
 
@@ -366,28 +490,12 @@ NodeId parse_ast_function_after_name(
     if (token_kind != TokenKind::RightParen) {
         cell more = 1;
         while (more) {
-            if (parse_ast_type() != AST_TYPE_CELL) {
-                fail();
-            }
-            cell parameter_kind = AST_DECLARATION_SCALAR;
-            cell parameter_length;
-            if (token_kind == TokenKind::LeftBracket) {
-                parameter_kind = AST_DECLARATION_ARRAY;
-                next_token();
-                if (token_kind != TokenKind::Number
-                    || (!token_number_is_256 && token_value == 0)) {
-                    fail();
-                }
-                parameter_length = token_value;
-                next_token();
-                consume(TokenKind::RightBracket);
-            }
+            NodeId parameter_type = parse_ast_complete_type(0);
             if (token_kind != TokenKind::Identifier || token_is_reserved()) {
                 fail();
             }
             NodeId parameter = allocate_node(NODE_PARAMETER);
-            node_set_tag(parameter, parameter_kind);
-            node_set_value(parameter, parameter_length);
+            node_set_b(parameter, parameter_type);
             node_set_name(parameter, intern_token_name());
             next_token();
             if (node_is_null(first_parameter)) {
@@ -430,25 +538,105 @@ void append_ast_global(NodeId global) {
     last_global = global;
 }
 
-void parse_ast_top_level_item() {
-    cell value_type = parse_ast_type();
-    cell declaration_kind = AST_DECLARATION_SCALAR;
-    cell array_length;
-    if (token_kind == TokenKind::LeftBracket) {
-        if (value_type != AST_TYPE_CELL) {
-            fail();
-        }
-        declaration_kind = AST_DECLARATION_ARRAY;
-        value_type = AST_TYPE_ARRAY;
-        next_token();
-        if (token_kind != TokenKind::Number
-            || (!token_number_is_256 && token_value == 0)) {
-            fail();
-        }
-        array_length = token_value;
-        next_token();
-        consume(TokenKind::RightBracket);
+void parse_ast_enum_definition() {
+    next_token();
+    if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+        fail();
     }
+    NodeId ty = get_or_create_named_type(intern_token_name());
+    if (node_tag(ty) != TYPE_UNRESOLVED) {
+        fail();
+    }
+    node_set_tag(ty, TYPE_ENUM);
+    next_token();
+    consume(TokenKind::LeftBrace);
+    NodeId first;
+    NodeId last;
+    if (token_kind == TokenKind::RightBrace) {
+        fail();
+    }
+    cell more = 1;
+    while (more) {
+        if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+            fail();
+        }
+        NodeId variant = allocate_node(NODE_ENUM_VARIANT);
+        node_set_name(variant, intern_token_name());
+        next_token();
+        if (token_kind == TokenKind::Assign) {
+            next_token();
+            node_set_a(variant, parse_ast_expression());
+        }
+        if (node_is_null(first)) {
+            first = variant;
+        } else {
+            node_set_next(last, variant);
+        }
+        last = variant;
+        if (token_kind == TokenKind::Comma) {
+            next_token();
+            if (token_kind == TokenKind::RightBrace) {
+                more = 0;
+            }
+        } else {
+            more = 0;
+        }
+    }
+    consume(TokenKind::RightBrace);
+    node_set_a(ty, first);
+}
+
+void parse_ast_struct_definition() {
+    next_token();
+    if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+        fail();
+    }
+    NodeId ty = get_or_create_named_type(intern_token_name());
+    if (node_tag(ty) != TYPE_UNRESOLVED) {
+        fail();
+    }
+    node_set_tag(ty, TYPE_STRUCT);
+    next_token();
+    consume(TokenKind::LeftBrace);
+    NodeId first;
+    NodeId last;
+    while (token_kind != TokenKind::RightBrace) {
+        if (token_kind == TokenKind::Eof) {
+            fail();
+        }
+        NodeId field_type = parse_ast_complete_type(0);
+        if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+            fail();
+        }
+        NodeId field = allocate_node(NODE_STRUCT_FIELD);
+        node_set_a(field, field_type);
+        node_set_name(field, intern_token_name());
+        next_token();
+        consume(TokenKind::Semicolon);
+        if (node_is_null(first)) {
+            first = field;
+        } else {
+            node_set_next(last, field);
+        }
+        last = field;
+    }
+    next_token();
+    if (node_is_null(first)) {
+        fail();
+    }
+    node_set_a(ty, first);
+}
+
+void parse_ast_top_level_item() {
+    if (token_kind == TokenKind::Identifier && token_is_enum()) {
+        parse_ast_enum_definition();
+        return;
+    }
+    if (token_kind == TokenKind::Identifier && token_is_struct()) {
+        parse_ast_struct_definition();
+        return;
+    }
+    NodeId value_type = parse_ast_complete_type(1);
     if (token_kind != TokenKind::Identifier || token_is_reserved()) {
         fail();
     }
@@ -457,17 +645,16 @@ void parse_ast_top_level_item() {
 
     if (token_kind == TokenKind::LeftParen) {
         append_ast_function(
-            parse_ast_function_after_name(value_type, array_length, name)
+            parse_ast_function_after_name(value_type, name)
         );
         return;
     }
 
-    if (value_type == AST_TYPE_VOID) {
+    if (node_equals(value_type, void_type)) {
         fail();
     }
     NodeId global = allocate_node(NODE_GLOBAL);
-    node_set_tag(global, declaration_kind);
-    node_set_value(global, array_length);
+    node_set_b(global, value_type);
     node_set_name(global, name);
     if (token_kind == TokenKind::Assign) {
         next_token();

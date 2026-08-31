@@ -6,10 +6,10 @@ void test_stage8_aggregates() {
 
     NodeId change = first_function;
     NodeId parameter = node_a(change);
-    expect_test(node_tag(change) == AST_TYPE_ARRAY
-        && arena_read(change, FIELD_C_PAGE) == 3, 'V');
-    expect_test(node_tag(parameter) == AST_DECLARATION_ARRAY
-        && node_value(parameter) == 3, 'W');
+    expect_test(node_tag(node_c(change)) == TYPE_ARRAY
+        && arena_read(node_c(change), FIELD_C_PAGE) == 3, 'V');
+    expect_test(node_tag(node_b(parameter)) == TYPE_ARRAY
+        && arena_read(node_b(parameter), FIELD_C_PAGE) == 3, 'W');
 
     analyze_ast_program();
     expect_test(arena_read(node_c(change), FIELD_B_PAGE) == 3
@@ -21,7 +21,7 @@ void test_stage8_aggregates() {
     NodeId result = node_next(source);
     NodeId call = node_a(result);
     expect_test(node_kind(call) == NODE_CALL_EXPRESSION
-        && arena_read(call, FIELD_C_PAGE) == 3, 'Y');
+        && node_value(expression_type(call)) == 3, 'Y');
 
     lower_ast_program();
     expect_test(node_tag(node_a(node_c(change))) == TERM_RETURN_ARRAY, 'Z');

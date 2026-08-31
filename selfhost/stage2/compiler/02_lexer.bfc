@@ -266,6 +266,16 @@ void next_token() {
         }
         token_kind = TokenKind::PipePipe;
         read_character();
+    } else if (current_char == '.') {
+        token_kind = TokenKind::Dot;
+        read_character();
+    } else if (current_char == ':') {
+        read_character();
+        if (current_char != ':') {
+            fail();
+        }
+        token_kind = TokenKind::ColonColon;
+        read_character();
     } else {
         fail();
     }

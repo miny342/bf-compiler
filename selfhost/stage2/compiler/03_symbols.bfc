@@ -57,11 +57,24 @@ cell token_is_return() {
         && token_text[4] == 'r' && token_text[5] == 'n';
 }
 
+cell token_is_enum() {
+    return token_length == 4
+        && token_text[0] == 'e' && token_text[1] == 'n'
+        && token_text[2] == 'u' && token_text[3] == 'm';
+}
+
+cell token_is_struct() {
+    return token_length == 6
+        && token_text[0] == 's' && token_text[1] == 't'
+        && token_text[2] == 'r' && token_text[3] == 'u'
+        && token_text[4] == 'c' && token_text[5] == 't';
+}
+
 cell token_is_reserved() {
     return token_is_cell() || token_is_void()
         || token_is_input() || token_is_output()
         || token_is_if() || token_is_else() || token_is_while()
-        || token_is_return();
+        || token_is_return() || token_is_enum() || token_is_struct();
 }
 
 void consume(TokenKind expected) {

@@ -7,10 +7,10 @@ void test_stage7_globals() {
     NodeId scalar_global = first_global;
     NodeId array_global = node_next(scalar_global);
     expect_test(node_kind(scalar_global) == NODE_GLOBAL
-        && node_tag(scalar_global) == AST_DECLARATION_SCALAR, 'L');
+        && node_equals(node_b(scalar_global), cell_type), 'L');
     expect_test(node_kind(array_global) == NODE_GLOBAL
-        && node_tag(array_global) == AST_DECLARATION_ARRAY
-        && node_value(array_global) == 4, 'M');
+        && node_tag(node_b(array_global)) == TYPE_ARRAY
+        && arena_read(node_b(array_global), FIELD_C_PAGE) == 4, 'M');
 
     analyze_ast_program();
     expect_test(stage7_static_cells == 5
