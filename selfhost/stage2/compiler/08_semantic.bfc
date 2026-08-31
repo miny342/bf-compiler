@@ -968,13 +968,13 @@ void collect_file_declarations() {
         NodeId name = node_name(function);
         if (node_value(name) == 4) {
             NodeId byte = node_a(name);
-            if (arena_cells[byte.page][byte.slot] == 'm') {
+            if (arena_cell_read(byte) == 'm') {
                 byte = arena_advance(byte, 1);
-                if (arena_cells[byte.page][byte.slot] == 'a') {
+                if (arena_cell_read(byte) == 'a') {
                     byte = arena_advance(byte, 1);
-                    if (arena_cells[byte.page][byte.slot] == 'i') {
+                    if (arena_cell_read(byte) == 'i') {
                         byte = arena_advance(byte, 1);
-                        if (arena_cells[byte.page][byte.slot] == 'n') {
+                        if (arena_cell_read(byte) == 'n') {
                             if (!node_is_null(main_function)) {
                                 fail();
                             }

@@ -17,7 +17,7 @@
 - `compiler/04_codegen.bfc`: productionと旧parserで共有するBrainfuck出力primitive
 - `compiler/04_legacy_codegen.bfc`: 内部test専用の旧direct codegen helper
 - `compiler/05_parser.bfc`: 内部test専用の第1〜4段階direct parser
-- `compiler/06_arena.bfc`: 16-bit handle、packed arena、identifier intern
+- `compiler/06_arena.bfc`: 24-bit bank/page/slot handle、packed arena、identifier intern
 - `compiler/07_ast_parser.bfc`: 第12段階surface syntaxのfull AST構築
 - `compiler/07_macro_expansion.bfc`: block macroの検証、衛生的AST複製、nested展開
 - `compiler/08_semantic.bfc`: nominal型layout、function収集、名前解決、型検査
@@ -51,7 +51,7 @@ production実装を変えずに次をBF上で検証できる。
 - block scopeとshadowingを扱うsymbol table
 - 定数設定や破壊的transferを出力するBF codegen
 - `if`、`else`、`while`、`!`、比較を含む第4段階direct parser
-- arena page境界、full AST、前方callの名前解決、Continuation IR、ABI出力
+- arena page/bank境界、full AST、前方callの名前解決、Continuation IR、ABI出力
 - local配列の連続slot配置、定数式添字の畳み込み、宣言ごとのゼロ初期化
 - static global layout、宣言順initializer、local/global配列の動的添字
 - 配列の値渡しとsnapshot、全体代入、activation固有outboxによるaggregate return
@@ -90,7 +90,7 @@ production実装を変えずに次をBF上で検証できる。
 
 production経路には、identifier 64 byte、function 255個、block nesting 16段、uniform
 frameのlocal/temporary 239 cell、static global 255 cell、型layout 255 cell、packed AST/IR arena
-16,384 cellという明示的な制限がある。配列長256の構文は認識するが、zero-cell要素以外は
+261,120 cellという明示的な制限がある。配列長256の構文は認識するが、zero-cell要素以外は
 現在の1 byte layout容量には収まらないため拒否する。streaming parserは、function bodyの
 local宣言を開始するnominal型定義がそのfunctionより前に現れることを要求する。
 制限超過または後段階の構文を検出すると`BFC_STAGE12_ERROR`を出力して停止する。runtime演算は
@@ -104,10 +104,10 @@ ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的count
 caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
 dispatch cycle末までは`Pc`を0に保つ。
 
-arena recordは固定13 cellではなく、`next`と頻出fieldを前方へ置いた3〜13 cellのkind別layoutを
-使用する。Continuationだけはdispatch IDを含む15 cellである。literal、input、unary、binary、
+arena recordは`next`と頻出fieldを前方へ置いた4〜18 cellのkind別layoutを使用する。
+Continuationだけはdispatch IDを含む20 cellである。literal、input、unary、binary、
 `len`の結果型は`cell`から自明なのでhandleを保存しない。その他のexpressionはsemantic解決後に
-source名fieldを型handleとして再利用する。これによりaddress幅やarena portalを増やさず、profileした
+source名fieldを型handleとして再利用する。これにより型情報専用fieldを増やさず、profileした
 node領域を30.5%削減する。scalar literalは値を短いrecord内へ詰め、parse時に連続して確保された
 右辺literalはbinary recordの未使用fieldへ即値として埋め込む。両辺literalのbinary式とliteralへの
 unary式はその場で畳み込み、不要になった末尾recordをarenaへ戻す。
@@ -150,12 +150,19 @@ compilerを過度にmemory tuningしたりすることは目標にしない。�
 `FrameLayout`には30,000-cell上限が残る。現在のcompiler frameはこの範囲内であり、大きなglobal arenaを
 static regionへ置くためにこのflagを使用している。
 
-現在のpacked AST arenaは64 page、16,384 logical cellである。handle自体はpage/slotの
-16-bit形式を保ち、容量超過はcompile errorにする。第13段階の自己入力計測では、固定13-cell
+第13段階の初期arenaは64 page、16,384 logical cellだった。第13段階の自己入力計測では、固定13-cell
 recordが12,567 byteでarenaを使い切ったのに対し、kind別compact recordは15,454 byteまで到達し、
 同じ容量で22.97%改善した。旧direct parser専用sourceをproduction連結から除外すると、この構成の
 到達位置は15,431 byte、production sourceは165,134 byte、Rust-bootstrap BFは約199 MBになった。
 さらに4-cell literal、binary右辺即値、parse時定数畳み込みを導入すると、169,294-byteのproduction
 sourceに対して17,726 byteまで到達し、直前構成から14.87%改善した。現在の密度で全sourceへ単純外挿
-すると約156,000 cellであり、依然16-bit handleの65,536-cell上限を超える。次の削減は、function単位の
-scratch arena、streaming lowering、またはcompact IRと組み合わせる必要がある。
+すると約156,000 cellであり、16-bit handleの65,536-cell上限を超える。
+
+このため現在は`cell[255][256]`を4 bank置き、NodeIdをbank/page/slotの3 cellへ拡張して
+261,120 logical cellを確保する。bankはarena access helperだけで選択し、Continuationのdispatch IDは
+従来どおり独立した16-bit page/slot値を使う。参照fieldが1 cell増えるためrecordも拡大するが、
+自己入力の旧密度から見積もった必要量には余裕がある。代償として内部test用のRust-bootstrap BFは
+約1.76 GBになる。開発用interpreterはprofileなしの実行時にraw命令配列を作らずFast IRへ直接RLE変換し、
+pointer source offsetも連続rangeへ圧縮する。これにより同artifactの内部testは最大RSS約2.56 GBで
+実行できる。次の自己コンパイル上の制限は、selfhost semantic/layoutが型とstatic globalの大きさを
+まだ1 byteに制限しており、自身のbank宣言を受理できない点である。

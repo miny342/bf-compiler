@@ -1,27 +1,34 @@
-// ASTと後続IRで共有する16-bit handleとpacked arena。
-// 一つのcell[64][256] regionへnode recordとidentifier byteを置く。
+// ASTと後続IRで共有するbank/page/slot handleとpacked arena。
+// 四つのcell[255][256] regionへnode recordとidentifier byteを置く。
 // fieldごとに巨大なglobal regionを作ると、absolute pointer移動を埋め込む
-// backendでは生成BF自体が数GBになるため、regionを一つに保つ。
+// backendでは生成BF自体が数GBになるため、region数を四つに抑える。
 // nextと頻出fieldを前方へ置き、kindごとに最後に使うfieldまでだけを確保する。
 
-const cell ARENA_LAST_PAGE = 63;
+const cell ARENA_LAST_BANK = 3;
+const cell ARENA_LAST_PAGE = 254;
 const cell FIELD_KIND = 0;
 const cell FIELD_NEXT_PAGE = 1;
 const cell FIELD_NEXT_SLOT = 2;
-const cell FIELD_A_PAGE = 3;
-const cell FIELD_A_SLOT = 4;
-const cell FIELD_TAG = 5;
-const cell FIELD_VALUE = 6;
-const cell FIELD_B_PAGE = 7;
-const cell FIELD_B_SLOT = 8;
-const cell FIELD_NAME_PAGE = 9;
-const cell FIELD_NAME_SLOT = 10;
-const cell FIELD_C_PAGE = 11;
-const cell FIELD_C_SLOT = 12;
-const cell FIELD_DISPATCH_LOW = 13;
-const cell FIELD_DISPATCH_HIGH = 14;
+const cell FIELD_NEXT_BANK = 3;
+const cell FIELD_A_PAGE = 4;
+const cell FIELD_A_SLOT = 5;
+const cell FIELD_A_BANK = 6;
+const cell FIELD_TAG = 7;
+const cell FIELD_VALUE = 8;
+const cell FIELD_B_PAGE = 9;
+const cell FIELD_B_SLOT = 10;
+const cell FIELD_B_BANK = 11;
+const cell FIELD_NAME_PAGE = 12;
+const cell FIELD_NAME_SLOT = 13;
+const cell FIELD_NAME_BANK = 14;
+const cell FIELD_C_PAGE = 15;
+const cell FIELD_C_SLOT = 16;
+const cell FIELD_C_BANK = 17;
+const cell FIELD_DISPATCH_LOW = 18;
+const cell FIELD_DISPATCH_HIGH = 19;
 
 struct NodeId {
+    cell bank;
     cell page;
     cell slot;
 }
@@ -72,7 +79,10 @@ const cell TYPE_STRUCT = 4;
 const cell TYPE_ARRAY = 5;
 const cell TYPE_INFERRED = 6;
 
-cell[64][256] arena_cells;
+cell[255][256] arena_cells_0;
+cell[255][256] arena_cells_1;
+cell[255][256] arena_cells_2;
+cell[255][256] arena_cells_3;
 NodeId arena_next;
 cell arena_exhausted;
 NodeId first_name;
@@ -97,21 +107,28 @@ NodeId null_node() {
 }
 
 cell node_is_null(NodeId id) {
-    return id.page == 0 && id.slot == 0;
+    return id.bank == 0 && id.page == 0 && id.slot == 0;
 }
 
 cell node_equals(NodeId left, NodeId right) {
-    return left.page == right.page && left.slot == right.slot;
+    return left.bank == right.bank
+        && left.page == right.page && left.slot == right.slot;
 }
 
 NodeId arena_advance(NodeId position, cell amount) {
     while (amount != 0) {
-        if (position.page == ARENA_LAST_PAGE && position.slot == 0xff) {
+        if (position.bank == ARENA_LAST_BANK
+            && position.page == ARENA_LAST_PAGE && position.slot == 0xff) {
             fail();
         }
         if (position.slot == 0xff) {
             position.slot = 0;
-            position.page += 1;
+            if (position.page == ARENA_LAST_PAGE) {
+                position.page = 0;
+                position.bank += 1;
+            } else {
+                position.page += 1;
+            }
         } else {
             position.slot += 1;
         }
@@ -126,15 +143,47 @@ NodeId node_field(NodeId id, cell field) {
 
 cell arena_read(NodeId id, cell field) {
     NodeId position = node_field(id, field);
-    return arena_cells[position.page][position.slot];
+    return arena_cell_read(position);
 }
 
 void arena_write(NodeId id, cell field, cell value) {
     NodeId position = node_field(id, field);
-    arena_cells[position.page][position.slot] = value;
+    arena_cell_write(position, value);
+}
+
+cell arena_cell_read(NodeId position) {
+    if (position.bank == 0) {
+        return arena_cells_0[position.page][position.slot];
+    }
+    if (position.bank == 1) {
+        return arena_cells_1[position.page][position.slot];
+    }
+    if (position.bank == 2) {
+        return arena_cells_2[position.page][position.slot];
+    }
+    if (position.bank == 3) {
+        return arena_cells_3[position.page][position.slot];
+    }
+    fail();
+    return 0;
+}
+
+void arena_cell_write(NodeId position, cell value) {
+    if (position.bank == 0) {
+        arena_cells_0[position.page][position.slot] = value;
+    } else if (position.bank == 1) {
+        arena_cells_1[position.page][position.slot] = value;
+    } else if (position.bank == 2) {
+        arena_cells_2[position.page][position.slot] = value;
+    } else if (position.bank == 3) {
+        arena_cells_3[position.page][position.slot] = value;
+    } else {
+        fail();
+    }
 }
 
 void reset_ast_arena() {
+    arena_next.bank = 0;
     arena_next.page = 0;
     arena_next.slot = 1;
     arena_exhausted = 0;
@@ -173,8 +222,9 @@ NodeId allocate_cells(cell count) {
     NodeId position = arena_next;
     NodeId result = position;
     while (count != 0) {
-        arena_cells[position.page][position.slot] = 0;
-        if (position.page == ARENA_LAST_PAGE && position.slot == 0xff) {
+        arena_cell_write(position, 0);
+        if (position.bank == ARENA_LAST_BANK
+            && position.page == ARENA_LAST_PAGE && position.slot == 0xff) {
             arena_exhausted = 1;
             count -= 1;
             if (count != 0) {
@@ -192,30 +242,30 @@ NodeId allocate_cells(cell count) {
 cell node_cell_count(cell kind) {
     if (kind == NODE_EMPTY_STATEMENT || kind == NODE_INPUT_EXPRESSION
         || kind == NODE_ABORT_STATEMENT) {
-        return 3;
+        return 4;
     }
     if (kind == NODE_BLOCK || kind == NODE_OUTPUT_STATEMENT
         || kind == NODE_RETURN_STATEMENT || kind == NODE_CALL_STATEMENT) {
-        return 5;
-    }
-    if (kind == NODE_UNARY_EXPRESSION) {
-        return 6;
-    }
-    if (kind == NODE_LITERAL_EXPRESSION) {
-        return 4;
-    }
-    if (kind == NODE_NAME_RECORD || kind == NODE_LEN_EXPRESSION) {
         return 7;
     }
-    if (kind == NODE_CALL_ARGUMENT) {
+    if (kind == NODE_UNARY_EXPRESSION) {
         return 8;
+    }
+    if (kind == NODE_LITERAL_EXPRESSION) {
+        return 5;
+    }
+    if (kind == NODE_NAME_RECORD || kind == NODE_LEN_EXPRESSION) {
+        return 9;
+    }
+    if (kind == NODE_CALL_ARGUMENT) {
+        return 10;
     }
     if (kind == NODE_ASSIGNMENT || kind == NODE_WHILE_STATEMENT
         || kind == NODE_BINARY_EXPRESSION) {
-        return 9;
+        return 12;
     }
     if (kind == NODE_INSTRUCTION) {
-        return 10;
+        return 13;
     }
     if (kind == NODE_NAME_EXPRESSION || kind == NODE_CALL_EXPRESSION
         || kind == NODE_FUNCTION_DESCRIPTOR || kind == NODE_ENUM_VARIANT
@@ -223,19 +273,19 @@ cell node_cell_count(cell kind) {
         || kind == NODE_STRING_EXPRESSION || kind == NODE_CONSTANT
         || kind == NODE_MACRO_DEFINITION || kind == NODE_MACRO_PARAMETER
         || kind == NODE_MACRO_INVOCATION) {
-        return 11;
+        return 15;
     }
     if (kind == NODE_PARAMETER || kind == NODE_DECLARATION
         || kind == NODE_GLOBAL) {
-        return 12;
+        return 16;
     }
     if (kind == NODE_FUNCTION || kind == NODE_IF_STATEMENT
         || kind == NODE_INDEX_EXPRESSION || kind == NODE_TYPE
         || kind == NODE_FIELD_EXPRESSION) {
-        return 13;
+        return 18;
     }
     if (kind == NODE_CONTINUATION) {
-        return 15;
+        return 20;
     }
     fail();
     return 0;
@@ -290,60 +340,70 @@ NodeId node_name(NodeId id) {
     NodeId result;
     result.page = arena_read(id, FIELD_NAME_PAGE);
     result.slot = arena_read(id, FIELD_NAME_SLOT);
+    result.bank = arena_read(id, FIELD_NAME_BANK);
     return result;
 }
 
 void node_set_name(NodeId id, NodeId value) {
     arena_write(id, FIELD_NAME_PAGE, value.page);
     arena_write(id, FIELD_NAME_SLOT, value.slot);
+    arena_write(id, FIELD_NAME_BANK, value.bank);
 }
 
 NodeId node_a(NodeId id) {
     NodeId result;
     result.page = arena_read(id, FIELD_A_PAGE);
     result.slot = arena_read(id, FIELD_A_SLOT);
+    result.bank = arena_read(id, FIELD_A_BANK);
     return result;
 }
 
 void node_set_a(NodeId id, NodeId value) {
     arena_write(id, FIELD_A_PAGE, value.page);
     arena_write(id, FIELD_A_SLOT, value.slot);
+    arena_write(id, FIELD_A_BANK, value.bank);
 }
 
 NodeId node_b(NodeId id) {
     NodeId result;
     result.page = arena_read(id, FIELD_B_PAGE);
     result.slot = arena_read(id, FIELD_B_SLOT);
+    result.bank = arena_read(id, FIELD_B_BANK);
     return result;
 }
 
 void node_set_b(NodeId id, NodeId value) {
     arena_write(id, FIELD_B_PAGE, value.page);
     arena_write(id, FIELD_B_SLOT, value.slot);
+    arena_write(id, FIELD_B_BANK, value.bank);
 }
 
 NodeId node_c(NodeId id) {
     NodeId result;
     result.page = arena_read(id, FIELD_C_PAGE);
     result.slot = arena_read(id, FIELD_C_SLOT);
+    result.bank = arena_read(id, FIELD_C_BANK);
     return result;
 }
 
 void node_set_c(NodeId id, NodeId value) {
     arena_write(id, FIELD_C_PAGE, value.page);
     arena_write(id, FIELD_C_SLOT, value.slot);
+    arena_write(id, FIELD_C_BANK, value.bank);
 }
 
 NodeId node_next(NodeId id) {
     NodeId result;
     result.page = arena_read(id, FIELD_NEXT_PAGE);
     result.slot = arena_read(id, FIELD_NEXT_SLOT);
+    result.bank = arena_read(id, FIELD_NEXT_BANK);
     return result;
 }
 
 void node_set_next(NodeId id, NodeId value) {
     arena_write(id, FIELD_NEXT_PAGE, value.page);
     arena_write(id, FIELD_NEXT_SLOT, value.slot);
+    arena_write(id, FIELD_NEXT_BANK, value.bank);
 }
 
 cell token_matches_name(NodeId name) {
@@ -353,7 +413,7 @@ cell token_matches_name(NodeId name) {
     NodeId byte = node_a(name);
     cell index;
     while (index < token_length) {
-        if (arena_cells[byte.page][byte.slot] != token_text[index]) {
+        if (arena_cell_read(byte) != token_text[index]) {
             return 0;
         }
         byte = arena_advance(byte, 1);
@@ -378,7 +438,7 @@ NodeId intern_token_name() {
     NodeId byte = start;
     cell index;
     while (index < token_length) {
-        arena_cells[byte.page][byte.slot] = token_text[index];
+        arena_cell_write(byte, token_text[index]);
         if (index + 1 < token_length) {
             byte = arena_advance(byte, 1);
         }

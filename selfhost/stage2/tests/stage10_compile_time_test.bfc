@@ -8,8 +8,7 @@ void test_stage10_compile_time() {
         && node_kind(node_next(first_constant)) == NODE_CONSTANT, '9');
     NodeId text = first_global;
     expect_test(node_kind(node_a(text)) == NODE_STRING_EXPRESSION
-        && arena_cells[node_a(node_a(text)).page][node_a(node_a(text)).slot]
-            == 'A', 'a');
+        && arena_cell_read(node_a(node_a(text))) == 'A', 'a');
 
     analyze_ast_program();
     expect_test(node_value(first_constant) == 3

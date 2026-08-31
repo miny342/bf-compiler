@@ -2,30 +2,30 @@ cell[] ast_test_source = "cell first(cell x){return second(x+1);}cell second(cel
 
 cell name_first_byte(NodeId name) {
     NodeId start = node_a(name);
-    return arena_cells[start.page][start.slot];
+    return arena_cell_read(start);
 }
 
 void test_compact_node_sizes() {
-    expect_test(node_cell_count(NODE_EMPTY_STATEMENT) == 3
-        && node_cell_count(NODE_INPUT_EXPRESSION) == 3, '3');
-    expect_test(node_cell_count(NODE_BLOCK) == 5
-        && node_cell_count(NODE_CALL_STATEMENT) == 5, '4');
-    expect_test(node_cell_count(NODE_LITERAL_EXPRESSION) == 4
-        && node_cell_count(NODE_LEN_EXPRESSION) == 7, '5');
-    expect_test(node_cell_count(NODE_BINARY_EXPRESSION) == 9
-        && node_cell_count(NODE_INSTRUCTION) == 10, '6');
-    expect_test(node_cell_count(NODE_NAME_EXPRESSION) == 11
-        && node_cell_count(NODE_GLOBAL) == 12, '7');
-    expect_test(node_cell_count(NODE_FUNCTION) == 13
-        && node_cell_count(NODE_CONTINUATION) == 15, '8');
+    expect_test(node_cell_count(NODE_EMPTY_STATEMENT) == 4
+        && node_cell_count(NODE_INPUT_EXPRESSION) == 4, '3');
+    expect_test(node_cell_count(NODE_BLOCK) == 7
+        && node_cell_count(NODE_CALL_STATEMENT) == 7, '4');
+    expect_test(node_cell_count(NODE_LITERAL_EXPRESSION) == 5
+        && node_cell_count(NODE_LEN_EXPRESSION) == 9, '5');
+    expect_test(node_cell_count(NODE_BINARY_EXPRESSION) == 12
+        && node_cell_count(NODE_INSTRUCTION) == 13, '6');
+    expect_test(node_cell_count(NODE_NAME_EXPRESSION) == 15
+        && node_cell_count(NODE_GLOBAL) == 16, '7');
+    expect_test(node_cell_count(NODE_FUNCTION) == 18
+        && node_cell_count(NODE_CONTINUATION) == 20, '8');
 
     reset_ast_arena();
     NodeId first = allocate_node(NODE_EMPTY_STATEMENT);
     NodeId second = allocate_node(NODE_LITERAL_EXPRESSION);
     NodeId third = allocate_node(NODE_EMPTY_STATEMENT);
-    expect_test(first.page == 0 && first.slot == 40
-        && second.page == 0 && second.slot == 43
-        && third.page == 0 && third.slot == 47, '9');
+    expect_test(first.bank == 0 && first.page == 0 && first.slot == 55
+        && second.bank == 0 && second.page == 0 && second.slot == 59
+        && third.bank == 0 && third.page == 0 && third.slot == 64, '9');
 
     reset_ast_arena();
     NodeId left = allocate_node(NODE_LITERAL_EXPRESSION);
@@ -58,6 +58,14 @@ void test_arena_page_boundary() {
     expect_test(node.page > 0, 'h');
     NodeId field = node_field(node, FIELD_NEXT_SLOT);
     expect_test(field.page >= node.page, 'i');
+
+    NodeId boundary;
+    boundary.page = ARENA_LAST_PAGE;
+    boundary.slot = 0xff;
+    NodeId next_bank = arena_advance(boundary, 1);
+    arena_cell_write(next_bank, 'B');
+    expect_test(next_bank.bank == 1 && next_bank.page == 0
+        && next_bank.slot == 0 && arena_cell_read(next_bank) == 'B', '=');
 }
 
 void test_continuation_dispatch_ids() {

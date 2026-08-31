@@ -40,7 +40,7 @@ const cell IR_OFFSET_ADD_CONSTANT = 28;
 
 const cell VOID_RETURN_SLOT = 0xff;
 // Continuation records use every common field plus a dense dispatch ID.
-const cell CONTINUATION_CELLS = 15;
+const cell CONTINUATION_CELLS = 20;
 
 NodeId first_continuation;
 NodeId last_continuation;
@@ -97,7 +97,8 @@ void select_continuation(NodeId continuation) {
     lowering_current_continuation = continuation;
     NodeId instruction = node_a(continuation);
     lowering_instruction_tail = instruction;
-    while (!node_is_null(node_next(lowering_instruction_tail))) {
+    while (!node_is_null(lowering_instruction_tail)
+        && !node_is_null(node_next(lowering_instruction_tail))) {
         lowering_instruction_tail = node_next(lowering_instruction_tail);
     }
 }
@@ -372,7 +373,7 @@ void lower_aggregate_expression(NodeId expression, cell destination, cell length
             append_ir_instruction(
                 IR_SET,
                 destination + index,
-                arena_cells[byte.page][byte.slot]
+                arena_cell_read(byte)
             );
             byte = arena_advance(byte, 1);
             index += 1;

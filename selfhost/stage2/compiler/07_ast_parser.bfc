@@ -335,17 +335,17 @@ NodeId parse_ast_primary() {
         NodeId byte = start;
         cell index;
         while (index < token_string_length) {
-            arena_cells[byte.page][byte.slot] = token_string[index];
+            arena_cell_write(byte, token_string[index]);
             byte = arena_advance(byte, 1);
             index += 1;
         }
         if (token_string_is_256) {
             while (index != 0xff) {
-                arena_cells[byte.page][byte.slot] = token_string[index];
+                arena_cell_write(byte, token_string[index]);
                 byte = arena_advance(byte, 1);
                 index += 1;
             }
-            arena_cells[byte.page][byte.slot] = token_string[0xff];
+            arena_cell_write(byte, token_string[0xff]);
         }
         node_set_name(result, make_array_type(
             cell_type,

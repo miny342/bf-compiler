@@ -204,8 +204,7 @@ NodeId fresh_macro_name(NodeId original) {
     node_set_a(fresh, destination);
     cell index;
     while (index < length) {
-        arena_cells[destination.page][destination.slot]
-            = arena_cells[source.page][source.slot];
+        arena_cell_write(destination, arena_cell_read(source));
         source = arena_advance(source, 1);
         destination = arena_advance(destination, 1);
         index += 1;
