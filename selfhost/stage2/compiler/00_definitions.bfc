@@ -1,6 +1,6 @@
-// LANGUAGE.mdの初期実装第1〜9段階を対象にするbootstrap BFC compiler。
+// LANGUAGE.mdの初期実装第1〜10段階を対象にするbootstrap BFC compiler。
 //
-// compiler自体は実装済みのversion 1 BFCで記述する。第9段階sourceをinputから
+// compiler自体は実装済みのversion 1 BFCで記述する。第10段階sourceをinputから
 // 読み、Brainfuckを出力する。BFCのinput()仕様に従い、NULを入力終端とする。
 
 const cell MAX_NAME = 64;
@@ -38,7 +38,8 @@ enum TokenKind {
     AmpAmp,
     PipePipe,
     Dot,
-    ColonColon
+    ColonColon,
+    String
 }
 
 cell current_char;
@@ -48,6 +49,9 @@ cell token_value;
 cell token_number_is_256;
 cell token_length;
 cell[MAX_NAME] token_text;
+cell token_string_length;
+cell token_string_is_256;
+cell[256] token_string;
 
 cell[MAX_SYMBOLS][MAX_NAME] symbol_text;
 cell[MAX_SYMBOLS] symbol_length;

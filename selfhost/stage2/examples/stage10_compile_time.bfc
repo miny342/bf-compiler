@@ -1,0 +1,30 @@
+const cell PrefixLength = len(prefix);
+const cell Base = 2;
+const cell Width = Base + 1;
+
+cell[Width] prefix = "A\n\0";
+
+cell[2] ignored() {
+    output('X');
+    cell[2] value;
+    return value;
+}
+
+void main() {
+    output(PrefixLength);
+    output(prefix[0]);
+    output(prefix[1]);
+    output(prefix[2]);
+
+    cell[] escaped = "B\"\\\x21";
+    output(len(escaped));
+    output(escaped[0]);
+    output(escaped[1]);
+    output(escaped[2]);
+    output(escaped[3]);
+
+    output(len(ignored()));
+    cell[2][3] pages;
+    output(len(pages));
+    output(len(pages[0]));
+}

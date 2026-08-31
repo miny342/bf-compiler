@@ -1,8 +1,8 @@
-# 第9段階bootstrap compiler
+# 第10段階bootstrap compiler
 
 このディレクトリには、最初に実行可能になったセルフホスト用の小さなコンパイラを置く。
 まずRust版コンパイラでBFC製コンパイラをBrainfuckへ変換し、そのBrainfuckプログラムで
-初期実装第1〜9段階のBFCをBrainfuckへ変換する。
+初期実装第1〜10段階のBFCをBrainfuckへ変換する。
 
 ## ファイル構成
 
@@ -15,7 +15,7 @@
 - `compiler/04_codegen.bfc`: Brainfuckのcell移動、copy、加減算、制御loopの生成
 - `compiler/05_parser.bfc`: 式、宣言、代入、block、`if`、`while`の構文解析
 - `compiler/06_arena.bfc`: 16-bit handle、packed arena、identifier intern
-- `compiler/07_ast_parser.bfc`: 第9段階surface syntaxのfull AST構築
+- `compiler/07_ast_parser.bfc`: 第10段階surface syntaxのfull AST構築
 - `compiler/08_semantic.bfc`: nominal型layout、function収集、名前解決、型検査
 - `compiler/09_continuation_ir.bfc`: typed ASTからContinuation IRへのlowering
 - `compiler/10_abi_codegen.bfc`: static global、array portal、uniform frame、aggregate outbox ABI
@@ -51,13 +51,14 @@ production実装を変えずに次をBF上で検証できる。
 - static global layout、宣言順initializer、local/global配列の動的添字
 - 配列の値渡しとsnapshot、全体代入、activation固有outboxによるaggregate return
 - enum/struct、多次元配列、nominal型検査、field/index projection
+- 文字列escape、`cell[]`長さ推論、`len`の非評価、`const cell`と定数名の配列長
 
 内部testの追加時は任意の`*_test.bfc`へtest関数を定義し、`tests/test.bfc`の`main`から明示的に
 呼び出す。
 
 ## 対応する入力
 
-`LANGUAGE.md`の初期実装第1〜9段階から、次を受理する。
+`LANGUAGE.md`の初期実装第1〜10段階から、次を受理する。
 
 - ちょうど1つの`void main()`とscalar/array/void function定義
 - scalar/array parameter、前方call、直接・相互再帰、scalar/aggregate `return`
@@ -67,6 +68,8 @@ production実装を変えずに次をBF上で検証できる。
 - enumの`Type::Variant`、struct fieldの`.`、定数添字の多段projection
 - 型が一致するaggregate initializer、全体代入、値渡し、値返し
 - 1 cell要素のroot local/global配列に対する動的添字
+- 文字列リテラル、直接文字列initializerによる`cell[]`長さ推論、compile-time `len`
+- file-scopeの`const cell`、forward定数参照、定数名を使う配列長
 - 10進・16進整数リテラルと文字リテラル
 - `input()`、`output`、`=`、`+=`、`-=`
 - 単項および二項の`+`、`-`
@@ -80,7 +83,7 @@ frameのlocal/temporary 239 cell、static global 255 cell、型layout 255 cell�
 4,096 cellという明示的な制限がある。配列長256の構文は認識するが、zero-cell要素以外は
 現在の1 byte layout容量には収まらないため拒否する。streaming parserは、function bodyの
 local宣言を開始するnominal型定義がそのfunctionより前に現れることを要求する。
-制限超過または後段階の構文を検出すると`BFC_STAGE9_ERROR`を出力して停止する。runtime演算は
+制限超過または後段階の構文を検出すると`BFC_STAGE10_ERROR`を出力して停止する。runtime演算は
 通常のBFCと同じくmod 256でwrapする。動的なaggregate/多段projectionは16-bit logical
 offset portalを入れる第11段階まで拒否する。旧第4段階direct parserは内部回帰test用に残している。
 
@@ -107,9 +110,10 @@ scripts/verify-stage2-selfhost.sh
 検証scriptは最初に`test.bfc`版をBFへ変換して内部testの`ok`を確認する。続いて`main.bfc`版を
 連結して二段階のコンパイルを実行する。生成結果にエラーmarkerやBrainfuck以外のbyteがないことを
 調べた後、第7段階のglobal/portal回帰に加え、配列initializer、全体代入、値渡し、再帰的aggregate
-return、引数snapshot、enum/struct、多次元配列、field/index projectionを含む生成programを
+return、引数snapshot、enum/struct、多次元配列、field/index projection、文字列、`len`、
+`const cell`を含む生成programを
 実行し、期待するbinary出力と比較する。配列のscalar利用、長さの型不一致、定数範囲外アクセス、
-enumのzero variant欠落、再帰struct layoutも拒否を確認する。
+enumのzero variant欠落、再帰struct layout、定数循環、不正な配列長推論も拒否を確認する。
 
 ## セルフホスト時のテープ容量
 

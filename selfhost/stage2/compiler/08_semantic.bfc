@@ -1,4 +1,4 @@
-// 第9段階programのfile-scope収集、型layout、名前解決、型検査。
+// 第10段階programのfile-scope収集、型/定数解決、名前解決、型検査。
 
 NodeId[256] semantic_local_names;
 cell[256] semantic_local_slots;
@@ -19,10 +19,15 @@ const cell RESOLVED_GLOBAL = 1;
 const cell RESOLVED_LOCAL_DYNAMIC = 2;
 const cell RESOLVED_GLOBAL_DYNAMIC = 3;
 const cell RESOLVED_VALUE_PROJECT = 4;
+const cell RESOLVED_CONSTANT = 5;
 
 const cell TYPE_STATE_UNVISITED = 0;
 const cell TYPE_STATE_VISITING = 1;
 const cell TYPE_STATE_DONE = 2;
+
+const cell CONSTANT_STATE_UNVISITED = 0;
+const cell CONSTANT_STATE_VISITING = 1;
+const cell CONSTANT_STATE_DONE = 2;
 
 struct ConstantValue {
     cell known;
@@ -87,6 +92,34 @@ NodeId find_global_by_name_or_null(NodeId name) {
     return null_node();
 }
 
+NodeId find_constant_by_name_or_null(NodeId name) {
+    NodeId constant = first_constant;
+    while (!node_is_null(constant)) {
+        if (node_equals(node_name(constant), name)) {
+            return constant;
+        }
+        constant = node_next(constant);
+    }
+    return null_node();
+}
+
+cell resolve_constant(NodeId constant) {
+    if (node_tag(constant) == CONSTANT_STATE_DONE) {
+        return node_value(constant);
+    }
+    if (node_tag(constant) == CONSTANT_STATE_VISITING) {
+        fail();
+    }
+    node_set_tag(constant, CONSTANT_STATE_VISITING);
+    ConstantValue result = evaluate_constant_expression(node_a(constant));
+    if (!result.known) {
+        fail();
+    }
+    node_set_value(constant, result.value);
+    node_set_tag(constant, CONSTANT_STATE_DONE);
+    return result.value;
+}
+
 cell add_semantic_local(NodeId name, NodeId ty) {
     if (semantic_local_count == 0xff) {
         fail();
@@ -130,12 +163,91 @@ void leave_semantic_scope() {
     semantic_next_slot = semantic_scope_slot_base[semantic_scope_depth];
 }
 
+NodeId unevaluated_expression_type(NodeId expression) {
+    cell kind = node_kind(expression);
+    if (kind == NODE_STRING_EXPRESSION) {
+        return expression_type(expression);
+    }
+    if (kind == NODE_NAME_EXPRESSION) {
+        NodeId global = find_global_by_name_or_null(node_name(expression));
+        if (!node_is_null(global)) {
+            return node_b(global);
+        }
+        if (!node_is_null(find_constant_by_name_or_null(node_name(expression)))) {
+            return cell_type;
+        }
+        fail();
+    }
+    if (kind == NODE_CALL_EXPRESSION) {
+        NodeId function = find_function_by_name(node_name(expression));
+        NodeId return_handle = node_c(function);
+        if (node_kind(return_handle) == NODE_FUNCTION_DESCRIPTOR) {
+            return node_name(return_handle);
+        }
+        return return_handle;
+    }
+    if (kind == NODE_INDEX_EXPRESSION) {
+        NodeId base = unevaluated_expression_type(node_a(expression));
+        if (node_tag(base) != TYPE_ARRAY) {
+            fail();
+        }
+        return node_a(base);
+    }
+    if (kind == NODE_FIELD_EXPRESSION) {
+        NodeId base = unevaluated_expression_type(node_a(expression));
+        if (node_tag(base) != TYPE_STRUCT) {
+            fail();
+        }
+        return node_a(find_struct_field(base, node_name(expression)));
+    }
+    if (kind == NODE_ENUM_EXPRESSION) {
+        NodeId ty = find_named_type_or_null(node_name(expression));
+        if (node_is_null(ty) || node_tag(ty) != TYPE_ENUM) {
+            fail();
+        }
+        return ty;
+    }
+    if (kind == NODE_LEN_EXPRESSION || kind == NODE_LITERAL_EXPRESSION
+        || kind == NODE_INPUT_EXPRESSION || kind == NODE_UNARY_EXPRESSION
+        || kind == NODE_BINARY_EXPRESSION) {
+        return cell_type;
+    }
+    fail();
+    return void_type;
+}
+
 ConstantValue evaluate_constant_expression(NodeId expression) {
     ConstantValue result;
     cell kind = node_kind(expression);
     if (kind == NODE_LITERAL_EXPRESSION) {
         result.known = 1;
         result.value = node_value(expression);
+        return result;
+    }
+    if (kind == NODE_NAME_EXPRESSION) {
+        NodeId constant = find_constant_by_name_or_null(node_name(expression));
+        if (!node_is_null(constant)) {
+            result.known = 1;
+            result.value = resolve_constant(constant);
+        }
+        return result;
+    }
+    if (kind == NODE_LEN_EXPRESSION) {
+        if (node_equals(expression_type(expression), cell_type)) {
+            result.known = 1;
+            result.value = node_value(expression);
+            return result;
+        }
+        NodeId operand_type = unevaluated_expression_type(node_a(expression));
+        if (node_tag(operand_type) != TYPE_ARRAY) {
+            fail();
+        }
+        resolve_type_layout(operand_type);
+        if (arena_read(operand_type, FIELD_C_SLOT) == ARRAY_LENGTH_256) {
+            fail();
+        }
+        result.known = 1;
+        result.value = arena_read(operand_type, FIELD_C_PAGE);
         return result;
     }
     if (kind == NODE_UNARY_EXPRESSION) {
@@ -294,7 +406,18 @@ void resolve_type_layout(NodeId ty) {
         resolve_type_layout(element);
         cell element_cells = node_value(element);
         cell length = arena_read(ty, FIELD_C_PAGE);
-        if (arena_read(ty, FIELD_C_SLOT)) {
+        cell length_kind = arena_read(ty, FIELD_C_SLOT);
+        if (length_kind == ARRAY_LENGTH_CONSTANT) {
+            NodeId constant = find_constant_by_name_or_null(node_name(ty));
+            if (node_is_null(constant)) {
+                fail();
+            }
+            length = resolve_constant(constant);
+            arena_write(ty, FIELD_C_PAGE, length);
+            arena_write(ty, FIELD_C_SLOT, ARRAY_LENGTH_LITERAL);
+            length_kind = ARRAY_LENGTH_LITERAL;
+        }
+        if (length_kind == ARRAY_LENGTH_256) {
             if (element_cells != 0) {
                 fail();
             }
@@ -343,6 +466,19 @@ NodeId analyze_ast_expression(NodeId expression) {
         set_expression_type(expression, cell_type);
         return cell_type;
     }
+    if (kind == NODE_STRING_EXPRESSION) {
+        return expression_type(expression);
+    }
+    if (kind == NODE_LEN_EXPRESSION) {
+        NodeId operand_type = analyze_ast_expression(node_a(expression));
+        if (node_tag(operand_type) != TYPE_ARRAY
+            || arena_read(operand_type, FIELD_C_SLOT) == ARRAY_LENGTH_256) {
+            fail();
+        }
+        node_set_value(expression, arena_read(operand_type, FIELD_C_PAGE));
+        set_expression_type(expression, cell_type);
+        return cell_type;
+    }
     if (kind == NODE_ENUM_EXPRESSION) {
         NodeId ty = find_named_type_or_null(node_name(expression));
         if (node_is_null(ty) || node_tag(ty) != TYPE_ENUM) {
@@ -369,6 +505,13 @@ NodeId analyze_ast_expression(NodeId expression) {
             node_set_value(expression, semantic_local_slots[binding]);
             ty = semantic_local_types[binding];
         } else {
+            NodeId constant = find_constant_by_name_or_null(node_name(expression));
+            if (!node_is_null(constant)) {
+                node_set_tag(expression, RESOLVED_CONSTANT);
+                node_set_value(expression, resolve_constant(constant));
+                set_expression_type(expression, cell_type);
+                return cell_type;
+            }
             NodeId global = find_global_by_name_or_null(node_name(expression));
             if (node_is_null(global)) {
                 fail();
@@ -528,8 +671,17 @@ cell analyze_ast_statement(NodeId statement) {
     }
     if (kind == NODE_DECLARATION) {
         NodeId ty = node_b(statement);
-        if (!node_is_null(node_a(statement))
-            && !types_equal(analyze_ast_expression(node_a(statement)), ty)) {
+        NodeId initializer = node_a(statement);
+        if (node_equals(ty, inferred_type)) {
+            if (node_is_null(initializer)
+                || node_kind(initializer) != NODE_STRING_EXPRESSION) {
+                fail();
+            }
+            ty = expression_type(initializer);
+            node_set_b(statement, ty);
+        }
+        if (!node_is_null(initializer)
+            && !types_equal(analyze_ast_expression(initializer), ty)) {
             fail();
         }
         node_set_tag(statement, type_is_aggregate(ty));
@@ -547,7 +699,8 @@ cell analyze_ast_statement(NodeId statement) {
     if (kind == NODE_ASSIGNMENT) {
         NodeId value_type = analyze_ast_expression(node_b(statement));
         NodeId target_type = analyze_ast_expression(node_a(statement));
-        if (node_tag(node_a(statement)) == RESOLVED_VALUE_PROJECT) {
+        if (node_tag(node_a(statement)) == RESOLVED_VALUE_PROJECT
+            || node_tag(node_a(statement)) == RESOLVED_CONSTANT) {
             fail();
         }
         if (!types_equal(value_type, target_type)) {
@@ -601,6 +754,54 @@ cell analyze_ast_statement(NodeId statement) {
 }
 
 void collect_file_declarations() {
+    NodeId global = first_global;
+    while (!node_is_null(global)) {
+        if (node_equals(node_b(global), inferred_type)) {
+            if (node_is_null(node_a(global))
+                || node_kind(node_a(global)) != NODE_STRING_EXPRESSION) {
+                fail();
+            }
+            node_set_b(global, expression_type(node_a(global)));
+        }
+        global = node_next(global);
+    }
+
+    NodeId constant = first_constant;
+    while (!node_is_null(constant)) {
+        NodeId earlier_constant = first_constant;
+        while (!node_equals(earlier_constant, constant)) {
+            if (node_equals(node_name(earlier_constant), node_name(constant))) {
+                fail();
+            }
+            earlier_constant = node_next(earlier_constant);
+        }
+        NodeId conflict_type = first_type;
+        while (!node_is_null(conflict_type)) {
+            if (node_tag(conflict_type) != TYPE_ARRAY
+                && !node_is_null(node_name(conflict_type))
+                && node_equals(node_name(conflict_type), node_name(constant))) {
+                fail();
+            }
+            conflict_type = node_next(conflict_type);
+        }
+        global = first_global;
+        while (!node_is_null(global)) {
+            if (node_equals(node_name(global), node_name(constant))) {
+                fail();
+            }
+            global = node_next(global);
+        }
+        NodeId conflict_function = first_function;
+        while (!node_is_null(conflict_function)) {
+            if (node_equals(node_name(conflict_function), node_name(constant))) {
+                fail();
+            }
+            conflict_function = node_next(conflict_function);
+        }
+        cell constant_value = resolve_constant(constant);
+        constant = node_next(constant);
+    }
+
     NodeId ty = first_type;
     while (!node_is_null(ty)) {
         resolve_type_layout(ty);
@@ -608,7 +809,7 @@ void collect_file_declarations() {
     }
 
     stage7_static_cells = 0;
-    NodeId global = first_global;
+    global = first_global;
     while (!node_is_null(global)) {
         NodeId earlier_global = first_global;
         while (!node_equals(earlier_global, global)) {
@@ -620,7 +821,8 @@ void collect_file_declarations() {
         ty = node_b(global);
         NodeId named_type = first_type;
         while (!node_is_null(named_type)) {
-            if (!node_is_null(node_name(named_type))
+            if (node_tag(named_type) != TYPE_ARRAY
+                && !node_is_null(node_name(named_type))
                 && node_equals(node_name(named_type), node_name(global))) {
                 fail();
             }
@@ -657,7 +859,7 @@ void collect_file_declarations() {
         }
         ty = first_type;
         while (!node_is_null(ty)) {
-            if (!node_is_null(node_name(ty))
+            if (node_tag(ty) != TYPE_ARRAY && !node_is_null(node_name(ty))
                 && node_equals(node_name(ty), node_name(function))) {
                 fail();
             }

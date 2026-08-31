@@ -56,6 +56,9 @@ const cell NODE_ENUM_VARIANT = 26;
 const cell NODE_STRUCT_FIELD = 27;
 const cell NODE_FIELD_EXPRESSION = 28;
 const cell NODE_ENUM_EXPRESSION = 29;
+const cell NODE_STRING_EXPRESSION = 30;
+const cell NODE_LEN_EXPRESSION = 31;
+const cell NODE_CONSTANT = 32;
 
 const cell TYPE_UNRESOLVED = 0;
 const cell TYPE_CELL = 1;
@@ -63,6 +66,7 @@ const cell TYPE_VOID = 2;
 const cell TYPE_ENUM = 3;
 const cell TYPE_STRUCT = 4;
 const cell TYPE_ARRAY = 5;
+const cell TYPE_INFERRED = 6;
 
 cell[16][256] arena_cells;
 NodeId arena_next;
@@ -77,6 +81,9 @@ NodeId first_type;
 NodeId last_type;
 NodeId cell_type;
 NodeId void_type;
+NodeId inferred_type;
+NodeId first_constant;
+NodeId last_constant;
 
 NodeId null_node() {
     NodeId result;
@@ -144,6 +151,11 @@ void reset_ast_arena() {
     node_set_tag(void_type, TYPE_VOID);
     node_set_next(last_type, void_type);
     last_type = void_type;
+
+    inferred_type = allocate_node(NODE_TYPE);
+    node_set_tag(inferred_type, TYPE_INFERRED);
+    first_constant = null_node();
+    last_constant = null_node();
 }
 
 NodeId allocate_cells(cell count) {

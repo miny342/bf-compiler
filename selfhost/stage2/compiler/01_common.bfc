@@ -12,7 +12,8 @@ void fail() {
     compiler_output!('A');
     compiler_output!('G');
     compiler_output!('E');
-    compiler_output!('9');
+    compiler_output!('1');
+    compiler_output!('0');
     compiler_output!('_');
     compiler_output!('E');
     compiler_output!('R');

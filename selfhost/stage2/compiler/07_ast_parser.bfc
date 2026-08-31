@@ -1,4 +1,4 @@
-// 第9段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
+// 第10段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
 
 const cell AST_TYPE_VOID = 0;
 const cell AST_TYPE_CELL = 1;
@@ -21,6 +21,9 @@ const cell AST_ASSIGNMENT_ADD = 1;
 const cell AST_ASSIGNMENT_SUBTRACT = 2;
 const cell AST_DECLARATION_SCALAR = 0;
 const cell AST_DECLARATION_ARRAY = 1;
+const cell ARRAY_LENGTH_LITERAL = 0;
+const cell ARRAY_LENGTH_256 = 1;
+const cell ARRAY_LENGTH_CONSTANT = 2;
 
 void append_ast_type(NodeId ty) {
     if (node_is_null(first_type)) {
@@ -34,7 +37,7 @@ void append_ast_type(NodeId ty) {
 NodeId find_named_type_or_null(NodeId name) {
     NodeId ty = first_type;
     while (!node_is_null(ty)) {
-        if (!node_is_null(node_name(ty))
+        if (node_tag(ty) != TYPE_ARRAY && !node_is_null(node_name(ty))
             && node_equals(node_name(ty), name)) {
             return ty;
         }
@@ -57,7 +60,8 @@ NodeId get_or_create_named_type(NodeId name) {
 cell token_is_known_type() {
     NodeId ty = first_type;
     while (!node_is_null(ty)) {
-        if (!node_is_null(node_name(ty)) && token_matches_name(node_name(ty))) {
+        if (node_tag(ty) != TYPE_ARRAY && !node_is_null(node_name(ty))
+            && token_matches_name(node_name(ty))) {
             return 1;
         }
         ty = node_next(ty);
@@ -65,13 +69,19 @@ cell token_is_known_type() {
     return 0;
 }
 
-NodeId make_array_type(NodeId element, cell length, cell is_256) {
+NodeId make_array_type(
+    NodeId element,
+    cell length,
+    cell length_kind,
+    NodeId length_name
+) {
     NodeId existing = first_type;
     while (!node_is_null(existing)) {
         if (node_tag(existing) == TYPE_ARRAY
             && node_equals(node_a(existing), element)
             && arena_read(existing, FIELD_C_PAGE) == length
-            && arena_read(existing, FIELD_C_SLOT) == is_256) {
+            && arena_read(existing, FIELD_C_SLOT) == length_kind
+            && node_equals(node_name(existing), length_name)) {
             return existing;
         }
         existing = node_next(existing);
@@ -80,12 +90,13 @@ NodeId make_array_type(NodeId element, cell length, cell is_256) {
     node_set_tag(ty, TYPE_ARRAY);
     node_set_a(ty, element);
     arena_write(ty, FIELD_C_PAGE, length);
-    arena_write(ty, FIELD_C_SLOT, is_256);
+    arena_write(ty, FIELD_C_SLOT, length_kind);
+    node_set_name(ty, length_name);
     append_ast_type(ty);
     return ty;
 }
 
-NodeId parse_ast_complete_type(cell allow_void) {
+NodeId parse_ast_complete_type(cell allow_void, cell allow_inferred) {
     if (token_kind != TokenKind::Identifier) {
         fail();
     }
@@ -109,18 +120,37 @@ NodeId parse_ast_complete_type(cell allow_void) {
     next_token();
 
     cell[16] lengths;
-    cell[16] lengths_are_256;
+    cell[16] length_kinds;
+    NodeId[16] length_names;
     cell dimension_count;
     while (token_kind == TokenKind::LeftBracket) {
         if (dimension_count == 16) {
             fail();
         }
         next_token();
-        if (token_kind != TokenKind::Number) {
+        if (token_kind == TokenKind::RightBracket) {
+            if (!allow_inferred || !node_equals(ty, cell_type)
+                || dimension_count != 0) {
+                fail();
+            }
+            next_token();
+            if (token_kind == TokenKind::LeftBracket) {
+                fail();
+            }
+            return inferred_type;
+        }
+        if (token_kind == TokenKind::Number) {
+            lengths[dimension_count] = token_value;
+            if (token_number_is_256) {
+                length_kinds[dimension_count] = ARRAY_LENGTH_256;
+            }
+        } else if (token_kind == TokenKind::Identifier
+            && !token_is_reserved()) {
+            length_kinds[dimension_count] = ARRAY_LENGTH_CONSTANT;
+            length_names[dimension_count] = intern_token_name();
+        } else {
             fail();
         }
-        lengths[dimension_count] = token_value;
-        lengths_are_256[dimension_count] = token_number_is_256;
         dimension_count += 1;
         next_token();
         consume(TokenKind::RightBracket);
@@ -130,7 +160,8 @@ NodeId parse_ast_complete_type(cell allow_void) {
         ty = make_array_type(
             ty,
             lengths[dimension_count],
-            lengths_are_256[dimension_count]
+            length_kinds[dimension_count],
+            length_names[dimension_count]
         );
     }
     return ty;
@@ -203,11 +234,55 @@ NodeId parse_ast_primary() {
         next_token();
         return result;
     }
+    if (token_kind == TokenKind::String) {
+        NodeId result = allocate_node(NODE_STRING_EXPRESSION);
+        node_set_value(result, token_string_length);
+        arena_write(result, FIELD_NAME_PAGE, token_string_is_256);
+        NodeId start;
+        if (token_string_is_256) {
+            start = allocate_cells(0xff);
+            NodeId final_byte = allocate_cells(1);
+        } else if (token_string_length != 0) {
+            start = allocate_cells(token_string_length);
+        }
+        node_set_a(result, start);
+        NodeId byte = start;
+        cell index;
+        while (index < token_string_length) {
+            arena_cells[byte.page][byte.slot] = token_string[index];
+            byte = arena_advance(byte, 1);
+            index += 1;
+        }
+        if (token_string_is_256) {
+            while (index != 0xff) {
+                arena_cells[byte.page][byte.slot] = token_string[index];
+                byte = arena_advance(byte, 1);
+                index += 1;
+            }
+            arena_cells[byte.page][byte.slot] = token_string[0xff];
+        }
+        node_set_c(result, make_array_type(
+            cell_type,
+            token_string_length,
+            token_string_is_256,
+            null_node()
+        ));
+        next_token();
+        return result;
+    }
     if (token_kind == TokenKind::Identifier) {
         if (token_is_input()) {
             NodeId result = allocate_node(NODE_INPUT_EXPRESSION);
             next_token();
             consume(TokenKind::LeftParen);
+            consume(TokenKind::RightParen);
+            return result;
+        }
+        if (token_is_len()) {
+            NodeId result = allocate_node(NODE_LEN_EXPRESSION);
+            next_token();
+            consume(TokenKind::LeftParen);
+            node_set_a(result, parse_ast_expression());
             consume(TokenKind::RightParen);
             return result;
         }
@@ -389,7 +464,7 @@ NodeId parse_ast_statement() {
     }
     if (token_kind == TokenKind::Identifier
         && (token_is_cell() || token_is_known_type())) {
-        NodeId declaration_type = parse_ast_complete_type(0);
+        NodeId declaration_type = parse_ast_complete_type(0, 1);
         if (token_kind != TokenKind::Identifier || token_is_reserved()) {
             fail();
         }
@@ -490,7 +565,7 @@ NodeId parse_ast_function_after_name(
     if (token_kind != TokenKind::RightParen) {
         cell more = 1;
         while (more) {
-            NodeId parameter_type = parse_ast_complete_type(0);
+            NodeId parameter_type = parse_ast_complete_type(0, 0);
             if (token_kind != TokenKind::Identifier || token_is_reserved()) {
                 fail();
             }
@@ -536,6 +611,33 @@ void append_ast_global(NodeId global) {
         node_set_next(last_global, global);
     }
     last_global = global;
+}
+
+void append_ast_constant(NodeId constant) {
+    if (node_is_null(first_constant)) {
+        first_constant = constant;
+    } else {
+        node_set_next(last_constant, constant);
+    }
+    last_constant = constant;
+}
+
+void parse_ast_constant_definition() {
+    next_token();
+    if (token_kind != TokenKind::Identifier || !token_is_cell()) {
+        fail();
+    }
+    next_token();
+    if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+        fail();
+    }
+    NodeId constant = allocate_node(NODE_CONSTANT);
+    node_set_name(constant, intern_token_name());
+    next_token();
+    consume(TokenKind::Assign);
+    node_set_a(constant, parse_ast_expression());
+    consume(TokenKind::Semicolon);
+    append_ast_constant(constant);
 }
 
 void parse_ast_enum_definition() {
@@ -604,7 +706,7 @@ void parse_ast_struct_definition() {
         if (token_kind == TokenKind::Eof) {
             fail();
         }
-        NodeId field_type = parse_ast_complete_type(0);
+        NodeId field_type = parse_ast_complete_type(0, 0);
         if (token_kind != TokenKind::Identifier || token_is_reserved()) {
             fail();
         }
@@ -628,6 +730,10 @@ void parse_ast_struct_definition() {
 }
 
 void parse_ast_top_level_item() {
+    if (token_kind == TokenKind::Identifier && token_is_const()) {
+        parse_ast_constant_definition();
+        return;
+    }
     if (token_kind == TokenKind::Identifier && token_is_enum()) {
         parse_ast_enum_definition();
         return;
@@ -636,7 +742,7 @@ void parse_ast_top_level_item() {
         parse_ast_struct_definition();
         return;
     }
-    NodeId value_type = parse_ast_complete_type(1);
+    NodeId value_type = parse_ast_complete_type(1, 1);
     if (token_kind != TokenKind::Identifier || token_is_reserved()) {
         fail();
     }
@@ -644,6 +750,9 @@ void parse_ast_top_level_item() {
     next_token();
 
     if (token_kind == TokenKind::LeftParen) {
+        if (node_equals(value_type, inferred_type)) {
+            fail();
+        }
         append_ast_function(
             parse_ast_function_after_name(value_type, name)
         );

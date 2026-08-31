@@ -167,6 +167,49 @@ void read_character_literal() {
     token_number_is_256 = 0;
 }
 
+void append_string_byte(cell value) {
+    if (token_string_is_256) {
+        fail();
+    }
+    token_string[token_string_length] = value;
+    if (token_string_length == 0xff) {
+        token_string_length = 0;
+        token_string_is_256 = 1;
+    } else {
+        token_string_length += 1;
+    }
+}
+
+void read_string_literal() {
+    token_string_length = 0;
+    token_string_is_256 = 0;
+    read_character();
+    while (current_char != '"') {
+        if (current_char == 0 || current_char == '\n'
+            || current_char == '\r') {
+            fail();
+        }
+        cell value;
+        if (current_char == '\\') {
+            read_character();
+            if (current_char == '"') {
+                value = '"';
+            } else {
+                value = read_escape();
+            }
+        } else {
+            if (current_char < 32 || current_char > 126) {
+                fail();
+            }
+            value = current_char;
+        }
+        append_string_byte(value);
+        read_character();
+    }
+    read_character();
+    token_kind = TokenKind::String;
+}
+
 void next_token() {
     skip_trivia();
     token_length = 0;
@@ -180,6 +223,8 @@ void next_token() {
         read_number();
     } else if (current_char == '\'') {
         read_character_literal();
+    } else if (current_char == '"') {
+        read_string_literal();
     } else if (current_char == '(') {
         token_kind = TokenKind::LeftParen;
         read_character();

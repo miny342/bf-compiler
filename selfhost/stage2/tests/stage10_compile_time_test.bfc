@@ -1,0 +1,27 @@
+cell[] stage10_compile_time_test_source = "const cell N=M+1;const cell M=2;cell[N] text=\"A\\n\\0\";cell[2] ignored(){output('X');cell[2] v;return v;}void main(){cell[] local=\"ok\";output(len(local));output(len(ignored()));output(text[1]);}";
+
+void test_stage10_compile_time() {
+    reset_test_input(11);
+    parse_ast_program();
+
+    expect_test(node_kind(first_constant) == NODE_CONSTANT
+        && node_kind(node_next(first_constant)) == NODE_CONSTANT, '9');
+    NodeId text = first_global;
+    expect_test(node_kind(node_a(text)) == NODE_STRING_EXPRESSION
+        && arena_cells[node_a(node_a(text)).page][node_a(node_a(text)).slot]
+            == 'A', 'a');
+
+    analyze_ast_program();
+    expect_test(node_value(first_constant) == 3
+        && node_value(node_next(first_constant)) == 2, 'b');
+    expect_test(node_value(node_b(text)) == 3, 'c');
+
+    NodeId main = node_next(first_function);
+    NodeId local = node_a(node_b(main));
+    expect_test(node_tag(node_b(local)) == TYPE_ARRAY
+        && arena_read(node_b(local), FIELD_C_PAGE) == 2, 'd');
+
+    lower_ast_program();
+    expect_test(node_kind(node_a(node_a(node_b(main))))
+        == NODE_STRING_EXPRESSION, 'e');
+}

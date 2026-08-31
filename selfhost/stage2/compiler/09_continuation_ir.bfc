@@ -1,4 +1,4 @@
-// typed ASTから第9段階Continuation IRを構築する。
+// typed ASTから第10段階Continuation IRを構築する。
 
 const cell TERM_NONE = 0;
 const cell TERM_GOTO = 1;
@@ -239,6 +239,20 @@ void lower_ast_call(NodeId expression) {
 
 void lower_aggregate_expression(NodeId expression, cell destination, cell length) {
     cell kind = node_kind(expression);
+    if (kind == NODE_STRING_EXPRESSION) {
+        NodeId byte = node_a(expression);
+        cell index;
+        while (index < length) {
+            append_ir_instruction(
+                IR_SET,
+                destination + index,
+                arena_cells[byte.page][byte.slot]
+            );
+            byte = arena_advance(byte, 1);
+            index += 1;
+        }
+        return;
+    }
     if ((kind == NODE_NAME_EXPRESSION || kind == NODE_INDEX_EXPRESSION
         || kind == NODE_FIELD_EXPRESSION)
         && (node_tag(expression) == RESOLVED_LOCAL
@@ -295,7 +309,8 @@ void lower_aggregate_expression(NodeId expression, cell destination, cell length
 
 void lower_ast_expression(NodeId expression, cell destination) {
     cell kind = node_kind(expression);
-    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_ENUM_EXPRESSION) {
+    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_ENUM_EXPRESSION
+        || kind == NODE_LEN_EXPRESSION) {
         append_ir_instruction(IR_SET, destination, node_value(expression));
         return;
     }
@@ -303,7 +318,9 @@ void lower_ast_expression(NodeId expression, cell destination) {
         || ((kind == NODE_INDEX_EXPRESSION || kind == NODE_FIELD_EXPRESSION)
             && (node_tag(expression) == RESOLVED_LOCAL
                 || node_tag(expression) == RESOLVED_GLOBAL))) {
-        if (node_tag(expression) == RESOLVED_GLOBAL) {
+        if (node_tag(expression) == RESOLVED_CONSTANT) {
+            append_ir_instruction(IR_SET, destination, node_value(expression));
+        } else if (node_tag(expression) == RESOLVED_GLOBAL) {
             append_ir_instruction(IR_COPY_GLOBAL, destination, node_value(expression));
         } else {
             append_ir_instruction(IR_COPY, destination, node_value(expression));
