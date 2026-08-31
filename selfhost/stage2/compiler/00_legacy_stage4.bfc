@@ -1,0 +1,16 @@
+// 内部回帰testだけで使う旧第4段階direct parserの状態。
+
+const cell MAX_SYMBOLS = 16;
+const cell MAX_SCOPES = 16;
+const cell SCRATCH_BASE = 32;
+const cell RESTORE_CELL = 63;
+const cell CONTROL_BASE = 64;
+const cell MAX_CONTROL_DEPTH = 31;
+
+cell[MAX_SYMBOLS][MAX_NAME] symbol_text;
+cell[MAX_SYMBOLS] symbol_length;
+cell[MAX_SYMBOLS] symbol_cell;
+cell symbol_count;
+cell[MAX_SCOPES] scope_base;
+cell scope_depth;
+cell control_depth;

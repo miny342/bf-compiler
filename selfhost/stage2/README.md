@@ -8,12 +8,15 @@
 
 コンパイラ本体は役割ごとに分割している。
 
-- `compiler/00_definitions.bfc`: 定数、token型、global状態
+- `compiler/00_definitions.bfc`: production定数、token型、global状態
+- `compiler/00_legacy_stage4.bfc`: 内部test専用の旧direct parser状態
 - `compiler/01_common.bfc`: エラー終了、文字分類、小さな算術補助
 - `compiler/02_lexer.bfc`: streaming字句解析
-- `compiler/03_symbols.bfc`: 識別子とblock scopeの管理
-- `compiler/04_codegen.bfc`: Brainfuckのcell移動、copy、加減算、制御loopの生成
-- `compiler/05_parser.bfc`: 式、宣言、代入、block、`if`、`while`の構文解析
+- `compiler/03_symbols.bfc`: keyword判定とtoken消費
+- `compiler/03_legacy_symbols.bfc`: 内部test専用の旧scalar symbol table
+- `compiler/04_codegen.bfc`: productionと旧parserで共有するBrainfuck出力primitive
+- `compiler/04_legacy_codegen.bfc`: 内部test専用の旧direct codegen helper
+- `compiler/05_parser.bfc`: 内部test専用の第1〜4段階direct parser
 - `compiler/06_arena.bfc`: 16-bit handle、packed arena、identifier intern
 - `compiler/07_ast_parser.bfc`: 第12段階surface syntaxのfull AST構築
 - `compiler/07_macro_expansion.bfc`: block macroの検証、衛生的AST複製、nested展開
@@ -22,9 +25,10 @@
 - `compiler/10_abi_codegen.bfc`: static global、array portal、uniform frame、aggregate outbox ABI
 - `compiler/main.bfc`: production標準入出力とentry point
 
-Rust版`bfc`へは、これらを番号順に複数sourceとして直接渡してもよい。BF上で動くBFC製
-コンパイラの入力は1本のbyte streamなので、セルフコンパイル時は単純に連結して渡す。
-`scripts/concat-stage2-compiler.sh main`がその連結を行い、各ファイル境界へ改行を補う。
+BF上で動くBFC製コンパイラの入力は1本のbyte streamなので、セルフコンパイル時は連結して渡す。
+`scripts/concat-stage2-compiler.sh main`がproduction sourceを連結し、各ファイル境界へ改行を補う。
+`00_legacy_stage4.bfc`、`03_legacy_symbols.bfc`、`04_legacy_codegen.bfc`、`05_parser.bfc`はproductionの
+到達可能性に関与しないため除外する。`test` entryだけは旧回帰を維持するためこれらも連結する。
 
 ## BFCで記述した内部テスト
 
@@ -147,6 +151,8 @@ static regionへ置くためにこのflagを使用している。
 現在のpacked AST arenaは64 page、16,384 logical cellである。handle自体はpage/slotの
 16-bit形式を保ち、容量超過はcompile errorにする。第13段階の自己入力計測では、固定13-cell
 recordが12,567 byteでarenaを使い切ったのに対し、compact recordは15,454 byteまで到達し、同じ
-16,384-cell容量で22.97%改善した。同じ密度で全sourceへ単純外挿すると依然約187,000 cellとなり、
-16-bit handleの65,536-cell上限も超える。次の削減は、segmented arenaを単純に増やすのではなく、
-function単位のscratch arena、streaming lowering、またはcompact IRと組み合わせる必要がある。
+16,384-cell容量で22.97%改善した。さらに旧direct parser専用sourceをproduction連結から除外し、
+production sourceを約177 KBから165,134 byte、Rust-bootstrap BFを約225 MBから199 MBへ削減した。
+compact後の密度で全sourceへ単純外挿すると依然約176,000 cellとなり、16-bit handleの65,536-cell
+上限も超える。次の削減は、function単位のscratch arena、streaming lowering、またはcompact IRと
+組み合わせる必要がある。

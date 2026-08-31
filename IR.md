@@ -694,8 +694,9 @@ Continuation IRのconstructorは次を検証する。
     BFへコンパイルし、外部harnessで生成物を実行検証できる。packed arenaを4,096 cellから
     16,384 cellへ拡張し、旧上限を超える入力を回帰検証している。固定13-cell nodeをkind別3〜13-cell
     recordへcompact化し、同じarenaでの自己入力到達位置を12,567 byteから15,454 byteへ改善した。
-    全sourceの単純外挿は依然約187,000 cellとなるため、完全自己コンパイルにはscratch arena、
-    segmented storage、またはstreaming化が必要。）
+    旧direct parser専用sourceをproduction連結から除外して約12 KB削減した後も、全sourceの単純外挿は
+    約176,000 cellとなるため、完全自己コンパイルにはscratch arena、segmented storage、または
+    streaming化が必要。）
 13. profileに基づき、BF固有templateとcost modelを段階的に追加する。（着手）
 14. `ContinuationProgram → ContinuationProgram`のCFG縮約passを追加し、dispatcher case数と
     continuation IDを削減する。

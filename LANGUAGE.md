@@ -984,8 +984,9 @@ aggregate portalを使用する。[ABI.md](ABI.md)のbackendは`D = 8`と`D = 16
 完全なself-host compilerは未実装である。packed AST/IR arenaは第13段階の容量回帰として
 4,096 cellから16,384 cellへ拡張した。さらに固定13-cell nodeをkind別3〜13-cell recordへ変更し、
 address幅を保ったまま自己入力の到達位置を12,567 byteから15,454 byteへ伸ばしている。compiler全体の
-実測値はこの上限も超えるため、後続ではscratch arena、segmented storage、streaming loweringの
-組み合わせが必要になる。
+production連結から旧direct parser専用sourceも除外したが、全sourceの単純外挿は約176,000 cellで
+この上限を超える。後続ではscratch arena、segmented storage、streaming loweringの組み合わせが
+必要になる。
 
 ### セルフホスト用targetのテープ容量
 

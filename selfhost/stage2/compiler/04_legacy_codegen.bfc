@@ -1,0 +1,110 @@
+// 内部回帰testだけで使う旧第4段階direct codegen helper。
+
+void emit_copy(cell source, cell destination) {
+    emit_clear(destination);
+    emit_clear(RESTORE_CELL);
+
+    emit_move_to(source);
+    compiler_output!('[');
+    compiler_output!('-');
+    emit_move_to(destination);
+    compiler_output!('+');
+    emit_move_to(RESTORE_CELL);
+    compiler_output!('+');
+    emit_move_to(source);
+    compiler_output!(']');
+
+    emit_move_to(RESTORE_CELL);
+    compiler_output!('[');
+    compiler_output!('-');
+    emit_move_to(source);
+    compiler_output!('+');
+    emit_move_to(RESTORE_CELL);
+    compiler_output!(']');
+}
+
+void check_scratch(cell destination) {
+    if (destination >= RESTORE_CELL) {
+        fail();
+    }
+}
+
+cell allocate_control_pair() {
+    if (control_depth == MAX_CONTROL_DEPTH) {
+        fail();
+    }
+    cell first = CONTROL_BASE + control_depth + control_depth;
+    control_depth += 1;
+    return first;
+}
+
+void release_control_pair() {
+    control_depth -= 1;
+}
+
+void emit_booleanize(cell destination) {
+    cell temporary = destination + 1;
+    check_scratch(temporary);
+    emit_clear(temporary);
+    emit_loop_open(destination);
+    emit_clear(destination);
+    emit_move_to(temporary);
+    compiler_output!('+');
+    emit_loop_close(destination);
+    emit_transfer(temporary, destination, 0);
+}
+
+void emit_not(cell destination) {
+    cell flag = destination + 1;
+    check_scratch(flag);
+    emit_constant(flag, 1);
+    emit_loop_open(destination);
+    emit_clear(destination);
+    emit_clear(flag);
+    emit_loop_close(destination);
+    emit_transfer(flag, destination, 0);
+}
+
+// `left < right`をunsigned cell比較として生成する。両operandを消費し、
+// resultをleftへ置く。mod 256の減算結果だけを見る実装では0と255を
+// 正しく比較できないため、rightを数え下げながらleftの枯渇を検出する。
+void emit_less(cell left, cell right) {
+    cell condition = right + 1;
+    cell otherwise = right + 2;
+    cell result = right + 3;
+    check_scratch(result);
+    emit_clear(result);
+
+    emit_loop_open(right);
+    emit_move_to(right);
+    compiler_output!('-');
+    emit_copy(left, condition);
+    emit_booleanize(condition);
+    emit_constant(otherwise, 1);
+
+    emit_loop_open(condition);
+    emit_clear(condition);
+    emit_clear(otherwise);
+    emit_move_to(left);
+    compiler_output!('-');
+    emit_loop_close(condition);
+
+    emit_loop_open(otherwise);
+    emit_clear(otherwise);
+    emit_constant(result, 1);
+    emit_clear(right);
+    emit_loop_close(otherwise);
+    emit_loop_close(right);
+
+    emit_clear(left);
+    emit_transfer(result, left, 0);
+}
+
+void emit_swap(cell left, cell right) {
+    cell temporary = right + 1;
+    check_scratch(temporary);
+    emit_clear(temporary);
+    emit_transfer(left, temporary, 0);
+    emit_transfer(right, left, 0);
+    emit_transfer(temporary, right, 0);
+}

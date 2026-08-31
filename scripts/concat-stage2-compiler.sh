@@ -11,6 +11,13 @@ fi
 
 # ファイル境界で字句が連結しないよう、各ソースの後ろに改行を補う。
 for source in "$repo_dir"/selfhost/stage2/compiler/[0-9][0-9]_*.bfc; do
+    if [[ "$entry" == main ]]; then
+        case "${source##*/}" in
+            00_legacy_stage4.bfc|03_legacy_symbols.bfc|04_legacy_codegen.bfc|05_parser.bfc)
+                continue
+                ;;
+        esac
+    fi
     cat "$source"
     printf '\n'
 done
