@@ -280,14 +280,22 @@ pub fn run_with_options(
     }
 
     let parse_started = options.collect_timings.then(Instant::now);
-    let instructions = parse_with_profile(source, options.profile.as_ref().map(|p| &p.map))?;
-    let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
-    let build_started = options.collect_timings.then(Instant::now);
-    let optimized = optimize(
-        &instructions,
-        options.profile.as_ref().map(|profile| &profile.map),
-    );
-    let build_elapsed = build_started.map_or(Duration::ZERO, |started| started.elapsed());
+    let (optimized, parse_elapsed, build_elapsed) = if let Some(profile) = &options.profile {
+        let instructions = parse_with_profile(source, Some(&profile.map))?;
+        let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let build_started = options.collect_timings.then(Instant::now);
+        let optimized = optimize(&instructions, Some(&profile.map));
+        let build_elapsed = build_started.map_or(Duration::ZERO, |started| started.elapsed());
+        (optimized, parse_elapsed, build_elapsed)
+    } else {
+        // Generated self-host programs contain very long pointer runs. Building one
+        // 40-byte `Instruction` per BF byte before immediately coalescing those runs
+        // multiplies a large source into tens of gigabytes. Build the unprofiled fast
+        // representation directly instead.
+        let optimized = parse_optimized_unprofiled(source)?;
+        let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
+        (optimized, parse_elapsed, Duration::ZERO)
+    };
     let execute_started = (options.collect_timings || options.profile.is_some()).then(Instant::now);
     let mut result = execute(
         &optimized,
@@ -406,7 +414,7 @@ enum FastInstruction {
         site: ResolvedProfileSite,
         mixed: bool,
         amount: isize,
-        source_offsets: Box<[usize]>,
+        source_offsets: SourceOffsets,
     },
     Add {
         site: ResolvedProfileSite,
@@ -461,7 +469,7 @@ enum LoopOptimization {
     },
     Scan {
         amount: isize,
-        source_offsets: Box<[usize]>,
+        source_offsets: SourceOffsets,
     },
     Transfer {
         source_delta: u8,
@@ -472,6 +480,175 @@ enum LoopOptimization {
         body_rle_count: u64,
         body_pointer_distance: u64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceOffsetRange {
+    start: usize,
+    len: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceOffsets {
+    ranges: Vec<SourceOffsetRange>,
+    len: usize,
+}
+
+impl SourceOffsets {
+    fn push(&mut self, offset: usize) {
+        if let Some(last) = self.ranges.last_mut()
+            && last.start.checked_add(last.len) == Some(offset)
+        {
+            last.len += 1;
+        } else {
+            self.ranges.push(SourceOffsetRange {
+                start: offset,
+                len: 1,
+            });
+        }
+        self.len += 1;
+    }
+
+    const fn len(&self) -> usize {
+        self.len
+    }
+
+    fn get(&self, mut index: usize) -> usize {
+        assert!(index < self.len);
+        for range in &self.ranges {
+            if index < range.len {
+                return range.start + index;
+            }
+            index -= range.len;
+        }
+        unreachable!("validated source offset index has a containing range")
+    }
+}
+
+struct FastBlock {
+    instructions: Vec<FastInstruction>,
+    last_rle: Option<RleOp>,
+    opening_offset: Option<usize>,
+}
+
+impl FastBlock {
+    fn root() -> Self {
+        Self {
+            instructions: Vec::new(),
+            last_rle: None,
+            opening_offset: None,
+        }
+    }
+
+    fn nested(opening_offset: usize) -> Self {
+        Self {
+            instructions: Vec::new(),
+            last_rle: None,
+            opening_offset: Some(opening_offset),
+        }
+    }
+
+    fn push_move(&mut self, op: RleOp, source_offset: usize) {
+        let amount = if op == RleOp::Right { 1 } else { -1 };
+        if self.last_rle == Some(op)
+            && let Some(FastInstruction::Move {
+                amount: current,
+                source_offsets,
+                ..
+            }) = self.instructions.last_mut()
+        {
+            *current += amount;
+            source_offsets.push(source_offset);
+        } else {
+            let mut source_offsets = SourceOffsets::default();
+            source_offsets.push(source_offset);
+            self.instructions.push(FastInstruction::Move {
+                site: ResolvedProfileSite::ROOT,
+                mixed: false,
+                amount,
+                source_offsets,
+            });
+        }
+        self.last_rle = Some(op);
+    }
+
+    fn push_add(&mut self, op: RleOp) {
+        let amount = if op == RleOp::Increment { 1 } else { 255 };
+        if self.last_rle == Some(op)
+            && let Some(FastInstruction::Add {
+                amount: current,
+                raw_count,
+                ..
+            }) = self.instructions.last_mut()
+        {
+            *current = current.wrapping_add(amount);
+            *raw_count += 1;
+        } else {
+            self.instructions.push(FastInstruction::Add {
+                site: ResolvedProfileSite::ROOT,
+                mixed: false,
+                amount,
+                raw_count: 1,
+            });
+        }
+        self.last_rle = Some(op);
+    }
+
+    fn push_non_rle(&mut self, instruction: FastInstruction) {
+        self.instructions.push(instruction);
+        self.last_rle = None;
+    }
+}
+
+fn parse_optimized_unprofiled(source: &[u8]) -> Result<Vec<FastInstruction>, Error> {
+    let mut blocks = vec![FastBlock::root()];
+    for (source_offset, byte) in source.iter().copied().enumerate() {
+        let current = blocks.last_mut().unwrap();
+        match byte {
+            b'>' => current.push_move(RleOp::Right, source_offset),
+            b'<' => current.push_move(RleOp::Left, source_offset),
+            b'+' => current.push_add(RleOp::Increment),
+            b'-' => current.push_add(RleOp::Decrement),
+            b'.' => current.push_non_rle(FastInstruction::Output {
+                site: ResolvedProfileSite::ROOT,
+                mixed: false,
+            }),
+            b',' => current.push_non_rle(FastInstruction::Input {
+                site: ResolvedProfileSite::ROOT,
+                mixed: false,
+            }),
+            b'[' => {
+                current.last_rle = None;
+                blocks.push(FastBlock::nested(source_offset));
+            }
+            b']' => {
+                if blocks.len() == 1 {
+                    return Err(Error::UnmatchedClosingBracket {
+                        offset: source_offset,
+                    });
+                }
+                let body = blocks.pop().unwrap().instructions;
+                let optimization = recognize_fast_loop(&body);
+                blocks
+                    .last_mut()
+                    .unwrap()
+                    .push_non_rle(FastInstruction::Loop {
+                        site: ResolvedProfileSite::ROOT,
+                        mixed: false,
+                        body,
+                        optimization,
+                    });
+            }
+            _ => {}
+        }
+    }
+
+    if blocks.len() != 1 {
+        return Err(Error::UnmatchedOpeningBracket {
+            offset: blocks[1].opening_offset.unwrap(),
+        });
+    }
+    Ok(blocks.pop().unwrap().instructions)
 }
 
 fn optimize(
@@ -511,11 +688,10 @@ fn optimize_range(
                 } else {
                     -magnitude
                 };
-                let source_offsets = instructions[run_start..position]
-                    .iter()
-                    .map(|instruction| instruction.source_offset)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice();
+                let mut source_offsets = SourceOffsets::default();
+                for instruction in &instructions[run_start..position] {
+                    source_offsets.push(instruction.source_offset);
+                }
                 result.push(FastInstruction::Move {
                     site,
                     mixed,
@@ -720,6 +896,89 @@ fn recognize_loop(
         body_raw_count: (end - start) as u64,
         body_rle_count: rle_count,
         body_pointer_distance: pointer_distance,
+    })
+}
+
+fn recognize_fast_loop(body: &[FastInstruction]) -> Option<LoopOptimization> {
+    if body.is_empty() {
+        return None;
+    }
+
+    if let [
+        FastInstruction::Add {
+            amount, raw_count, ..
+        },
+    ] = body
+        && amount % 2 == 1
+    {
+        return Some(LoopOptimization::Clear {
+            delta: *amount,
+            body_raw_count: *raw_count,
+            body_rle_count: 1,
+        });
+    }
+
+    if let [
+        FastInstruction::Move {
+            amount,
+            source_offsets,
+            ..
+        },
+    ] = body
+    {
+        return Some(LoopOptimization::Scan {
+            amount: *amount,
+            source_offsets: source_offsets.clone(),
+        });
+    }
+
+    let mut pointer = 0_isize;
+    let mut min_offset = 0_isize;
+    let mut max_offset = 0_isize;
+    let mut updates = std::collections::BTreeMap::<isize, u8>::new();
+    let mut body_raw_count = 0_u64;
+    let mut body_pointer_distance = 0_u64;
+
+    for instruction in body {
+        match instruction {
+            FastInstruction::Move {
+                amount,
+                source_offsets,
+                ..
+            } => {
+                let raw_count = source_offsets.len() as u64;
+                body_raw_count += raw_count;
+                body_pointer_distance += raw_count;
+                pointer = pointer.checked_add(*amount)?;
+                min_offset = min_offset.min(pointer);
+                max_offset = max_offset.max(pointer);
+            }
+            FastInstruction::Add {
+                amount, raw_count, ..
+            } => {
+                body_raw_count += *raw_count;
+                let value = updates.entry(pointer).or_default();
+                *value = value.wrapping_add(*amount);
+            }
+            FastInstruction::Input { .. }
+            | FastInstruction::Output { .. }
+            | FastInstruction::Loop { .. } => return None,
+        }
+    }
+
+    let source_delta = updates.remove(&0).unwrap_or(0);
+    if pointer != 0 || !matches!(source_delta, 1 | 255) {
+        return None;
+    }
+    updates.retain(|_, factor| *factor != 0);
+    Some(LoopOptimization::Transfer {
+        source_delta,
+        updates: updates.into_iter().collect::<Vec<_>>().into_boxed_slice(),
+        min_offset,
+        max_offset,
+        body_raw_count,
+        body_rle_count: body.len() as u64,
+        body_pointer_distance,
     })
 }
 
@@ -1287,13 +1546,13 @@ impl<'a> Machine<'a> {
             .is_some_and(|position| self.grow_tape || position < self.tape.len())
     }
 
-    fn move_pointer(&mut self, amount: isize, source_offsets: &[usize]) -> Result<(), Error> {
+    fn move_pointer(&mut self, amount: isize, source_offsets: &SourceOffsets) -> Result<(), Error> {
         if amount > 0 {
             let count = amount as usize;
             let Some(destination) = self.pointer.checked_add(count) else {
                 let valid_steps = self.tape.len() - 1 - self.pointer;
                 return Err(Error::TapeOverflow {
-                    instruction_offset: source_offsets[valid_steps],
+                    instruction_offset: source_offsets.get(valid_steps),
                 });
             };
             if destination >= self.tape.len() {
@@ -1302,7 +1561,7 @@ impl<'a> Machine<'a> {
                 } else {
                     let valid_steps = self.tape.len() - 1 - self.pointer;
                     return Err(Error::TapeOverflow {
-                        instruction_offset: source_offsets[valid_steps],
+                        instruction_offset: source_offsets.get(valid_steps),
                     });
                 }
             }
@@ -1312,7 +1571,7 @@ impl<'a> Machine<'a> {
             let count = amount.unsigned_abs();
             if count > self.pointer {
                 return Err(Error::TapeUnderflow {
-                    instruction_offset: source_offsets[self.pointer],
+                    instruction_offset: source_offsets.get(self.pointer),
                 });
             }
             self.pointer -= count;
@@ -1672,6 +1931,28 @@ mod tests {
             run_with_stats(&overflow, b""),
             run_reference(&overflow, b""),
         );
+    }
+
+    #[test]
+    fn unprofiled_parser_compacts_pointer_source_offsets_into_ranges() {
+        let optimized = parse_optimized_unprofiled(b">>> comment >>>").unwrap();
+        let [
+            FastInstruction::Move {
+                amount,
+                source_offsets,
+                ..
+            },
+        ] = optimized.as_slice()
+        else {
+            panic!("expected one coalesced pointer run");
+        };
+        assert_eq!(*amount, 6);
+        assert_eq!(source_offsets.len(), 6);
+        assert_eq!(source_offsets.ranges.len(), 2);
+        assert_eq!(source_offsets.get(0), 0);
+        assert_eq!(source_offsets.get(2), 2);
+        assert_eq!(source_offsets.get(3), 12);
+        assert_eq!(source_offsets.get(5), 14);
     }
 
     #[test]
