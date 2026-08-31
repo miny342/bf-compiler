@@ -1,4 +1,4 @@
-// 第10段階programのfile-scope収集、型/定数解決、名前解決、型検査。
+// 第11段階programのfile-scope収集、型/定数解決、名前解決、型検査。
 
 NodeId[256] semantic_local_names;
 cell[256] semantic_local_slots;
@@ -20,6 +20,9 @@ const cell RESOLVED_LOCAL_DYNAMIC = 2;
 const cell RESOLVED_GLOBAL_DYNAMIC = 3;
 const cell RESOLVED_VALUE_PROJECT = 4;
 const cell RESOLVED_CONSTANT = 5;
+
+const cell DYNAMIC_PROJECTION_INDEX = 1;
+const cell DYNAMIC_PROJECTION_CONSTANT = 2;
 
 const cell TYPE_STATE_UNVISITED = 0;
 const cell TYPE_STATE_VISITING = 1;
@@ -448,6 +451,13 @@ cell expression_is_static_place(NodeId expression) {
             || node_tag(expression) == RESOLVED_GLOBAL);
 }
 
+cell expression_is_dynamic_place(NodeId expression) {
+    cell kind = node_kind(expression);
+    return (kind == NODE_INDEX_EXPRESSION || kind == NODE_FIELD_EXPRESSION)
+        && (node_tag(expression) == RESOLVED_LOCAL_DYNAMIC
+            || node_tag(expression) == RESOLVED_GLOBAL_DYNAMIC);
+}
+
 NodeId find_struct_field(NodeId ty, NodeId name) {
     NodeId field = node_a(ty);
     while (!node_is_null(field)) {
@@ -557,25 +567,46 @@ NodeId analyze_ast_expression(NodeId expression) {
                     fail();
                 }
                 node_set_value(expression, node_value(base_expression) + offset);
+            } else if (expression_is_dynamic_place(base_expression)) {
+                node_set_tag(expression, node_tag(base_expression));
+                node_set_value(expression, node_value(base_expression));
+                arena_write(
+                    expression,
+                    FIELD_NAME_PAGE,
+                    offset
+                );
+                arena_write(
+                    expression,
+                    FIELD_NAME_SLOT,
+                    DYNAMIC_PROJECTION_CONSTANT
+                );
             } else {
                 node_set_tag(expression, RESOLVED_VALUE_PROJECT);
                 node_set_value(expression, offset);
             }
         } else {
-            if (is_256 || element_cells != 1
-                || node_kind(base_expression) != NODE_NAME_EXPRESSION) {
+            if (is_256 || element_cells == 0) {
                 fail();
             }
             cell storage = node_tag(base_expression);
-            if (storage == RESOLVED_LOCAL) {
+            if (expression_is_static_place(base_expression)
+                && storage == RESOLVED_LOCAL) {
                 node_set_tag(expression, RESOLVED_LOCAL_DYNAMIC);
-            } else if (storage == RESOLVED_GLOBAL) {
+            } else if (expression_is_static_place(base_expression)
+                && storage == RESOLVED_GLOBAL) {
                 node_set_tag(expression, RESOLVED_GLOBAL_DYNAMIC);
+            } else if (expression_is_dynamic_place(base_expression)) {
+                node_set_tag(expression, storage);
             } else {
                 fail();
             }
             node_set_value(expression, node_value(base_expression));
-            arena_write(expression, FIELD_NAME_PAGE, length);
+            arena_write(expression, FIELD_NAME_PAGE, element_cells);
+            arena_write(
+                expression,
+                FIELD_NAME_SLOT,
+                DYNAMIC_PROJECTION_INDEX
+            );
         }
         set_expression_type(expression, element_type);
         return element_type;
@@ -594,6 +625,15 @@ NodeId analyze_ast_expression(NodeId expression) {
                 fail();
             }
             node_set_value(expression, node_value(base_expression) + offset);
+        } else if (expression_is_dynamic_place(base_expression)) {
+            node_set_tag(expression, node_tag(base_expression));
+            node_set_value(expression, node_value(base_expression));
+            arena_write(expression, FIELD_NAME_PAGE, offset);
+            arena_write(
+                expression,
+                FIELD_NAME_SLOT,
+                DYNAMIC_PROJECTION_CONSTANT
+            );
         } else {
             node_set_tag(expression, RESOLVED_VALUE_PROJECT);
             node_set_value(expression, offset);

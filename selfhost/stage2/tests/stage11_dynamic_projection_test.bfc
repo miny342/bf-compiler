@@ -1,0 +1,36 @@
+cell[] stage11_dynamic_projection_test_source = "struct P{cell x;cell y;}void main(){P[3] p;cell i=input();p[i].x=7;P q=p[i];cell[2][3] a;cell r=input();cell c=input();a[r][c]=9;output(q.x);}";
+
+void test_stage11_dynamic_projection() {
+    reset_test_input(12);
+    parse_ast_program();
+    analyze_ast_program();
+
+    NodeId main = first_function;
+    NodeId declaration = node_a(node_b(main));
+    NodeId index_declaration = node_next(declaration);
+    NodeId field_assignment = node_next(index_declaration);
+    NodeId field = node_a(field_assignment);
+    NodeId aggregate_index = node_a(field);
+    expect_test(node_tag(field) == RESOLVED_LOCAL_DYNAMIC
+        && arena_read(field, FIELD_NAME_SLOT)
+            == DYNAMIC_PROJECTION_CONSTANT, 'f');
+    expect_test(node_tag(aggregate_index) == RESOLVED_LOCAL_DYNAMIC
+        && arena_read(aggregate_index, FIELD_NAME_SLOT)
+            == DYNAMIC_PROJECTION_INDEX
+        && arena_read(aggregate_index, FIELD_NAME_PAGE) == 2, 'g');
+
+    NodeId aggregate_copy = node_next(field_assignment);
+    expect_test(type_is_aggregate(expression_type(node_a(aggregate_copy)))
+        && node_tag(node_a(aggregate_copy)) == RESOLVED_LOCAL_DYNAMIC, 'h');
+
+    lower_ast_program();
+    NodeId instruction = node_a(node_a(node_c(main)));
+    cell saw_scaled_offset;
+    while (!node_is_null(instruction)) {
+        if (node_tag(instruction) == IR_OFFSET_ADD_SCALED) {
+            saw_scaled_offset = 1;
+        }
+        instruction = node_next(instruction);
+    }
+    expect_test(saw_scaled_offset, 'i');
+}

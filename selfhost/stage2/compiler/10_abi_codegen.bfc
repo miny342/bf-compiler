@@ -1,4 +1,4 @@
-// aggregate outboxを持つ第10段階Continuation ABI backend。
+// 16-bit logical offset portalとaggregate outboxを持つ第11段階Continuation ABI backend。
 // 全functionを同じframe幅にすることで、直接・相互再帰を同じcall/return
 // sequenceで扱う。PCとreturn PCはNodeIdのpage/slotをそのまま使う。
 
@@ -59,6 +59,47 @@ void emit_frame_copy(cell source, cell destination) {
     emit_move_to(source);
     compiler_output!(']');
     emit_transfer(FRAME_RESTORE, source, 0);
+}
+
+void emit_logical_offset_increment(cell low, cell high) {
+    emit_add_constant(low, 1);
+    emit_constant(FRAME_BRANCH, 1);
+    emit_frame_copy(low, FRAME_SCRATCH_1);
+    emit_loop_open(FRAME_SCRATCH_1);
+    emit_clear(FRAME_SCRATCH_1);
+    emit_clear(FRAME_BRANCH);
+    emit_loop_close(FRAME_SCRATCH_1);
+    emit_loop_open(FRAME_BRANCH);
+    emit_clear(FRAME_BRANCH);
+    emit_add_constant(high, 1);
+    emit_loop_close(FRAME_BRANCH);
+}
+
+void emit_offset_instruction(NodeId instruction) {
+    cell low = physical_frame_slot(node_value(instruction));
+    cell high = physical_frame_slot(
+        arena_read(instruction, FIELD_NAME_PAGE)
+    );
+    cell amount = arena_read(instruction, FIELD_A_SLOT);
+    if (node_tag(instruction) == IR_OFFSET_ADD_CONSTANT) {
+        while (amount != 0) {
+            emit_logical_offset_increment(low, high);
+            amount -= 1;
+        }
+        return;
+    }
+    cell source = physical_frame_slot(
+        arena_read(instruction, FIELD_A_PAGE)
+    );
+    emit_loop_open(source);
+    emit_move_to(source);
+    compiler_output!('-');
+    cell step;
+    while (step < amount) {
+        emit_logical_offset_increment(low, high);
+        step += 1;
+    }
+    emit_loop_close(source);
 }
 
 void emit_frame_booleanize(cell destination) {
@@ -400,9 +441,20 @@ void emit_array_instruction(NodeId instruction) {
     cell base = arena_read(instruction, FIELD_A_PAGE);
     cell length = arena_read(instruction, FIELD_A_SLOT);
     cell storage = arena_read(instruction, FIELD_B_PAGE);
+    cell offset_high = arena_read(instruction, FIELD_B_SLOT);
     if (kind == IR_ARRAY_LOAD) {
         emit_clear(physical_frame_slot(data));
     }
+    // A valid access into the current bounded physical region has a zero high
+    // byte.  A nonzero high byte is out of range and takes the no-op UB path.
+    emit_constant(FRAME_SCRATCH_2, 1);
+    cell high_slot = physical_frame_slot(offset_high);
+    emit_loop_open(high_slot);
+    emit_clear(high_slot);
+    emit_clear(FRAME_SCRATCH_2);
+    emit_loop_close(high_slot);
+    emit_loop_open(FRAME_SCRATCH_2);
+    emit_clear(FRAME_SCRATCH_2);
     emit_constant(FRAME_BRANCH, 1);
     emit_array_countdown_level(
         kind,
@@ -414,6 +466,7 @@ void emit_array_instruction(NodeId instruction) {
         length - 1,
         stage8_frame_cells
     );
+    emit_loop_close(FRAME_SCRATCH_2);
 }
 
 void emit_ir_instruction(NodeId instruction) {
@@ -468,6 +521,9 @@ void emit_ir_instruction(NodeId instruction) {
     } else if (kind == IR_ARRAY_LOAD || kind == IR_ARRAY_STORE
         || kind == IR_ARRAY_ADD || kind == IR_ARRAY_SUBTRACT) {
         emit_array_instruction(instruction);
+    } else if (kind == IR_OFFSET_ADD_SCALED
+        || kind == IR_OFFSET_ADD_CONSTANT) {
+        emit_offset_instruction(instruction);
     } else if (kind == IR_NOT) {
         emit_frame_not(destination);
     } else if (kind == IR_BOOLEANIZE) {
@@ -770,7 +826,7 @@ void emit_continuation_program() {
     compiler_output!(']');
 }
 
-void compile_program_stage10() {
+void compile_program_stage11() {
     parse_ast_program();
     analyze_ast_program();
     lower_ast_program();

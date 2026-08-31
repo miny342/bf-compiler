@@ -1,4 +1,4 @@
-// 第10段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
+// 第11段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
 
 const cell AST_TYPE_VOID = 0;
 const cell AST_TYPE_CELL = 1;

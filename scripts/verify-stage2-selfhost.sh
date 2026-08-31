@@ -29,8 +29,8 @@ printf 'void main(){cell value;if(value&1);}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage8-lexer.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$work_dir/invalid-stage8-lexer.actual"; then
-    echo "stage-10 compiler accepted a single ampersand" >&2
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$work_dir/invalid-stage8-lexer.actual"; then
+    echo "stage-11 compiler accepted a single ampersand" >&2
     exit 1
 fi
 
@@ -38,8 +38,8 @@ printf 'cell broken(cell value){if(value)return 1;}void main(){}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage8-return.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$work_dir/invalid-stage8-return.actual"; then
-    echo "stage-10 compiler accepted a missing scalar return path" >&2
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$work_dir/invalid-stage8-return.actual"; then
+    echo "stage-11 compiler accepted a missing scalar return path" >&2
     exit 1
 fi
 
@@ -47,8 +47,8 @@ printf 'void main(){cell[4] values;output(values);}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage8-whole-array.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$work_dir/invalid-stage8-whole-array.actual"; then
-    echo "stage-10 compiler accepted a whole array as a scalar" >&2
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$work_dir/invalid-stage8-whole-array.actual"; then
+    echo "stage-11 compiler accepted a whole array as a scalar" >&2
     exit 1
 fi
 
@@ -56,8 +56,8 @@ printf 'void main(){cell[4] values;output(values[4]);}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage8-bounds.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$work_dir/invalid-stage8-bounds.actual"; then
-    echo "stage-10 compiler accepted an out-of-bounds constant index" >&2
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$work_dir/invalid-stage8-bounds.actual"; then
+    echo "stage-11 compiler accepted an out-of-bounds constant index" >&2
     exit 1
 fi
 
@@ -65,12 +65,12 @@ stage7_bf="$work_dir/stage7-globals.bf"
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
     <"$repo_dir/selfhost/stage2/examples/stage7_globals.bfc" >"$stage7_bf"
-if LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$stage7_bf"; then
-    echo "stage-10 compiler rejected stage7_globals.bfc" >&2
+if LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$stage7_bf"; then
+    echo "stage-11 compiler rejected stage7_globals.bfc" >&2
     exit 1
 fi
 if LC_ALL=C grep -q '[^][<>+.,-]' "$stage7_bf"; then
-    echo "stage-10 compiler emitted a non-Brainfuck byte for stage7_globals.bfc" >&2
+    echo "stage-11 compiler emitted a non-Brainfuck byte for stage7_globals.bfc" >&2
     exit 1
 fi
 
@@ -86,8 +86,8 @@ printf 'void take(cell[3] value){}void main(){cell[4] value;take(value);}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage8-array-type.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$work_dir/invalid-stage8-array-type.actual"; then
-    echo "stage-10 compiler accepted mismatched array argument lengths" >&2
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$work_dir/invalid-stage8-array-type.actual"; then
+    echo "stage-11 compiler accepted mismatched array argument lengths" >&2
     exit 1
 fi
 
@@ -95,9 +95,9 @@ stage8_bf="$work_dir/stage8-aggregates.bf"
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
     <"$repo_dir/selfhost/stage2/examples/stage8_aggregates.bfc" >"$stage8_bf"
-if LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$stage8_bf" \
+if LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$stage8_bf" \
     || LC_ALL=C grep -q '[^][<>+.,-]' "$stage8_bf"; then
-    echo "stage-10 compiler rejected or corrupted stage8_aggregates.bfc" >&2
+    echo "stage-11 compiler rejected or corrupted stage8_aggregates.bfc" >&2
     exit 1
 fi
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
@@ -111,9 +111,9 @@ snapshot_bf="$work_dir/stage8-snapshots.bf"
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
     <"$repo_dir/selfhost/stage2/examples/stage8_snapshots.bfc" >"$snapshot_bf"
-if LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$snapshot_bf" \
+if LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$snapshot_bf" \
     || LC_ALL=C grep -q '[^][<>+.,-]' "$snapshot_bf"; then
-    echo "stage-10 compiler rejected or corrupted stage8_snapshots.bfc" >&2
+    echo "stage-11 compiler rejected or corrupted stage8_snapshots.bfc" >&2
     exit 1
 fi
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
@@ -126,8 +126,8 @@ printf 'enum Bad{One=1}void main(){}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage9-enum.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$work_dir/invalid-stage9-enum.actual"; then
-    echo "stage-10 compiler accepted an enum without a zero variant" >&2
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$work_dir/invalid-stage9-enum.actual"; then
+    echo "stage-11 compiler accepted an enum without a zero variant" >&2
     exit 1
 fi
 
@@ -135,8 +135,8 @@ printf 'struct Loop{Loop value;}void main(){}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage9-cycle.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$work_dir/invalid-stage9-cycle.actual"; then
-    echo "stage-10 compiler accepted a recursive struct layout" >&2
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$work_dir/invalid-stage9-cycle.actual"; then
+    echo "stage-11 compiler accepted a recursive struct layout" >&2
     exit 1
 fi
 
@@ -144,9 +144,9 @@ stage9_types_bf="$work_dir/stage9-types.bf"
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
     <"$repo_dir/selfhost/stage2/examples/stage9_types.bfc" >"$stage9_types_bf"
-if LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$stage9_types_bf" \
+if LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$stage9_types_bf" \
     || LC_ALL=C grep -q '[^][<>+.,-]' "$stage9_types_bf"; then
-    echo "stage-10 compiler rejected or corrupted stage9_types.bfc" >&2
+    echo "stage-11 compiler rejected or corrupted stage9_types.bfc" >&2
     exit 1
 fi
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
@@ -160,9 +160,9 @@ cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
     <"$repo_dir/selfhost/stage2/examples/stage9_projections.bfc" \
     >"$stage9_projections_bf"
-if LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$stage9_projections_bf" \
+if LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$stage9_projections_bf" \
     || LC_ALL=C grep -q '[^][<>+.,-]' "$stage9_projections_bf"; then
-    echo "stage-10 compiler rejected or corrupted stage9_projections.bfc" >&2
+    echo "stage-11 compiler rejected or corrupted stage9_projections.bfc" >&2
     exit 1
 fi
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
@@ -176,9 +176,9 @@ printf 'const cell A=B;const cell B=A;void main(){}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage10-constant-cycle.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' \
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' \
     "$work_dir/invalid-stage10-constant-cycle.actual"; then
-    echo "stage-10 compiler accepted a constant cycle" >&2
+    echo "stage-11 compiler accepted a constant cycle" >&2
     exit 1
 fi
 
@@ -186,9 +186,9 @@ printf 'void main(){cell[2] other;cell[] value=other;}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage10-inferred-array.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' \
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' \
     "$work_dir/invalid-stage10-inferred-array.actual"; then
-    echo "stage-10 compiler accepted non-string cell[] inference" >&2
+    echo "stage-11 compiler accepted non-string cell[] inference" >&2
     exit 1
 fi
 
@@ -196,9 +196,9 @@ printf 'void main(){cell[2] value="abc";}' | \
     cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
         -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
         >"$work_dir/invalid-stage10-string-length.actual"
-if ! LC_ALL=C grep -q 'BFC_STAGE10_ERROR' \
+if ! LC_ALL=C grep -q 'BFC_STAGE11_ERROR' \
     "$work_dir/invalid-stage10-string-length.actual"; then
-    echo "stage-10 compiler accepted a mismatched string length" >&2
+    echo "stage-11 compiler accepted a mismatched string length" >&2
     exit 1
 fi
 
@@ -207,9 +207,9 @@ cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
     <"$repo_dir/selfhost/stage2/examples/stage10_compile_time.bfc" \
     >"$stage10_bf"
-if LC_ALL=C grep -q 'BFC_STAGE10_ERROR' "$stage10_bf" \
+if LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$stage10_bf" \
     || LC_ALL=C grep -q '[^][<>+.,-]' "$stage10_bf"; then
-    echo "stage-10 compiler rejected or corrupted stage10_compile_time.bfc" >&2
+    echo "stage-11 compiler rejected or corrupted stage10_compile_time.bfc" >&2
     exit 1
 fi
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
@@ -220,4 +220,23 @@ printf '\003\101\012\000\004\102\042\134\041\002\002\003' \
 cmp "$work_dir/stage10-compile-time.expected" \
     "$work_dir/stage10-compile-time.actual"
 
-echo "stage-10 self-host verification passed"
+stage11_bf="$work_dir/stage11-dynamic-projection.bf"
+cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
+    -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$compiler_bf" \
+    <"$repo_dir/selfhost/stage2/examples/stage11_dynamic_projection.bfc" \
+    >"$stage11_bf"
+if LC_ALL=C grep -q 'BFC_STAGE11_ERROR' "$stage11_bf" \
+    || LC_ALL=C grep -q '[^][<>+.,-]' "$stage11_bf"; then
+    echo "stage-11 compiler rejected or corrupted stage11_dynamic_projection.bfc" >&2
+    exit 1
+fi
+printf '\001\001\002\002' | \
+    cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
+        -p bf-interpreter --bin bf-interpreter -- "$stage11_bf" \
+        >"$work_dir/stage11-dynamic-projection.actual"
+printf '\012\024\007\122\111\036' \
+    >"$work_dir/stage11-dynamic-projection.expected"
+cmp "$work_dir/stage11-dynamic-projection.expected" \
+    "$work_dir/stage11-dynamic-projection.actual"
+
+echo "stage-11 self-host verification passed"

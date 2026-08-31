@@ -1,0 +1,38 @@
+struct Pair {
+    cell left;
+    cell right;
+}
+
+Pair[3] shared;
+
+Pair produce() {
+    output('R');
+    Pair value;
+    value.left = 30;
+    value.right = 40;
+    return value;
+}
+
+cell choose() {
+    output('I');
+    return input();
+}
+
+void main() {
+    cell index = input();
+    shared[index].left = 10;
+    shared[index].right = 20;
+    Pair copied = shared[index];
+    output(copied.left);
+    output(copied.right);
+
+    cell[2][3] pages;
+    cell row = input();
+    cell column = input();
+    pages[row][column] = 7;
+    output(pages[row][column]);
+
+    Pair[3] local;
+    local[choose()] = produce();
+    output(local[2].left);
+}
