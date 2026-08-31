@@ -259,13 +259,8 @@ NodeId clone_macro_expression(NodeId expression, cell preserve_names) {
         node_set_value(result, node_value(expression));
     } else if (kind == NODE_STRING_EXPRESSION) {
         node_set_value(result, node_value(expression));
-        arena_write(
-            result,
-            FIELD_NAME_PAGE,
-            arena_read(expression, FIELD_NAME_PAGE)
-        );
         node_set_a(result, node_a(expression));
-        node_set_c(result, node_c(expression));
+        node_set_name(result, node_name(expression));
     } else if (kind == NODE_NAME_EXPRESSION) {
         node_set_name(result, node_name(expression));
         if (!preserve_names

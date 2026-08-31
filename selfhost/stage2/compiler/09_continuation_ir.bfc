@@ -39,7 +39,7 @@ const cell IR_OFFSET_ADD_SCALED = 27;
 const cell IR_OFFSET_ADD_CONSTANT = 28;
 
 const cell VOID_RETURN_SLOT = 0xff;
-// Continuation records extend the common 13-cell node with a dense dispatch ID.
+// Continuation records use every common field plus a dense dispatch ID.
 const cell CONTINUATION_CELLS = 15;
 
 NodeId first_continuation;
@@ -283,8 +283,8 @@ void lower_dynamic_offset(NodeId expression, cell low, cell high) {
         append_ir_instruction(IR_SET, low, 0);
         append_ir_instruction(IR_SET, high, 0);
     }
-    cell projection_kind = arena_read(expression, FIELD_NAME_SLOT);
-    cell amount = arena_read(expression, FIELD_NAME_PAGE);
+    cell projection_kind = arena_read(expression, FIELD_C_SLOT);
+    cell amount = arena_read(expression, FIELD_C_PAGE);
     if (projection_kind == DYNAMIC_PROJECTION_INDEX) {
         cell index = allocate_lowering_temp();
         lower_ast_expression(node_b(expression), index);

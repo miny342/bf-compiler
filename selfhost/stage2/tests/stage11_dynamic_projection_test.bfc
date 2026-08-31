@@ -12,12 +12,12 @@ void test_stage11_dynamic_projection() {
     NodeId field = node_a(field_assignment);
     NodeId aggregate_index = node_a(field);
     expect_test(node_tag(field) == RESOLVED_LOCAL_DYNAMIC
-        && arena_read(field, FIELD_NAME_SLOT)
+        && arena_read(field, FIELD_C_SLOT)
             == DYNAMIC_PROJECTION_CONSTANT, 'f');
     expect_test(node_tag(aggregate_index) == RESOLVED_LOCAL_DYNAMIC
-        && arena_read(aggregate_index, FIELD_NAME_SLOT)
+        && arena_read(aggregate_index, FIELD_C_SLOT)
             == DYNAMIC_PROJECTION_INDEX
-        && arena_read(aggregate_index, FIELD_NAME_PAGE) == 2, 'g');
+        && arena_read(aggregate_index, FIELD_C_PAGE) == 2, 'g');
 
     NodeId aggregate_copy = node_next(field_assignment);
     expect_test(type_is_aggregate(expression_type(node_a(aggregate_copy)))

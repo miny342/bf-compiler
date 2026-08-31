@@ -5,6 +5,27 @@ cell name_first_byte(NodeId name) {
     return arena_cells[start.page][start.slot];
 }
 
+void test_compact_node_sizes() {
+    expect_test(node_cell_count(NODE_EMPTY_STATEMENT) == 3
+        && node_cell_count(NODE_INPUT_EXPRESSION) == 3, '3');
+    expect_test(node_cell_count(NODE_BLOCK) == 5
+        && node_cell_count(NODE_CALL_STATEMENT) == 5, '4');
+    expect_test(node_cell_count(NODE_LITERAL_EXPRESSION) == 7
+        && node_cell_count(NODE_LEN_EXPRESSION) == 7, '5');
+    expect_test(node_cell_count(NODE_BINARY_EXPRESSION) == 9
+        && node_cell_count(NODE_INSTRUCTION) == 10, '6');
+    expect_test(node_cell_count(NODE_NAME_EXPRESSION) == 11
+        && node_cell_count(NODE_GLOBAL) == 12, '7');
+    expect_test(node_cell_count(NODE_FUNCTION) == 13
+        && node_cell_count(NODE_CONTINUATION) == 15, '8');
+
+    reset_ast_arena();
+    NodeId first = allocate_node(NODE_EMPTY_STATEMENT);
+    NodeId second = allocate_node(NODE_LITERAL_EXPRESSION);
+    expect_test(first.page == 0 && first.slot == 40
+        && second.page == 0 && second.slot == 43, '9');
+}
+
 void test_arena_page_boundary() {
     reset_ast_arena();
     cell index;

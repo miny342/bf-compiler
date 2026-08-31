@@ -108,6 +108,7 @@ void main() {
     test_symbols();
     test_codegen();
     test_parser();
+    test_compact_node_sizes();
     test_arena_page_boundary();
     test_continuation_dispatch_ids();
     test_ast_parser();

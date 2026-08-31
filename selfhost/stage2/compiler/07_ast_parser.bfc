@@ -237,7 +237,6 @@ NodeId parse_ast_primary() {
     if (token_kind == TokenKind::String) {
         NodeId result = allocate_node(NODE_STRING_EXPRESSION);
         node_set_value(result, token_string_length);
-        arena_write(result, FIELD_NAME_PAGE, token_string_is_256);
         NodeId start;
         if (token_string_is_256) {
             start = allocate_cells(0xff);
@@ -261,7 +260,7 @@ NodeId parse_ast_primary() {
             }
             arena_cells[byte.page][byte.slot] = token_string[0xff];
         }
-        node_set_c(result, make_array_type(
+        node_set_name(result, make_array_type(
             cell_type,
             token_string_length,
             token_string_is_256,

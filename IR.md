@@ -692,9 +692,10 @@ Continuation IRのconstructorは次を検証する。
 12. BFCでstreaming lexer/parserを記述し、self-hostに不足する最小機能を実測から判断する。
     （着手。`selfhost/stage2/compiler/`でLANGUAGE.mdの初期実装第1〜12段階をBF上から
     BFへコンパイルし、外部harnessで生成物を実行検証できる。packed arenaを4,096 cellから
-    16,384 cellへ拡張し、旧上限を超える入力を回帰検証している。compiler全体は入力12,580 byteで
-    16,384 cellを消費し、同じ密度の外挿は約230,000 cellとなるため、完全自己コンパイルには
-    segmented arenaまたはstreaming化が必要。）
+    16,384 cellへ拡張し、旧上限を超える入力を回帰検証している。固定13-cell nodeをkind別3〜13-cell
+    recordへcompact化し、同じarenaでの自己入力到達位置を12,567 byteから15,454 byteへ改善した。
+    全sourceの単純外挿は依然約187,000 cellとなるため、完全自己コンパイルにはscratch arena、
+    segmented storage、またはstreaming化が必要。）
 13. profileに基づき、BF固有templateとcost modelを段階的に追加する。（着手）
 14. `ContinuationProgram → ContinuationProgram`のCFG縮約passを追加し、dispatcher case数と
     continuation IDを削減する。

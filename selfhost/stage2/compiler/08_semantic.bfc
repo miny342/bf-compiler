@@ -38,11 +38,42 @@ struct ConstantValue {
 }
 
 NodeId expression_type(NodeId expression) {
-    return node_c(expression);
+    cell kind = node_kind(expression);
+    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_INPUT_EXPRESSION
+        || kind == NODE_LEN_EXPRESSION || kind == NODE_UNARY_EXPRESSION
+        || kind == NODE_BINARY_EXPRESSION) {
+        return cell_type;
+    }
+    if (kind == NODE_CALL_EXPRESSION) {
+        NodeId function = node_b(expression);
+        if (node_is_null(function)) {
+            fail();
+        }
+        return node_name(node_c(function));
+    }
+    return node_name(expression);
 }
 
 void set_expression_type(NodeId expression, NodeId ty) {
-    node_set_c(expression, ty);
+    cell kind = node_kind(expression);
+    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_INPUT_EXPRESSION
+        || kind == NODE_UNARY_EXPRESSION || kind == NODE_BINARY_EXPRESSION) {
+        if (!node_equals(ty, cell_type)) {
+            fail();
+        }
+        return;
+    }
+    if (kind == NODE_LEN_EXPRESSION) {
+        if (!node_equals(ty, cell_type)) {
+            fail();
+        }
+        node_set_tag(expression, 1);
+        return;
+    }
+    if (kind == NODE_CALL_EXPRESSION) {
+        return;
+    }
+    node_set_name(expression, ty);
 }
 
 cell type_is_aggregate(NodeId ty) {
@@ -228,6 +259,11 @@ ConstantValue evaluate_constant_expression(NodeId expression) {
         return result;
     }
     if (kind == NODE_NAME_EXPRESSION) {
+        if (node_tag(expression) == RESOLVED_CONSTANT) {
+            result.known = 1;
+            result.value = node_value(expression);
+            return result;
+        }
         NodeId constant = find_constant_by_name_or_null(node_name(expression));
         if (!node_is_null(constant)) {
             result.known = 1;
@@ -236,7 +272,7 @@ ConstantValue evaluate_constant_expression(NodeId expression) {
         return result;
     }
     if (kind == NODE_LEN_EXPRESSION) {
-        if (node_equals(expression_type(expression), cell_type)) {
+        if (node_tag(expression) != 0) {
             result.known = 1;
             result.value = node_value(expression);
             return result;
@@ -573,16 +609,9 @@ NodeId analyze_ast_expression(NodeId expression) {
             } else if (expression_is_dynamic_place(base_expression)) {
                 node_set_tag(expression, node_tag(base_expression));
                 node_set_value(expression, node_value(base_expression));
-                arena_write(
-                    expression,
-                    FIELD_NAME_PAGE,
-                    offset
-                );
-                arena_write(
-                    expression,
-                    FIELD_NAME_SLOT,
-                    DYNAMIC_PROJECTION_CONSTANT
-                );
+                arena_write(expression, FIELD_C_PAGE, offset);
+                arena_write(expression, FIELD_C_SLOT,
+                    DYNAMIC_PROJECTION_CONSTANT);
             } else {
                 node_set_tag(expression, RESOLVED_VALUE_PROJECT);
                 node_set_value(expression, offset);
@@ -604,12 +633,8 @@ NodeId analyze_ast_expression(NodeId expression) {
                 fail();
             }
             node_set_value(expression, node_value(base_expression));
-            arena_write(expression, FIELD_NAME_PAGE, element_cells);
-            arena_write(
-                expression,
-                FIELD_NAME_SLOT,
-                DYNAMIC_PROJECTION_INDEX
-            );
+            arena_write(expression, FIELD_C_PAGE, element_cells);
+            arena_write(expression, FIELD_C_SLOT, DYNAMIC_PROJECTION_INDEX);
         }
         set_expression_type(expression, element_type);
         return element_type;
@@ -631,12 +656,9 @@ NodeId analyze_ast_expression(NodeId expression) {
         } else if (expression_is_dynamic_place(base_expression)) {
             node_set_tag(expression, node_tag(base_expression));
             node_set_value(expression, node_value(base_expression));
-            arena_write(expression, FIELD_NAME_PAGE, offset);
-            arena_write(
-                expression,
-                FIELD_NAME_SLOT,
-                DYNAMIC_PROJECTION_CONSTANT
-            );
+            arena_write(expression, FIELD_C_PAGE, offset);
+            arena_write(expression, FIELD_C_SLOT,
+                DYNAMIC_PROJECTION_CONSTANT);
         } else {
             node_set_tag(expression, RESOLVED_VALUE_PROJECT);
             node_set_value(expression, offset);

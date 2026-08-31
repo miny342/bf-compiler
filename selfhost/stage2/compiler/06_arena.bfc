@@ -2,22 +2,22 @@
 // 一つのcell[64][256] regionへnode recordとidentifier byteを置く。
 // fieldごとに巨大なglobal regionを作ると、absolute pointer移動を埋め込む
 // backendでは生成BF自体が数GBになるため、regionを一つに保つ。
+// nextと頻出fieldを前方へ置き、kindごとに最後に使うfieldまでだけを確保する。
 
-const cell NODE_CELLS = 13;
 const cell ARENA_LAST_PAGE = 63;
 const cell FIELD_KIND = 0;
-const cell FIELD_TAG = 1;
-const cell FIELD_VALUE = 2;
-const cell FIELD_NAME_PAGE = 3;
-const cell FIELD_NAME_SLOT = 4;
-const cell FIELD_A_PAGE = 5;
-const cell FIELD_A_SLOT = 6;
+const cell FIELD_NEXT_PAGE = 1;
+const cell FIELD_NEXT_SLOT = 2;
+const cell FIELD_A_PAGE = 3;
+const cell FIELD_A_SLOT = 4;
+const cell FIELD_TAG = 5;
+const cell FIELD_VALUE = 6;
 const cell FIELD_B_PAGE = 7;
 const cell FIELD_B_SLOT = 8;
-const cell FIELD_C_PAGE = 9;
-const cell FIELD_C_SLOT = 10;
-const cell FIELD_NEXT_PAGE = 11;
-const cell FIELD_NEXT_SLOT = 12;
+const cell FIELD_NAME_PAGE = 9;
+const cell FIELD_NAME_SLOT = 10;
+const cell FIELD_C_PAGE = 11;
+const cell FIELD_C_SLOT = 12;
 const cell FIELD_DISPATCH_LOW = 13;
 const cell FIELD_DISPATCH_HIGH = 14;
 
@@ -189,8 +189,58 @@ NodeId allocate_cells(cell count) {
     return result;
 }
 
+cell node_cell_count(cell kind) {
+    if (kind == NODE_EMPTY_STATEMENT || kind == NODE_INPUT_EXPRESSION
+        || kind == NODE_ABORT_STATEMENT) {
+        return 3;
+    }
+    if (kind == NODE_BLOCK || kind == NODE_OUTPUT_STATEMENT
+        || kind == NODE_RETURN_STATEMENT || kind == NODE_CALL_STATEMENT) {
+        return 5;
+    }
+    if (kind == NODE_UNARY_EXPRESSION) {
+        return 6;
+    }
+    if (kind == NODE_NAME_RECORD || kind == NODE_LITERAL_EXPRESSION
+        || kind == NODE_LEN_EXPRESSION) {
+        return 7;
+    }
+    if (kind == NODE_CALL_ARGUMENT) {
+        return 8;
+    }
+    if (kind == NODE_ASSIGNMENT || kind == NODE_WHILE_STATEMENT
+        || kind == NODE_BINARY_EXPRESSION) {
+        return 9;
+    }
+    if (kind == NODE_INSTRUCTION) {
+        return 10;
+    }
+    if (kind == NODE_NAME_EXPRESSION || kind == NODE_CALL_EXPRESSION
+        || kind == NODE_FUNCTION_DESCRIPTOR || kind == NODE_ENUM_VARIANT
+        || kind == NODE_STRUCT_FIELD || kind == NODE_ENUM_EXPRESSION
+        || kind == NODE_STRING_EXPRESSION || kind == NODE_CONSTANT
+        || kind == NODE_MACRO_DEFINITION || kind == NODE_MACRO_PARAMETER
+        || kind == NODE_MACRO_INVOCATION) {
+        return 11;
+    }
+    if (kind == NODE_PARAMETER || kind == NODE_DECLARATION
+        || kind == NODE_GLOBAL) {
+        return 12;
+    }
+    if (kind == NODE_FUNCTION || kind == NODE_IF_STATEMENT
+        || kind == NODE_INDEX_EXPRESSION || kind == NODE_TYPE
+        || kind == NODE_FIELD_EXPRESSION) {
+        return 13;
+    }
+    if (kind == NODE_CONTINUATION) {
+        return 15;
+    }
+    fail();
+    return 0;
+}
+
 NodeId allocate_node(cell kind) {
-    NodeId result = allocate_cells(NODE_CELLS);
+    NodeId result = allocate_cells(node_cell_count(kind));
     arena_write(result, FIELD_KIND, kind);
     return result;
 }

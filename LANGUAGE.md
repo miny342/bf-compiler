@@ -982,8 +982,10 @@ aggregate portalを使用する。[ABI.md](ABI.md)のbackendは`D = 8`と`D = 16
 サポートする。第13段階には着手しており、`selfhost/stage2/compiler/`のbootstrap compilerが
 初期実装第1〜12段階のsubsetをBF上でコンパイルできる。全version 1を入力として自身を再生成する
 完全なself-host compilerは未実装である。packed AST/IR arenaは第13段階の容量回帰として
-4,096 cellから16,384 cellへ拡張した。compiler全体の実測値はこの上限も超えるため、後続では
-segmented arenaまたはstreaming loweringが必要になる。
+4,096 cellから16,384 cellへ拡張した。さらに固定13-cell nodeをkind別3〜13-cell recordへ変更し、
+address幅を保ったまま自己入力の到達位置を12,567 byteから15,454 byteへ伸ばしている。compiler全体の
+実測値はこの上限も超えるため、後続ではscratch arena、segmented storage、streaming loweringの
+組み合わせが必要になる。
 
 ### セルフホスト用targetのテープ容量
 

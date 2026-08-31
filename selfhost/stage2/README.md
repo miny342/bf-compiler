@@ -100,6 +100,12 @@ ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的count
 caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
 dispatch cycle末までは`Pc`を0に保つ。
 
+arena recordは固定13 cellではなく、`next`と頻出fieldを前方へ置いた3〜13 cellのkind別layoutを
+使用する。Continuationだけはdispatch IDを含む15 cellである。literal、input、unary、binary、
+`len`の結果型は`cell`から自明なのでhandleを保存しない。その他のexpressionはsemantic解決後に
+source名fieldを型handleとして再利用する。これによりaddress幅やarena portalを増やさず、profileした
+node領域を30.5%削減する。
+
 static globalsの右にzero anchorを置き、各activationの`Active`をallocation flagとして保存する。
 global accessはcurrent frameからanchorへ左走査し、処理後にanchorからfrontierへ右走査して同じ
 activationへ戻るため、再帰深度によらず単一のstatic領域を参照する。動的添字はsource indexを
@@ -139,7 +145,8 @@ compilerを過度にmemory tuningしたりすることは目標にしない。�
 static regionへ置くためにこのflagを使用している。
 
 現在のpacked AST arenaは64 page、16,384 logical cellである。handle自体はpage/slotの
-16-bit形式を保ち、容量超過はcompile errorにする。第13段階の実測ではcompiler source
-177,228 byteのうち12,580 byteを読んだ時点でこのarenaを使い切った。同じ密度で単純外挿すると
-約230,000 cellとなり、16-bit handleの65,536-cell上限も超える。次の容量拡張は、巨大な単一portalを
-増やすのではなく、segmented arenaまたはfunction単位のstreaming loweringと組み合わせる。
+16-bit形式を保ち、容量超過はcompile errorにする。第13段階の自己入力計測では、固定13-cell
+recordが12,567 byteでarenaを使い切ったのに対し、compact recordは15,454 byteまで到達し、同じ
+16,384-cell容量で22.97%改善した。同じ密度で全sourceへ単純外挿すると依然約187,000 cellとなり、
+16-bit handleの65,536-cell上限も超える。次の削減は、segmented arenaを単純に増やすのではなく、
+function単位のscratch arena、streaming lowering、またはcompact IRと組み合わせる必要がある。
