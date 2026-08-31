@@ -62,6 +62,11 @@ void read_character() {
             current_char = stage11_dynamic_projection_test_source[test_input_position];
             test_input_position += 1;
         }
+    } else if (test_input_kind == 13) {
+        if (test_input_position < len(stage12_macro_test_source)) {
+            current_char = stage12_macro_test_source[test_input_position];
+            test_input_position += 1;
+        }
     }
 }
 
@@ -112,6 +117,7 @@ void main() {
     test_stage9_types();
     test_stage10_compile_time();
     test_stage11_dynamic_projection();
+    test_stage12_macros();
 
     if (test_failures == 0) {
         output('o');

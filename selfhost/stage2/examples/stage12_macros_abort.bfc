@@ -1,0 +1,71 @@
+struct Counter {
+    cell value;
+}
+
+Counter advance(Counter counter, cell amount) {
+    counter.value += amount;
+    return counter;
+}
+
+cell definition_value = 2;
+
+macro twice(value) {
+    output(value);
+    output(value);
+}
+
+macro hygienic(value) {
+    cell scratch = 9;
+    output(scratch);
+    output(value);
+}
+
+macro nested(value) {
+    twice!(value + 1);
+}
+
+macro set(place, value) {
+    place = value;
+}
+
+macro show_definition_value() {
+    output(definition_value);
+}
+
+macro return_if(condition) {
+    if (condition) {
+        return 12;
+    }
+}
+
+cell expanded_return() {
+    return_if!(1);
+    return 0;
+}
+
+cell stop() {
+    abort();
+}
+
+void main() {
+    Counter counter;
+    counter.value = 4;
+    counter = counter.advance(3);
+    output(counter.value);
+
+    cell scratch = 5;
+    hygienic!(scratch);
+    output(scratch);
+    nested!(3);
+    set!(counter.value, 8);
+    output(counter.value);
+    output(expanded_return());
+
+    cell definition_value = 99;
+    show_definition_value!();
+    output(definition_value);
+
+    output(6);
+    cell ignored = stop();
+    output(7);
+}

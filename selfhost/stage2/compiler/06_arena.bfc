@@ -59,6 +59,10 @@ const cell NODE_ENUM_EXPRESSION = 29;
 const cell NODE_STRING_EXPRESSION = 30;
 const cell NODE_LEN_EXPRESSION = 31;
 const cell NODE_CONSTANT = 32;
+const cell NODE_ABORT_STATEMENT = 33;
+const cell NODE_MACRO_DEFINITION = 34;
+const cell NODE_MACRO_PARAMETER = 35;
+const cell NODE_MACRO_INVOCATION = 36;
 
 const cell TYPE_UNRESOLVED = 0;
 const cell TYPE_CELL = 1;
@@ -84,6 +88,8 @@ NodeId void_type;
 NodeId inferred_type;
 NodeId first_constant;
 NodeId last_constant;
+NodeId first_macro;
+NodeId last_macro;
 
 NodeId null_node() {
     NodeId result;
@@ -156,6 +162,8 @@ void reset_ast_arena() {
     node_set_tag(inferred_type, TYPE_INFERRED);
     first_constant = null_node();
     last_constant = null_node();
+    first_macro = null_node();
+    last_macro = null_node();
 }
 
 NodeId allocate_cells(cell count) {

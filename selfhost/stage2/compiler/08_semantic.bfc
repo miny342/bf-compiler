@@ -1,4 +1,4 @@
-// 第11段階programのfile-scope収集、型/定数解決、名前解決、型検査。
+// 第12段階programのfile-scope収集、型/定数解決、名前解決、型検査。
 
 NodeId[256] semantic_local_names;
 cell[256] semantic_local_slots;
@@ -508,7 +508,10 @@ NodeId analyze_ast_expression(NodeId expression) {
     }
     if (kind == NODE_NAME_EXPRESSION) {
         NodeId ty;
-        cell encoded_binding = find_local_binding_or_zero(node_name(expression));
+        cell encoded_binding;
+        if (node_tag(expression) != MACRO_DEFINITION_SITE_NAME) {
+            encoded_binding = find_local_binding_or_zero(node_name(expression));
+        }
         if (encoded_binding != 0) {
             cell binding = encoded_binding - 1;
             node_set_tag(expression, RESOLVED_LOCAL);
@@ -695,6 +698,9 @@ cell analyze_ast_statement(NodeId statement) {
     cell kind = node_kind(statement);
     if (kind == NODE_EMPTY_STATEMENT) {
         return 0;
+    }
+    if (kind == NODE_ABORT_STATEMENT) {
+        return 1;
     }
     if (kind == NODE_BLOCK) {
         enter_semantic_scope();

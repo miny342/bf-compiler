@@ -1,4 +1,4 @@
-// 16-bit logical offset portalとaggregate outboxを持つ第11段階Continuation ABI backend。
+// 16-bit logical offset portalとaggregate outboxを持つ第12段階Continuation ABI backend。
 // 全functionを同じframe幅にすることで、直接・相互再帰を同じcall/return
 // sequenceで扱う。PCとreturn PCはNodeIdのpage/slotをそのまま使う。
 
@@ -670,6 +670,8 @@ void emit_continuation_terminator(NodeId continuation) {
         emit_return_terminator(continuation);
     } else if (kind == TERM_HALT) {
         emit_clear(FRAME_ACTIVE);
+    } else if (kind == TERM_ABORT) {
+        emit_clear(FRAME_ACTIVE);
     } else {
         fail();
     }
@@ -826,8 +828,9 @@ void emit_continuation_program() {
     compiler_output!(']');
 }
 
-void compile_program_stage11() {
+void compile_program_stage12() {
     parse_ast_program();
+    expand_ast_macros();
     analyze_ast_program();
     lower_ast_program();
     emit_continuation_program();

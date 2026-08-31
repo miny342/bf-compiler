@@ -1,4 +1,4 @@
-// 第11段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
+// 第12段階surface syntaxをstreaming token列からfull AST arenaへ構築する。
 
 const cell AST_TYPE_VOID = 0;
 const cell AST_TYPE_CELL = 1;
@@ -288,6 +288,12 @@ NodeId parse_ast_primary() {
         }
         NodeId name = intern_token_name();
         next_token();
+        if (token_kind == TokenKind::Bang) {
+            next_token();
+            NodeId invocation = parse_ast_call(name);
+            arena_write(invocation, FIELD_KIND, NODE_MACRO_INVOCATION);
+            return invocation;
+        }
         if (token_kind == TokenKind::ColonColon) {
             next_token();
             if (token_kind != TokenKind::Identifier || token_is_reserved()) {
@@ -332,11 +338,19 @@ NodeId parse_ast_postfix() {
             if (token_kind != TokenKind::Identifier || token_is_reserved()) {
                 fail();
             }
-            NodeId field = allocate_node(NODE_FIELD_EXPRESSION);
-            node_set_a(field, result);
-            node_set_name(field, intern_token_name());
+            NodeId member_name = intern_token_name();
             next_token();
-            result = field;
+            if (token_kind == TokenKind::LeftParen) {
+                NodeId call = parse_ast_call(member_name);
+                node_set_next(result, node_a(call));
+                node_set_a(call, result);
+                result = call;
+            } else {
+                NodeId field = allocate_node(NODE_FIELD_EXPRESSION);
+                node_set_a(field, result);
+                node_set_name(field, member_name);
+                result = field;
+            }
         } else {
             more = 0;
         }
@@ -488,6 +502,13 @@ NodeId parse_ast_statement() {
         consume(TokenKind::Semicolon);
         return statement;
     }
+    if (token_kind == TokenKind::Identifier && token_is_abort()) {
+        next_token();
+        consume(TokenKind::LeftParen);
+        consume(TokenKind::RightParen);
+        consume(TokenKind::Semicolon);
+        return allocate_node(NODE_ABORT_STATEMENT);
+    }
     if (token_kind == TokenKind::Identifier && token_is_return()) {
         next_token();
         NodeId statement = allocate_node(NODE_RETURN_STATEMENT);
@@ -540,6 +561,10 @@ NodeId parse_ast_statement() {
         }
         consume(TokenKind::Semicolon);
         return statement;
+    }
+    if (node_kind(left) == NODE_MACRO_INVOCATION) {
+        consume(TokenKind::Semicolon);
+        return left;
     }
     if (node_kind(left) != NODE_CALL_EXPRESSION) {
         fail();
@@ -620,6 +645,65 @@ void append_ast_constant(NodeId constant) {
         node_set_next(last_constant, constant);
     }
     last_constant = constant;
+}
+
+void append_ast_macro(NodeId definition) {
+    if (node_is_null(first_macro)) {
+        first_macro = definition;
+    } else {
+        node_set_next(last_macro, definition);
+    }
+    last_macro = definition;
+}
+
+void parse_ast_macro_definition() {
+    next_token();
+    if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+        fail();
+    }
+    NodeId definition = allocate_node(NODE_MACRO_DEFINITION);
+    node_set_name(definition, intern_token_name());
+    next_token();
+    consume(TokenKind::LeftParen);
+    NodeId first;
+    NodeId last;
+    if (token_kind != TokenKind::RightParen) {
+        cell more = 1;
+        while (more) {
+            if (token_kind != TokenKind::Identifier || token_is_reserved()) {
+                fail();
+            }
+            NodeId parameter = allocate_node(NODE_MACRO_PARAMETER);
+            node_set_name(parameter, intern_token_name());
+            NodeId earlier = first;
+            while (!node_is_null(earlier)) {
+                if (node_equals(node_name(earlier), node_name(parameter))) {
+                    fail();
+                }
+                earlier = node_next(earlier);
+            }
+            next_token();
+            if (node_is_null(first)) {
+                first = parameter;
+            } else {
+                node_set_next(last, parameter);
+            }
+            last = parameter;
+            if (token_kind == TokenKind::Comma) {
+                next_token();
+            } else {
+                more = 0;
+            }
+        }
+    }
+    consume(TokenKind::RightParen);
+    node_set_a(definition, first);
+    NodeId body = parse_ast_statement();
+    if (node_kind(body) != NODE_BLOCK) {
+        fail();
+    }
+    node_set_b(definition, body);
+    append_ast_macro(definition);
 }
 
 void parse_ast_constant_definition() {
@@ -730,6 +814,10 @@ void parse_ast_struct_definition() {
 }
 
 void parse_ast_top_level_item() {
+    if (token_kind == TokenKind::Identifier && token_is_macro()) {
+        parse_ast_macro_definition();
+        return;
+    }
     if (token_kind == TokenKind::Identifier && token_is_const()) {
         parse_ast_constant_definition();
         return;

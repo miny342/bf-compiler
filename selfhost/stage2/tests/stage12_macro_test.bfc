@@ -1,0 +1,33 @@
+cell[] stage12_macro_test_source = "struct C{cell v;}C add(C c,cell n){c.v+=n;return c;}macro h(x){cell y=9;output(y);output(x);}macro outer(x){h!(x);}cell stop(){abort();}void main(){cell y=5;outer!(y);C c;c.v=1;c=c.add(2);output(c.v);cell z=stop();}";
+
+void test_stage12_macros() {
+    reset_test_input(13);
+    parse_ast_program();
+    expect_test(node_kind(first_macro) == NODE_MACRO_DEFINITION
+        && node_kind(node_next(first_macro)) == NODE_MACRO_DEFINITION, 'j');
+
+    NodeId main = node_next(node_next(first_function));
+    NodeId local_y = node_a(node_b(main));
+    NodeId invocation = node_next(local_y);
+    expect_test(node_kind(invocation) == NODE_MACRO_INVOCATION, 'k');
+
+    expand_ast_macros();
+    NodeId expanded = node_next(local_y);
+    NodeId expanded_declaration = node_a(expanded);
+    expect_test(node_kind(expanded) == NODE_BLOCK
+        && node_kind(expanded_declaration) == NODE_BLOCK, 'l');
+    NodeId inner_declaration = node_a(expanded_declaration);
+    expect_test(!node_equals(node_name(inner_declaration), node_name(local_y)), 'm');
+
+    NodeId counter_declaration = node_next(expanded);
+    NodeId counter_set = node_next(counter_declaration);
+    NodeId method_assignment = node_next(counter_set);
+    NodeId method_call = node_b(method_assignment);
+    expect_test(node_kind(method_call) == NODE_CALL_EXPRESSION
+        && node_kind(node_a(method_call)) == NODE_NAME_EXPRESSION, 'n');
+
+    analyze_ast_program();
+    lower_ast_program();
+    expect_test(node_tag(node_a(node_c(node_next(first_function))))
+        == TERM_ABORT, 'o');
+}

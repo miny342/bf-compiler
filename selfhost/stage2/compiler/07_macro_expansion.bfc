@@ -1,0 +1,524 @@
+// file-scope block macroをsemantic analysis前にASTへ衛生的に展開する。
+
+NodeId[64] macro_parameter_names;
+NodeId[64] macro_parameter_arguments;
+cell macro_parameter_count;
+cell[16] macro_parameter_base;
+NodeId[256] macro_binding_names;
+NodeId[256] macro_binding_fresh_names;
+cell macro_binding_count;
+cell[32] macro_scope_base;
+cell macro_scope_depth;
+cell[16] macro_binding_base;
+NodeId[16] macro_active;
+cell macro_expansion_depth;
+NodeId macro_validation_definition;
+cell macro_validation_depth;
+
+const cell MACRO_DEFINITION_SITE_NAME = 0xfe;
+
+NodeId find_macro_by_name(NodeId name) {
+    NodeId definition = first_macro;
+    while (!node_is_null(definition)) {
+        if (node_equals(node_name(definition), name)) {
+            return definition;
+        }
+        definition = node_next(definition);
+    }
+    fail();
+    return null_node();
+}
+
+cell macro_validation_name_is_parameter(NodeId name) {
+    NodeId parameter = node_a(macro_validation_definition);
+    while (!node_is_null(parameter)) {
+        if (node_equals(node_name(parameter), name)) {
+            return 1;
+        }
+        parameter = node_next(parameter);
+    }
+    return 0;
+}
+
+void validate_macro_expression_names(NodeId expression) {
+    cell kind = node_kind(expression);
+    if (kind == NODE_CALL_EXPRESSION) {
+        if (macro_validation_name_is_parameter(node_name(expression))) {
+            fail();
+        }
+        NodeId argument = node_a(expression);
+        while (!node_is_null(argument)) {
+            validate_macro_expression_names(argument);
+            argument = node_next(argument);
+        }
+    } else if (kind == NODE_FIELD_EXPRESSION) {
+        if (macro_validation_name_is_parameter(node_name(expression))) {
+            fail();
+        }
+        validate_macro_expression_names(node_a(expression));
+    } else if (kind == NODE_ENUM_EXPRESSION) {
+        if (macro_validation_name_is_parameter(node_name(expression))
+            || macro_validation_name_is_parameter(node_a(expression))) {
+            fail();
+        }
+    } else if (kind == NODE_UNARY_EXPRESSION
+        || kind == NODE_LEN_EXPRESSION) {
+        validate_macro_expression_names(node_a(expression));
+    } else if (kind == NODE_BINARY_EXPRESSION
+        || kind == NODE_INDEX_EXPRESSION) {
+        validate_macro_expression_names(node_a(expression));
+        validate_macro_expression_names(node_b(expression));
+    }
+}
+
+void validate_macro_definition(NodeId definition) {
+    cell index;
+    while (index < macro_validation_depth) {
+        if (node_equals(macro_active[index], definition)) {
+            fail();
+        }
+        index += 1;
+    }
+    if (macro_validation_depth == 16) {
+        fail();
+    }
+    macro_active[macro_validation_depth] = definition;
+    macro_validation_depth += 1;
+    NodeId saved_definition = macro_validation_definition;
+    macro_validation_definition = definition;
+    validate_macro_statement(node_b(definition));
+    macro_validation_definition = saved_definition;
+    macro_validation_depth -= 1;
+}
+
+void validate_macro_statement(NodeId statement) {
+    cell kind = node_kind(statement);
+    if (kind == NODE_MACRO_INVOCATION) {
+        if (macro_validation_name_is_parameter(node_name(statement))) {
+            fail();
+        }
+        NodeId target = find_macro_by_name(node_name(statement));
+        NodeId parameter = node_a(target);
+        NodeId argument = node_a(statement);
+        while (!node_is_null(parameter) && !node_is_null(argument)) {
+            validate_macro_expression_names(argument);
+            parameter = node_next(parameter);
+            argument = node_next(argument);
+        }
+        if (!node_is_null(parameter) || !node_is_null(argument)) {
+            fail();
+        }
+        validate_macro_definition(target);
+    } else if (kind == NODE_BLOCK) {
+        NodeId child = node_a(statement);
+        while (!node_is_null(child)) {
+            validate_macro_statement(child);
+            child = node_next(child);
+        }
+    } else if (kind == NODE_DECLARATION) {
+        if (macro_validation_name_is_parameter(node_name(statement))
+            || (!node_is_null(node_name(node_b(statement)))
+                && macro_validation_name_is_parameter(
+                    node_name(node_b(statement))
+                ))) {
+            fail();
+        }
+        if (!node_is_null(node_a(statement))) {
+            validate_macro_expression_names(node_a(statement));
+        }
+    } else if (kind == NODE_OUTPUT_STATEMENT
+        || kind == NODE_CALL_STATEMENT
+        || kind == NODE_RETURN_STATEMENT) {
+        if (!node_is_null(node_a(statement))) {
+            validate_macro_expression_names(node_a(statement));
+        }
+    } else if (kind == NODE_ASSIGNMENT) {
+        validate_macro_expression_names(node_a(statement));
+        validate_macro_expression_names(node_b(statement));
+    } else if (kind == NODE_IF_STATEMENT) {
+        validate_macro_expression_names(node_a(statement));
+        validate_macro_statement(node_b(statement));
+        if (!node_is_null(node_c(statement))) {
+            validate_macro_statement(node_c(statement));
+        }
+    } else if (kind == NODE_WHILE_STATEMENT) {
+        validate_macro_expression_names(node_a(statement));
+        validate_macro_statement(node_b(statement));
+    }
+}
+
+void validate_macro_declarations() {
+    NodeId definition = first_macro;
+    while (!node_is_null(definition)) {
+        NodeId earlier = first_macro;
+        while (!node_equals(earlier, definition)) {
+            if (node_equals(node_name(earlier), node_name(definition))) {
+                fail();
+            }
+            earlier = node_next(earlier);
+        }
+        NodeId ty = first_type;
+        while (!node_is_null(ty)) {
+            if (node_tag(ty) != TYPE_ARRAY && !node_is_null(node_name(ty))
+                && node_equals(node_name(ty), node_name(definition))) {
+                fail();
+            }
+            ty = node_next(ty);
+        }
+        NodeId constant = first_constant;
+        while (!node_is_null(constant)) {
+            if (node_equals(node_name(constant), node_name(definition))) {
+                fail();
+            }
+            constant = node_next(constant);
+        }
+        NodeId global = first_global;
+        while (!node_is_null(global)) {
+            if (node_equals(node_name(global), node_name(definition))) {
+                fail();
+            }
+            global = node_next(global);
+        }
+        NodeId function = first_function;
+        while (!node_is_null(function)) {
+            if (node_equals(node_name(function), node_name(definition))) {
+                fail();
+            }
+            function = node_next(function);
+        }
+        macro_validation_depth = 0;
+        validate_macro_definition(definition);
+        definition = node_next(definition);
+    }
+}
+
+NodeId fresh_macro_name(NodeId original) {
+    NodeId fresh = allocate_node(NODE_NAME_RECORD);
+    cell length = node_value(original);
+    node_set_value(fresh, length);
+    NodeId source = node_a(original);
+    NodeId destination = allocate_cells(length);
+    node_set_a(fresh, destination);
+    cell index;
+    while (index < length) {
+        arena_cells[destination.page][destination.slot]
+            = arena_cells[source.page][source.slot];
+        source = arena_advance(source, 1);
+        destination = arena_advance(destination, 1);
+        index += 1;
+    }
+    return fresh;
+}
+
+NodeId macro_local_name_or_null(NodeId name) {
+    cell base = macro_binding_base[macro_expansion_depth - 1];
+    cell index = macro_binding_count;
+    while (index > base) {
+        index -= 1;
+        if (node_equals(macro_binding_names[index], name)) {
+            return macro_binding_fresh_names[index];
+        }
+    }
+    return null_node();
+}
+
+cell macro_parameter_index_or_zero(NodeId name) {
+    cell base = macro_parameter_base[macro_expansion_depth - 1];
+    cell index = macro_parameter_count;
+    while (index > base) {
+        index -= 1;
+        if (node_equals(macro_parameter_names[index], name)) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
+NodeId clone_macro_expression(NodeId expression, cell preserve_names) {
+    cell kind = node_kind(expression);
+    if (kind == NODE_NAME_EXPRESSION && !preserve_names) {
+        NodeId local = macro_local_name_or_null(node_name(expression));
+        if (!node_is_null(local)) {
+            NodeId result = allocate_node(NODE_NAME_EXPRESSION);
+            node_set_name(result, local);
+            return result;
+        }
+        cell encoded_parameter = macro_parameter_index_or_zero(
+            node_name(expression)
+        );
+        if (encoded_parameter != 0) {
+            return clone_macro_expression(
+                macro_parameter_arguments[encoded_parameter - 1],
+                1
+            );
+        }
+    }
+
+    NodeId result = allocate_node(kind);
+    if (kind == NODE_LITERAL_EXPRESSION) {
+        node_set_value(result, node_value(expression));
+    } else if (kind == NODE_STRING_EXPRESSION) {
+        node_set_value(result, node_value(expression));
+        arena_write(
+            result,
+            FIELD_NAME_PAGE,
+            arena_read(expression, FIELD_NAME_PAGE)
+        );
+        node_set_a(result, node_a(expression));
+        node_set_c(result, node_c(expression));
+    } else if (kind == NODE_NAME_EXPRESSION) {
+        node_set_name(result, node_name(expression));
+        if (!preserve_names
+            || node_tag(expression) == MACRO_DEFINITION_SITE_NAME) {
+            node_set_tag(result, MACRO_DEFINITION_SITE_NAME);
+        }
+    } else if (kind == NODE_ENUM_EXPRESSION) {
+        node_set_name(result, node_name(expression));
+        node_set_a(result, node_a(expression));
+    } else if (kind == NODE_INPUT_EXPRESSION) {
+        return result;
+    } else if (kind == NODE_CALL_EXPRESSION) {
+        node_set_name(result, node_name(expression));
+        NodeId argument = node_a(expression);
+        NodeId first;
+        NodeId last;
+        while (!node_is_null(argument)) {
+            NodeId cloned = clone_macro_expression(argument, preserve_names);
+            if (node_is_null(first)) {
+                first = cloned;
+            } else {
+                node_set_next(last, cloned);
+            }
+            last = cloned;
+            argument = node_next(argument);
+        }
+        node_set_a(result, first);
+    } else if (kind == NODE_UNARY_EXPRESSION) {
+        node_set_tag(result, node_tag(expression));
+        node_set_a(
+            result,
+            clone_macro_expression(node_a(expression), preserve_names)
+        );
+    } else if (kind == NODE_BINARY_EXPRESSION) {
+        node_set_tag(result, node_tag(expression));
+        node_set_a(
+            result,
+            clone_macro_expression(node_a(expression), preserve_names)
+        );
+        node_set_b(
+            result,
+            clone_macro_expression(node_b(expression), preserve_names)
+        );
+    } else if (kind == NODE_INDEX_EXPRESSION) {
+        node_set_a(
+            result,
+            clone_macro_expression(node_a(expression), preserve_names)
+        );
+        node_set_b(
+            result,
+            clone_macro_expression(node_b(expression), preserve_names)
+        );
+    } else if (kind == NODE_FIELD_EXPRESSION) {
+        node_set_a(
+            result,
+            clone_macro_expression(node_a(expression), preserve_names)
+        );
+        node_set_name(result, node_name(expression));
+    } else if (kind == NODE_LEN_EXPRESSION) {
+        node_set_a(
+            result,
+            clone_macro_expression(node_a(expression), preserve_names)
+        );
+    } else {
+        fail();
+    }
+    return result;
+}
+
+NodeId instantiate_macro(NodeId invocation) {
+    NodeId definition = find_macro_by_name(node_name(invocation));
+    cell active_index;
+    while (active_index < macro_expansion_depth) {
+        if (node_equals(macro_active[active_index], definition)) {
+            fail();
+        }
+        active_index += 1;
+    }
+    if (macro_expansion_depth == 16) {
+        fail();
+    }
+
+    NodeId parameter = node_a(definition);
+    NodeId argument = node_a(invocation);
+    cell parameter_base = macro_parameter_count;
+    while (!node_is_null(parameter) && !node_is_null(argument)) {
+        if (macro_parameter_count == 64) {
+            fail();
+        }
+        macro_parameter_names[macro_parameter_count] = node_name(parameter);
+        macro_parameter_arguments[macro_parameter_count] = argument;
+        macro_parameter_count += 1;
+        parameter = node_next(parameter);
+        argument = node_next(argument);
+    }
+    if (!node_is_null(parameter) || !node_is_null(argument)) {
+        fail();
+    }
+
+    cell saved_binding_count = macro_binding_count;
+    cell saved_scope_depth = macro_scope_depth;
+    macro_parameter_base[macro_expansion_depth] = parameter_base;
+    macro_binding_base[macro_expansion_depth] = macro_binding_count;
+    macro_active[macro_expansion_depth] = definition;
+    macro_expansion_depth += 1;
+    NodeId result = clone_macro_statement(node_b(definition));
+    macro_expansion_depth -= 1;
+    macro_parameter_count = parameter_base;
+    macro_binding_count = saved_binding_count;
+    macro_scope_depth = saved_scope_depth;
+    return result;
+}
+
+NodeId clone_macro_statement(NodeId statement) {
+    cell kind = node_kind(statement);
+    if (kind == NODE_MACRO_INVOCATION) {
+        NodeId cloned_invocation = allocate_node(NODE_MACRO_INVOCATION);
+        node_set_name(cloned_invocation, node_name(statement));
+        NodeId argument = node_a(statement);
+        NodeId first;
+        NodeId last;
+        while (!node_is_null(argument)) {
+            NodeId cloned = clone_macro_expression(argument, 0);
+            if (node_is_null(first)) {
+                first = cloned;
+            } else {
+                node_set_next(last, cloned);
+            }
+            last = cloned;
+            argument = node_next(argument);
+        }
+        node_set_a(cloned_invocation, first);
+        return instantiate_macro(cloned_invocation);
+    }
+
+    NodeId result = allocate_node(kind);
+    if (kind == NODE_EMPTY_STATEMENT || kind == NODE_ABORT_STATEMENT) {
+        return result;
+    }
+    if (kind == NODE_BLOCK) {
+        if (macro_scope_depth == 32) {
+            fail();
+        }
+        macro_scope_base[macro_scope_depth] = macro_binding_count;
+        macro_scope_depth += 1;
+        NodeId child = node_a(statement);
+        NodeId first;
+        NodeId last;
+        while (!node_is_null(child)) {
+            NodeId cloned = clone_macro_statement(child);
+            if (node_is_null(first)) {
+                first = cloned;
+            } else {
+                node_set_next(last, cloned);
+            }
+            last = cloned;
+            child = node_next(child);
+        }
+        macro_scope_depth -= 1;
+        macro_binding_count = macro_scope_base[macro_scope_depth];
+        node_set_a(result, first);
+    } else if (kind == NODE_DECLARATION) {
+        NodeId initializer = node_a(statement);
+        if (!node_is_null(initializer)) {
+            node_set_a(result, clone_macro_expression(initializer, 0));
+        }
+        if (macro_parameter_index_or_zero(node_name(statement)) != 0
+            || macro_binding_count == 0xff) {
+            fail();
+        }
+        cell duplicate = macro_scope_base[macro_scope_depth - 1];
+        while (duplicate < macro_binding_count) {
+            if (node_equals(
+                macro_binding_names[duplicate],
+                node_name(statement)
+            )) {
+                fail();
+            }
+            duplicate += 1;
+        }
+        NodeId fresh = fresh_macro_name(node_name(statement));
+        macro_binding_names[macro_binding_count] = node_name(statement);
+        macro_binding_fresh_names[macro_binding_count] = fresh;
+        macro_binding_count += 1;
+        node_set_name(result, fresh);
+        node_set_b(result, node_b(statement));
+    } else if (kind == NODE_OUTPUT_STATEMENT) {
+        node_set_a(result, clone_macro_expression(node_a(statement), 0));
+    } else if (kind == NODE_ASSIGNMENT) {
+        node_set_tag(result, node_tag(statement));
+        node_set_a(result, clone_macro_expression(node_a(statement), 0));
+        node_set_b(result, clone_macro_expression(node_b(statement), 0));
+    } else if (kind == NODE_CALL_STATEMENT) {
+        node_set_a(result, clone_macro_expression(node_a(statement), 0));
+    } else if (kind == NODE_RETURN_STATEMENT) {
+        if (!node_is_null(node_a(statement))) {
+            node_set_a(result, clone_macro_expression(node_a(statement), 0));
+        }
+    } else if (kind == NODE_IF_STATEMENT) {
+        node_set_a(result, clone_macro_expression(node_a(statement), 0));
+        node_set_b(result, clone_macro_statement(node_b(statement)));
+        if (!node_is_null(node_c(statement))) {
+            node_set_c(result, clone_macro_statement(node_c(statement)));
+        }
+    } else if (kind == NODE_WHILE_STATEMENT) {
+        node_set_a(result, clone_macro_expression(node_a(statement), 0));
+        node_set_b(result, clone_macro_statement(node_b(statement)));
+    } else {
+        fail();
+    }
+    return result;
+}
+
+NodeId expand_macro_statement(NodeId statement) {
+    if (node_kind(statement) == NODE_MACRO_INVOCATION) {
+        return instantiate_macro(statement);
+    }
+    if (node_kind(statement) == NODE_BLOCK) {
+        NodeId child = node_a(statement);
+        NodeId first;
+        NodeId last;
+        while (!node_is_null(child)) {
+            NodeId next = node_next(child);
+            NodeId expanded = expand_macro_statement(child);
+            if (node_is_null(first)) {
+                first = expanded;
+            } else {
+                node_set_next(last, expanded);
+            }
+            last = expanded;
+            child = next;
+        }
+        node_set_a(statement, first);
+    } else if (node_kind(statement) == NODE_IF_STATEMENT) {
+        node_set_b(statement, expand_macro_statement(node_b(statement)));
+        if (!node_is_null(node_c(statement))) {
+            node_set_c(statement, expand_macro_statement(node_c(statement)));
+        }
+    } else if (node_kind(statement) == NODE_WHILE_STATEMENT) {
+        node_set_b(statement, expand_macro_statement(node_b(statement)));
+    }
+    return statement;
+}
+
+void expand_ast_macros() {
+    macro_parameter_count = 0;
+    macro_binding_count = 0;
+    macro_scope_depth = 0;
+    macro_expansion_depth = 0;
+    validate_macro_declarations();
+    NodeId function = first_function;
+    while (!node_is_null(function)) {
+        node_set_b(function, expand_macro_statement(node_b(function)));
+        function = node_next(function);
+    }
+}

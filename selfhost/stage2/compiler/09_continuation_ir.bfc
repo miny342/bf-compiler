@@ -1,4 +1,4 @@
-// typed ASTから第11段階Continuation IRを構築する。
+// typed ASTから第12段階Continuation IRを構築する。
 
 const cell TERM_NONE = 0;
 const cell TERM_GOTO = 1;
@@ -7,6 +7,7 @@ const cell TERM_CALL = 3;
 const cell TERM_RETURN = 4;
 const cell TERM_HALT = 5;
 const cell TERM_RETURN_ARRAY = 6;
+const cell TERM_ABORT = 7;
 
 const cell IR_SET = 1;
 const cell IR_COPY = 2;
@@ -217,6 +218,10 @@ void finish_array_return(cell slot, cell length) {
     node_set_tag(lowering_current_continuation, TERM_RETURN_ARRAY);
     node_set_value(lowering_current_continuation, slot);
     arena_write(lowering_current_continuation, FIELD_NAME_PAGE, length);
+}
+
+void finish_abort() {
+    node_set_tag(lowering_current_continuation, TERM_ABORT);
 }
 
 void lower_ast_call(NodeId expression) {
@@ -574,6 +579,11 @@ void lower_ast_statement(NodeId statement) {
     }
     cell kind = node_kind(statement);
     if (kind == NODE_EMPTY_STATEMENT) {
+        return;
+    }
+    if (kind == NODE_ABORT_STATEMENT) {
+        finish_abort();
+        lowering_current_continuation = null_node();
         return;
     }
     if (kind == NODE_BLOCK) {
