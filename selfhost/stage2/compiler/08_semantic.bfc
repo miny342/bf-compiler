@@ -817,7 +817,8 @@ cell analyze_ast_statement(NodeId statement) {
         if (node_is_null(otherwise)) {
             return 0;
         }
-        return then_returns && analyze_ast_statement(otherwise);
+        cell otherwise_returns = analyze_ast_statement(otherwise);
+        return then_returns && otherwise_returns;
     }
     if (kind == NODE_WHILE_STATEMENT) {
         if (!types_equal(analyze_ast_expression(node_a(statement)), cell_type)) {
