@@ -214,7 +214,8 @@ struct FunctionLayout {
     portal_temporary_cells: usize,
 }
 
-const GLOBAL_ROUTE_CELLS: usize = 7;
+const GLOBAL_ROUTE_PROTOCOL_CELLS: usize = 7;
+const GLOBAL_ROUTE_NIBBLE_CELLS: usize = 16;
 const ROUTE_OFFSET_LOW: usize = 0;
 const ROUTE_OFFSET_HIGH: usize = 1;
 const ROUTE_VALUE: usize = 2;
@@ -222,6 +223,7 @@ const ROUTE_ACCESSOR_LOW: usize = 3;
 const ROUTE_ACCESSOR_HIGH: usize = 4;
 const ROUTE_RESUME_LOW: usize = 5;
 const ROUTE_RESUME_HIGH: usize = 6;
+const ROUTE_SCRATCH_START: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Location {
@@ -253,8 +255,10 @@ fn build_layouts(
             }
         )
     });
-    let route_cells = if has_global_portal {
-        GLOBAL_ROUTE_CELLS
+    let route_cells = if has_global_portal && config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS {
+        GLOBAL_ROUTE_NIBBLE_CELLS
+    } else if has_global_portal {
+        GLOBAL_ROUTE_PROTOCOL_CELLS
     } else {
         0
     };
@@ -1874,7 +1878,25 @@ impl<'a> AbiEmitter<'a> {
         ] {
             let source = self.route_location(route)?;
             let destination = self.portal_field_location(region, field, self.program.main())?;
-            self.move_location_to_zero(source, destination);
+            // Each nibble transport duplicates the long navigation template.
+            // Restrict it to dynamic low bytes, where the bounded crossings
+            // repay that source-size cost; high bytes and payload values use
+            // the compact unary move.
+            let use_nibbles = matches!(
+                route,
+                ROUTE_OFFSET_LOW | ROUTE_ACCESSOR_LOW | ROUTE_RESUME_LOW
+            );
+            if self.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS && use_nibbles {
+                let Location::Relative(source) = source else {
+                    unreachable!("route staging is frame-relative")
+                };
+                let Location::Global(destination) = destination else {
+                    unreachable!("global portal fields are static")
+                };
+                self.move_relative_to_global_nibbles(source, destination)?;
+            } else {
+                self.move_location_to_zero(source, destination);
+            }
         }
         self.set_location(
             self.portal_field_location(region, AbiField::Active, self.program.main())?,
@@ -2661,7 +2683,7 @@ impl<'a> AbiEmitter<'a> {
         self.move_to(0);
         let decompose = self.capture_infallible(|emitter| {
             emitter.adjust(255);
-            emitter.increment_static_bits(&bits, temporary, 0, 0);
+            emitter.increment_bits(&bits, temporary, 0, 0);
         });
         self.emit_loop(decompose);
 
@@ -2695,6 +2717,58 @@ impl<'a> AbiEmitter<'a> {
         self.emit_global_to_context(source as usize, context_chunks);
     }
 
+    /// Destructively move one frame-relative byte into a zero static cell.
+    /// The otherwise unused lanes in the D=16 route chunk hold a carry and
+    /// eight bits, bounding live-stack crossings by two nibble values (at
+    /// most 30) instead of the source byte (at most 255).
+    fn move_relative_to_global_nibbles(
+        &mut self,
+        source: isize,
+        destination: usize,
+    ) -> Result<(), AbiCodegenError> {
+        debug_assert!(self.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS);
+        let Location::Relative(temporary) = self.route_location(ROUTE_SCRATCH_START)? else {
+            unreachable!("route scratch is frame-relative")
+        };
+        let bits = std::array::from_fn::<_, 8, _>(|index| temporary + 1 + index as isize);
+
+        self.clear(temporary);
+        for bit in bits {
+            self.clear(bit);
+        }
+
+        self.move_to(source);
+        let decompose = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.increment_bits(&bits, temporary, 0, source);
+        });
+        self.emit_loop(decompose);
+        self.move_to(0);
+
+        for index in 1..4 {
+            self.move_static_value(bits[index], bits[0], 1_u8 << index);
+        }
+        for index in 5..8 {
+            self.move_static_value(bits[index], bits[4], 1_u8 << (index - 4));
+        }
+
+        let context_chunks = self.config.portal_chunks();
+        for (digit, contribution) in [(bits[0], 1_u8), (bits[4], 16_u8)] {
+            self.move_to(digit);
+            let transport = self.capture_infallible(|emitter| {
+                emitter.adjust(255);
+                emitter.move_to(0);
+                emitter.emit_context_to_global(destination, context_chunks);
+                emitter.adjust(contribution);
+                emitter.emit_global_to_context(destination, context_chunks);
+                emitter.move_to(digit);
+            });
+            self.emit_loop(transport);
+            self.move_to(0);
+        }
+        Ok(())
+    }
+
     fn move_static_value(&mut self, source: isize, destination: isize, factor: u8) {
         self.move_to(source);
         let body = self.capture_infallible(|emitter| {
@@ -2707,10 +2781,10 @@ impl<'a> AbiEmitter<'a> {
         self.move_to(0);
     }
 
-    /// Increment a little-endian Boolean bit vector in static storage.  The
-    /// temporary is zero on entry and exit; `return_to` is the pointer offset
-    /// required by the surrounding BF loop.
-    fn increment_static_bits(
+    /// Increment a little-endian Boolean bit vector. The temporary is zero on
+    /// entry and exit; `return_to` is the pointer offset required by the
+    /// surrounding BF loop.
+    fn increment_bits(
         &mut self,
         bits: &[isize; 8],
         temporary: isize,
@@ -2734,7 +2808,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(bit);
             emitter.adjust(255);
             if index + 1 < bits.len() {
-                emitter.increment_static_bits(bits, temporary, index + 1, temporary);
+                emitter.increment_bits(bits, temporary, index + 1, temporary);
             } else {
                 emitter.move_to(temporary);
             }
@@ -4309,6 +4383,8 @@ mod tests {
         )
         .unwrap();
         for chunk_cells in [8, 16] {
+            let layouts = build_layouts(&program, AbiConfig::new(chunk_cells).unwrap()).unwrap();
+            assert_eq!(layouts[&main].frame.route_chunks(), 1, "D={chunk_cells}");
             assert_eq!(execute_continuations(&program, chunk_cells), b"Z");
         }
     }

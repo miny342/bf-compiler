@@ -291,6 +291,36 @@ repository interpreterは連続pointer moveを一つのnative operationへ畳む
 一方、生成量、load/parse、RSSにはそのまま効く。素朴なBF interpreterでは長距離move自体も短くなるため、
 実行時間改善も期待できる。mirror portalや有限stackを導入する前の低riskなlayout改善として採用する。
 
+### global portal routeのnibble搬送
+
+逆順配置後のfull compiler sampleでは、`abi.portal.router.global.2`内の`abi.navigation.global`がなお
+全sampleの約42%を占めた。global portal routerはframe上にstageしたindex、payload、accessor PC、resume PCの
+7 bytesをportalへ移す。従来templateは各byteを1ずつ減らし、1 unitごとにlive stackを越えてglobalへ往復するため、
+low byteが200台なら同じstack scanを200回以上行っていた。
+
+D=16では7 protocol cellsが1 chunkを占有し、同じchunk内の残り9 lanesは未使用だった。この9 cellsをcarryと
+8 binary digitsに使い、route byteをbit分解してlow/high nibble counterへ畳み、1または16ずつportalへ加える。
+stack往復はbyte値（最大255）から2 nibbleの和（最大30）へ制限される。scratchは各搬送のentry/exitでzero、
+route sourceは破壊され、zeroであるportal destinationへ値が移る。D=8はscratchを追加せず、従来の7-cell routeと
+unary templateを維持する。
+
+nibble搬送は長いnavigation loop bodyを2組生成するので、7 fieldsすべてに適用するとBF sourceが46.0%増えた。
+full compilerで適用範囲をA/Bし、動的なlow byteであるindex、accessor PC、resume PCの3本だけをnibble化した。
+payloadはload時に0であり、high bytesは通常小さいため、これら4本は生成量に対する効果が小さかった。
+
+| variant | BF source bytes | `hello.bfc` execute | full入力bytes（6秒） | sample RSS |
+| --- | ---: | ---: | ---: | ---: |
+| unary 7本 | 727,308,936 | 630 ms | 1,585 | 1,026,192 KiB |
+| nibble 7本 | 1,062,162,707 | 399 ms | 1,991 | 1,360,104 KiB |
+| nibble 4本（low + payload） | 918,655,064 | 410 ms | 1,955 | 1,216,888 KiB |
+| nibble 3本（low controlのみ） | 870,818,191 | 415 ms | 1,944 | 1,169,256 KiB |
+
+採用した3本版は生成量を19.73%増やす一方、短いself-host compileのexecuteを34.21%短縮し、full compilerの
+同一実行時間での入力処理を22.65%増やした。`global.2` navigationのsample比率も約42%から約12%へ低下し、
+最大siteは`abi.dispatch.page.countdown`へ移った。生成量、parse、RSSを含む一回限りの短い実行では不利になり得るため、
+全field版へ広げずこのPareto点を採用する。次はnested stack scanを含むtransferのinterpreter native化、または
+low-byte continuation IDのprofile-guided配置を独立に比較する。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を
