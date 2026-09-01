@@ -1,6 +1,8 @@
 //! Checked physical layout of file-scope objects and the stack anchor.
 //!
-//! Global aggregate regions occupy the low-address end in declaration order.
+//! Global aggregate regions occupy the low-address end in reverse declaration
+//! order, keeping the low-numbered regions used first by bump allocators close
+//! to the stack anchor.
 //! Every nonempty aggregate receives an aligned portal prefix; zero-sized
 //! aggregates retain identity without consuming tape. Scalar globals and the
 //! D=16 remote-copy scratch sit next to the stack anchor, keeping their emitted
@@ -77,7 +79,7 @@ impl StaticLayout {
             .count();
         let mut globals = Vec::with_capacity(descriptors.len());
         let mut next_head = 0usize;
-        for descriptor in descriptors {
+        for descriptor in descriptors.iter().rev() {
             let cells = match descriptor.value_type() {
                 ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
                 ValueType::Cell | ValueType::Void => continue,
@@ -480,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_globals_keep_scalars_near_anchor_and_arrays_in_source_order() {
+    fn mixed_globals_keep_scalars_near_anchor_and_low_arrays_near_anchor() {
         let descriptors = mixed_descriptors();
         let d16 = StaticLayout::new(AbiConfig::new(16).unwrap(), &descriptors).unwrap();
 
@@ -490,9 +492,9 @@ mod tests {
         assert_eq!(d16.remote_copy_scratch_position(0), Some(87));
         assert_eq!(d16.remote_copy_scratch_position(8), Some(95));
         assert_eq!(d16.remote_copy_scratch_position(9), None);
-        assert_eq!(d16.array_base_head(GlobalId::new(0)), Ok(0));
+        assert_eq!(d16.array_base_head(GlobalId::new(0)), Ok(51));
         assert_eq!(d16.array_chunk_count(GlobalId::new(0)), Ok(2));
-        assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(34));
+        assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(0));
         assert_eq!(d16.array_chunk_count(GlobalId::new(2)), Ok(3));
         assert_eq!(d16.anchor_head(), 96);
 
@@ -500,9 +502,9 @@ mod tests {
         assert_eq!(d8.remote_copy_scratch_position(0), None);
         assert_eq!(d8.scalar_position(GlobalId::new(1)), Ok(72));
         assert_eq!(d8.scalar_position(GlobalId::new(3)), Ok(73));
-        assert_eq!(d8.array_base_head(GlobalId::new(0)), Ok(0));
+        assert_eq!(d8.array_base_head(GlobalId::new(0)), Ok(45));
         assert_eq!(d8.array_chunk_count(GlobalId::new(0)), Ok(3));
-        assert_eq!(d8.array_base_head(GlobalId::new(2)), Ok(27));
+        assert_eq!(d8.array_base_head(GlobalId::new(2)), Ok(0));
         assert_eq!(d8.array_chunk_count(GlobalId::new(2)), Ok(5));
         assert_eq!(d8.anchor_head(), 74);
     }

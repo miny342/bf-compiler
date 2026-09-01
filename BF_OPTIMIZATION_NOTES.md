@@ -269,6 +269,28 @@ frameへの明示的copyだけを選択する。global aggregate portalやframe�
 自体をloopから外す方が大きく効く例である。一般の関数呼び出しをまたぐglobal cacheはalias/effect解析が必要だが、
 このように呼び出し先が対象globalを観測しないと確認できるhot loopでは、まずローカル保持を優先する。
 
+### 低番号global aggregateのanchor近傍配置
+
+self-host CIR版full compilerを2 ms samplingしたところ、`abi.navigation.global`が最大siteで、そのうち
+`abi.portal.router.global.2`が全sampleのおよそ38%を占めた。CIR adapterはbump allocatorが使う低い
+logical rangeからGlobalId 0, 1, 2, ...を割り当てる一方、static layoutも同じ順にlow address側から置いていた。
+そのため最も頻繁に使う低番号regionのportal headがanchorから遠くなっていた。
+
+aggregateの物理配置だけをGlobalId逆順にし、scalar globals、論理GlobalId、portal protocolは変更しない
+A/Bを行った。full compilerでの結果は次のとおりである。
+
+| 指標 | GlobalId昇順配置 | GlobalId逆順配置 | 変化 |
+| --- | ---: | ---: | ---: |
+| 生成BF bytes | 916,810,945 | 727,308,936 | -20.67% |
+| interpreter RSS（sample実行） | 1,211,320 KiB | 1,026,232 KiB | -15.28% |
+| BF parse（3回平均） | 2.737 s | 2.167 s | -20.82% |
+| `hello.bfc` compile execute（3回平均） | 0.634 s | 0.635 s | ほぼ同じ |
+
+repository interpreterは連続pointer moveを一つのnative operationへ畳むため、静的距離の短縮はexecute時間に
+ほぼ現れなかった。4秒時点のself-host進捗も両配置とも入力1369 bytes、約588M native operationsだった。
+一方、生成量、load/parse、RSSにはそのまま効く。素朴なBF interpreterでは長距離move自体も短くなるため、
+実行時間改善も期待できる。mirror portalや有限stackを導入する前の低riskなlayout改善として採用する。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を
