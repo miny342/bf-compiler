@@ -373,6 +373,12 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
                             frame.slots[slot.index()] = value;
                         }
                         (
+                            OwnedOperand::Cell(value),
+                            ParameterLocation::AggregateElement { aggregate, index },
+                        ) => {
+                            frame_aggregate_mut(&mut frame, *aggregate)?[*index] = value;
+                        }
+                        (
                             OwnedOperand::Aggregate(value),
                             ParameterLocation::Array(id) | ParameterLocation::Aggregate(id),
                         ) => {

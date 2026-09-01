@@ -1,10 +1,10 @@
 // ASTと後続IRで共有するbank/page/slot handleとpacked arena。
-// 四つのcell[255][256] regionへnode recordとidentifier byteを置く。
+// 16個のcell[255][256] regionへnode recordとidentifier byteを置く。
 // fieldごとに巨大なglobal regionを作ると、absolute pointer移動を埋め込む
-// backendでは生成BF自体が数GBになるため、region数を四つに抑える。
+// binary CIR経路では各regionをRust ABI backendのsegmentへ写す。
 // nextと頻出fieldを前方へ置き、kindごとに最後に使うfieldまでだけを確保する。
 
-const cell ARENA_LAST_BANK = 3;
+const cell ARENA_LAST_BANK = 15;
 const cell ARENA_LAST_PAGE = 254;
 const cell FIELD_KIND = 0;
 const cell FIELD_NEXT_PAGE = 1;
@@ -170,6 +170,18 @@ cell[255][256] arena_cells_0;
 cell[255][256] arena_cells_1;
 cell[255][256] arena_cells_2;
 cell[255][256] arena_cells_3;
+cell[255][256] arena_cells_4;
+cell[255][256] arena_cells_5;
+cell[255][256] arena_cells_6;
+cell[255][256] arena_cells_7;
+cell[255][256] arena_cells_8;
+cell[255][256] arena_cells_9;
+cell[255][256] arena_cells_10;
+cell[255][256] arena_cells_11;
+cell[255][256] arena_cells_12;
+cell[255][256] arena_cells_13;
+cell[255][256] arena_cells_14;
+cell[255][256] arena_cells_15;
 NodeId arena_next;
 cell arena_exhausted;
 NodeId first_name;
@@ -251,6 +263,42 @@ cell arena_cell_read(NodeId position) {
     if (position.bank == 3) {
         return arena_cells_3[position.page][position.slot];
     }
+    if (position.bank == 4) {
+        return arena_cells_4[position.page][position.slot];
+    }
+    if (position.bank == 5) {
+        return arena_cells_5[position.page][position.slot];
+    }
+    if (position.bank == 6) {
+        return arena_cells_6[position.page][position.slot];
+    }
+    if (position.bank == 7) {
+        return arena_cells_7[position.page][position.slot];
+    }
+    if (position.bank == 8) {
+        return arena_cells_8[position.page][position.slot];
+    }
+    if (position.bank == 9) {
+        return arena_cells_9[position.page][position.slot];
+    }
+    if (position.bank == 10) {
+        return arena_cells_10[position.page][position.slot];
+    }
+    if (position.bank == 11) {
+        return arena_cells_11[position.page][position.slot];
+    }
+    if (position.bank == 12) {
+        return arena_cells_12[position.page][position.slot];
+    }
+    if (position.bank == 13) {
+        return arena_cells_13[position.page][position.slot];
+    }
+    if (position.bank == 14) {
+        return arena_cells_14[position.page][position.slot];
+    }
+    if (position.bank == 15) {
+        return arena_cells_15[position.page][position.slot];
+    }
     fail();
     return 0;
 }
@@ -264,6 +312,30 @@ void arena_cell_write(NodeId position, cell value) {
         arena_cells_2[position.page][position.slot] = value;
     } else if (position.bank == 3) {
         arena_cells_3[position.page][position.slot] = value;
+    } else if (position.bank == 4) {
+        arena_cells_4[position.page][position.slot] = value;
+    } else if (position.bank == 5) {
+        arena_cells_5[position.page][position.slot] = value;
+    } else if (position.bank == 6) {
+        arena_cells_6[position.page][position.slot] = value;
+    } else if (position.bank == 7) {
+        arena_cells_7[position.page][position.slot] = value;
+    } else if (position.bank == 8) {
+        arena_cells_8[position.page][position.slot] = value;
+    } else if (position.bank == 9) {
+        arena_cells_9[position.page][position.slot] = value;
+    } else if (position.bank == 10) {
+        arena_cells_10[position.page][position.slot] = value;
+    } else if (position.bank == 11) {
+        arena_cells_11[position.page][position.slot] = value;
+    } else if (position.bank == 12) {
+        arena_cells_12[position.page][position.slot] = value;
+    } else if (position.bank == 13) {
+        arena_cells_13[position.page][position.slot] = value;
+    } else if (position.bank == 14) {
+        arena_cells_14[position.page][position.slot] = value;
+    } else if (position.bank == 15) {
+        arena_cells_15[position.page][position.slot] = value;
     } else {
         fail();
     }

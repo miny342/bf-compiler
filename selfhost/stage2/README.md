@@ -141,6 +141,22 @@ bfc --run-ir --ir-progress-interval 1s stage2-compiler.bfc \
 この経路はfrontend/loweringとselfhost compiler本体の高速な診断用である。生成したcompilerを
 Brainfuck VM上で動かす回帰は、引き続き`verify-stage2-selfhost.sh`で確認する。
 
+production selfhostでは、selfhost frontendがcompact binary CIRを出力し、Rust ABI backendへ
+渡せる。`cir` entryだけがserializerを含み、targetの`main` entryには含めない。
+
+```console
+scripts/concat-stage2-compiler.sh cir > stage2-cir-compiler.bfc
+scripts/concat-stage2-compiler.sh main > stage2-compiler.bfc
+bfc --run-ir --ir-progress-interval 15s stage2-cir-compiler.bfc \
+  < stage2-compiler.bfc > stage2-compiler.cir 2> stage2-cir.metrics
+bfc --cir-input stage2-compiler.cir --unlimited-tape \
+  > stage2-compiler.bf 2> stage2-backend.metrics
+```
+
+`--cir-input -`でstdinからも読める。decoderはmagic/version、24-bit範囲、frame/global境界、
+call layout、CFG所有関係を検証する。backendの最終BF文字列化はrun-length BF IRからstdoutへ
+直接streamingし、出力サイズ分の`String`を確保しない。
+
 検証scriptは最初に`test.bfc`版をBFへ変換して内部testの`ok`を確認する。続いて`main.bfc`版を
 連結して二段階のコンパイルを実行する。生成結果にエラーmarkerやBrainfuck以外のbyteがないことを
 調べた後、第7段階のglobal/portal回帰に加え、配列initializer、全体代入、値渡し、再帰的aggregate
@@ -172,8 +188,8 @@ recordが12,567 byteでarenaを使い切ったのに対し、kind別compact reco
 sourceに対して17,726 byteまで到達し、直前構成から14.87%改善した。現在の密度で全sourceへ単純外挿
 すると約156,000 cellであり、16-bit handleの65,536-cell上限を超える。
 
-このため現在は`cell[255][256]`を4 bank置き、NodeIdをbank/page/slotの3 cellへ拡張して
-261,120 logical cellを確保する。bankはarena access helperだけで選択し、Continuationのdispatch IDは
+このため現在は`cell[255][256]`を16 bank置き、NodeIdをbank/page/slotの3 cellへ拡張して
+1,044,480 logical cellを確保する。bankはarena access helperだけで選択し、Continuationのdispatch IDは
 従来どおり独立した16-bit page/slot値を使う。参照fieldが1 cell増えるためrecordも拡大するが、
 自己入力の旧密度から見積もった必要量には余裕がある。代償として内部test用のRust-bootstrap BFは
 約1.76 GBになる。開発用interpreterはprofileなしの実行時にraw命令配列を作らずFast IRへ直接RLE変換し、
@@ -181,10 +197,16 @@ pointer source offsetも連続rangeへ圧縮する。これにより同artifact�
 実行できる。その後、型・struct offset・global base/sizeを24-bit化し、階層portalで
 `cell[255][256]`の最終要素を読み書きする回帰まで通した。
 
-現在の自己コンパイル上の制限は、full ASTと生成中Continuation IRを同じarenaへ同居させる空間量である。
+旧経路の自己コンパイル上の制限は、full ASTと生成中Continuation IRを同じarenaへ同居させる空間量だった。
 4 bank（261,120 cell）と8 bank（522,240 cell）はIR lowering中に枯渇した。測定用の16 bank
 （1,044,480 cell）ではloweringを越えてBF出力へ入ったが、335秒で5.34 GBを出力しても未完であり、
-bank追加だけでは最終解にならない。RustのContinuation IR直接VMでは同じ地点まで約30秒、RSS約31 MiBで
-到達し、16-bank測定もRSS約85 MiBでstreamingできた。次はselfhost frontendがContinuation IRを
-text/binary streamとして逐次出力し、Rust backendへ渡すか、ASTを破棄しながらIR領域を再利用して、
-ASTとIRのpeak同居量を減らす方針を優先する。
+bank追加だけでは最終解にならなかった。
+
+binary CIR経路では184,330-byteのproduction sourceを約248秒、最大RSS約89 MiBで自己入力し、
+245 function、5,737 continuationを含む145,210-byteのCIRを出力できた。Rust側はflat frameを
+aliasを保つ単一aggregateへ写し、16-bit local offset portalと24-bit global baseを既存ABIへ接続する。
+global dynamic regionはsegment化し、scalar globalをanchor近傍へ置き、遠距離portal requestは
+regionごとのhidden routerで共有する。測定時の917MB BFは約2.5秒、最大RSS約131 MiBでstreaming
+出力できた。最初の素朴な接続は8.42GB、75秒、最大RSS約8.36GBだったため、出力を89.1%、backend
+時間を96.7%、peak memoryを98.4%削減した。artifact自体はまだ大きく、routerから各segmentへの
+request packet搬送とdispatcher縮約が次のcode-size改善点である。

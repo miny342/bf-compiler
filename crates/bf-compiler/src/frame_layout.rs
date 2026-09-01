@@ -128,10 +128,12 @@ pub struct FrameLayout {
     config: AbiConfig,
     value_cells: usize,
     outbox_cells: usize,
+    route_cells: usize,
     value_chunks: usize,
     frame_aggregates: Vec<FrameAggregateLayout>,
     aggregate_chunks: usize,
     outbox_chunks: usize,
+    route_chunks: usize,
     context_chunks: usize,
     frame_chunks: usize,
 }
@@ -185,6 +187,16 @@ impl FrameLayout {
         frame_aggregates: &[FrameAggregateDescriptor],
         outbox_cells: usize,
     ) -> Result<Self, FrameLayoutError> {
+        Self::with_aggregates_and_route(config, value_cells, frame_aggregates, outbox_cells, 0)
+    }
+
+    pub(crate) fn with_aggregates_and_route(
+        config: AbiConfig,
+        value_cells: usize,
+        frame_aggregates: &[FrameAggregateDescriptor],
+        outbox_cells: usize,
+        route_cells: usize,
+    ) -> Result<Self, FrameLayoutError> {
         let value_chunks = checked_chunks(value_cells, config)?;
         let mut aggregate_chunks = 0usize;
         let mut aggregate_layouts = Vec::with_capacity(frame_aggregates.len());
@@ -218,10 +230,12 @@ impl FrameLayout {
                 .ok_or(FrameLayoutError::SizeOverflow)?;
         }
         let outbox_chunks = checked_chunks(outbox_cells, config)?;
+        let route_chunks = checked_chunks(route_cells, config)?;
         let context_chunks = config.portal_chunks();
         let frame_chunks = value_chunks
             .checked_add(aggregate_chunks)
             .and_then(|chunks| chunks.checked_add(outbox_chunks))
+            .and_then(|chunks| chunks.checked_add(route_chunks))
             .and_then(|chunks| chunks.checked_add(context_chunks))
             .ok_or(FrameLayoutError::SizeOverflow)?;
 
@@ -229,10 +243,12 @@ impl FrameLayout {
             config,
             value_cells,
             outbox_cells,
+            route_cells,
             value_chunks,
             frame_aggregates: aggregate_layouts,
             aggregate_chunks,
             outbox_chunks,
+            route_chunks,
             context_chunks,
             frame_chunks,
         };
@@ -270,6 +286,20 @@ impl FrameLayout {
 
     pub const fn outbox_chunks(&self) -> usize {
         self.outbox_chunks
+    }
+
+    pub(crate) const fn route_chunks(&self) -> usize {
+        self.route_chunks
+    }
+
+    pub(crate) fn route_offset(&self, index: usize) -> Result<isize, FrameLayoutError> {
+        if index >= self.route_cells {
+            return Err(FrameLayoutError::SizeOverflow);
+        }
+        Ok(
+            -(self.route_chunks as isize * self.config.stride() as isize)
+                + self.config.try_logical_offset_from_head(index)? as isize,
+        )
     }
 
     pub const fn array_chunks(&self) -> usize {
@@ -323,7 +353,7 @@ impl FrameLayout {
             });
         }
 
-        let chunks_below_context = self.value_chunks + self.outbox_chunks;
+        let chunks_below_context = self.value_chunks + self.outbox_chunks + self.route_chunks;
         Ok(
             -(chunks_below_context as isize * self.config.stride() as isize)
                 + self.config.try_logical_offset_from_head(index)? as isize,
@@ -339,7 +369,8 @@ impl FrameLayout {
         if layout.descriptor.cells() == 0 {
             return Err(FrameLayoutError::ZeroSizedFrameAggregate { aggregate });
         }
-        let chunks_below_context = self.value_chunks + self.aggregate_chunks + self.outbox_chunks;
+        let chunks_below_context =
+            self.value_chunks + self.aggregate_chunks + self.outbox_chunks + self.route_chunks;
         Ok(-((chunks_below_context - layout.base_chunk) as isize * self.config.stride() as isize))
     }
 
@@ -464,7 +495,8 @@ impl FrameLayout {
     }
 
     /// Offset of an outbox cell from the dispatch-context base head.
-    /// Logical chunk zero is immediately below the context.
+    /// Logical chunk zero is immediately below the optional route staging
+    /// chunk and therefore remains stable for callers using the same layout.
     pub fn outbox_offset(&self, index: usize) -> Result<isize, FrameLayoutError> {
         if index >= self.outbox_cells {
             return Err(FrameLayoutError::OutboxCellOutOfBounds {
@@ -475,7 +507,11 @@ impl FrameLayout {
 
         let chunk = index / self.config.chunk_cells;
         let within = index % self.config.chunk_cells;
-        Ok(-((chunk + 1) as isize * self.config.stride() as isize) + 1 + within as isize)
+        Ok(
+            -((self.route_chunks + chunk + 1) as isize * self.config.stride() as isize)
+                + 1
+                + within as isize,
+        )
     }
 
     /// Offset of an ABI field from the dispatch-context base head.
@@ -546,11 +582,12 @@ impl FrameLayout {
 
     fn regions_do_not_overlap(&self) -> bool {
         let context_start =
-            (self.value_chunks + self.aggregate_chunks + self.outbox_chunks) * self.config.stride();
+            (self.value_chunks + self.aggregate_chunks + self.outbox_chunks + self.route_chunks)
+                * self.config.stride();
         let frame_end = self.frame_chunks * self.config.stride();
         context_start < frame_end
             && (self.value_chunks + self.aggregate_chunks) * self.config.stride() <= context_start
-            && self.outbox_chunks * self.config.stride()
+            && (self.outbox_chunks + self.route_chunks) * self.config.stride()
                 <= context_start
                     - (self.value_chunks + self.aggregate_chunks) * self.config.stride()
     }

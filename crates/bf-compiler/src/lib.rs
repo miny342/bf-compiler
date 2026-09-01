@@ -20,6 +20,8 @@ mod ir;
 mod lexer;
 mod macro_expansion;
 mod parser;
+mod selfhost_cir;
+mod selfhost_cir_adapter;
 mod semantic;
 mod static_layout;
 
@@ -58,4 +60,11 @@ pub use frontend::{
     lower_source, lower_sources,
 };
 pub use ir::{CellId, Instruction, IrError, Program, TransferTarget};
+pub use selfhost_cir::{
+    SelfhostCirArrayOp, SelfhostCirBinaryOp, SelfhostCirCallArgument, SelfhostCirContinuation,
+    SelfhostCirError, SelfhostCirFunction, SelfhostCirGlobalOp, SelfhostCirInstruction,
+    SelfhostCirParameter, SelfhostCirProgram, SelfhostCirReturnType, SelfhostCirStorage,
+    SelfhostCirTerminator, SelfhostCirUnaryOp,
+};
+pub use selfhost_cir_adapter::{SelfhostCirLoweringError, lower_selfhost_cir};
 pub use static_layout::{StaticLayout, StaticLayoutError};

@@ -1,0 +1,276 @@
+// arenaやASTをRust側へ持ち込まず、第12段階のflat Continuation IRだけを
+// compact binary record streamとして出力する。
+
+const cell CIR_RECORD_FUNCTION = 1;
+const cell CIR_RECORD_CONTINUATION = 2;
+const cell CIR_RECORD_INSTRUCTION = 3;
+const cell CIR_RECORD_TERMINATOR = 4;
+const cell CIR_RECORD_END = 0xff;
+
+void emit_cir_u16(cell low, cell high) {
+    compiler_output!(low);
+    compiler_output!(high);
+}
+
+void emit_cir_wide(WideValue value) {
+    compiler_output!(value.low);
+    compiler_output!(value.mid);
+    compiler_output!(value.high);
+}
+
+NodeId next_cir_function_id(NodeId id) {
+    if (id.slot == 0xff) {
+        id.slot = 0;
+        id.page += 1;
+        if (id.page == 0) {
+            fail();
+        }
+    } else {
+        id.slot += 1;
+    }
+    return id;
+}
+
+NodeId cir_function_id(NodeId target) {
+    NodeId function = first_function;
+    NodeId id;
+    while (!node_is_null(function)) {
+        if (node_equals(function, target)) {
+            return id;
+        }
+        id = next_cir_function_id(id);
+        function = node_next(function);
+    }
+    fail();
+    return id;
+}
+
+cell cir_parameter_count(NodeId function) {
+    NodeId parameter = node_a(function);
+    cell count;
+    while (!node_is_null(parameter)) {
+        if (count == 0xff) {
+            fail();
+        }
+        count += 1;
+        parameter = node_next(parameter);
+    }
+    return count;
+}
+
+void emit_cir_function(NodeId function) {
+    NodeId descriptor = node_c(function);
+    NodeId id = cir_function_id(function);
+    NodeId entry_id = continuation_dispatch_id(node_a(descriptor));
+    compiler_output!(CIR_RECORD_FUNCTION);
+    emit_cir_u16(id.slot, id.page);
+    emit_cir_u16(entry_id.slot, entry_id.page);
+    compiler_output!(node_value(descriptor));
+    if (node_tag(function) == AST_TYPE_VOID) {
+        compiler_output!(0);
+        compiler_output!(0);
+    } else if (node_tag(function) == AST_TYPE_ARRAY) {
+        compiler_output!(2);
+        compiler_output!(arena_read(descriptor, FIELD_B_PAGE));
+    } else {
+        compiler_output!(1);
+        compiler_output!(0);
+    }
+    compiler_output!(cir_parameter_count(function));
+    NodeId parameter = node_a(function);
+    while (!node_is_null(parameter)) {
+        compiler_output!(arena_read(parameter, FIELD_C_PAGE));
+        if (node_tag(parameter) == AST_DECLARATION_ARRAY) {
+            compiler_output!(node_value(parameter));
+        } else {
+            compiler_output!(1);
+        }
+        parameter = node_next(parameter);
+    }
+}
+
+void emit_cir_instruction(NodeId instruction) {
+    cell kind = node_tag(instruction);
+    compiler_output!(CIR_RECORD_INSTRUCTION);
+    compiler_output!(kind);
+    if (kind == IR_SET || kind == IR_COPY) {
+        compiler_output!(node_value(instruction));
+        compiler_output!(instruction_source(instruction));
+    } else if (kind == IR_COPY_ABI_VALUE || kind == IR_INPUT) {
+        compiler_output!(node_value(instruction));
+    } else if (kind == IR_OUTPUT) {
+        compiler_output!(instruction_source(instruction));
+    } else if (kind == IR_ADD || kind == IR_SUBTRACT
+        || kind == IR_LESS || kind == IR_LESS_EQUAL
+        || kind == IR_GREATER || kind == IR_GREATER_EQUAL
+        || kind == IR_EQUAL || kind == IR_NOT_EQUAL) {
+        compiler_output!(node_value(instruction));
+        compiler_output!(instruction_source(instruction));
+    } else if (kind == IR_NEGATE || kind == IR_NOT
+        || kind == IR_BOOLEANIZE) {
+        compiler_output!(node_value(instruction));
+    } else if (kind == IR_SET_GLOBAL || kind == IR_COPY_GLOBAL
+        || kind == IR_STORE_GLOBAL || kind == IR_ADD_GLOBAL
+        || kind == IR_SUBTRACT_GLOBAL) {
+        compiler_output!(node_value(instruction));
+        emit_cir_wide(instruction_address(instruction));
+    } else if (kind == IR_ARRAY_LOAD || kind == IR_ARRAY_STORE
+        || kind == IR_ARRAY_ADD || kind == IR_ARRAY_SUBTRACT) {
+        compiler_output!(node_value(instruction));
+        compiler_output!(arena_read(instruction, FIELD_NAME_PAGE));
+        compiler_output!(arena_read(instruction, FIELD_NAME_SLOT));
+        emit_cir_wide(instruction_address(instruction));
+        WideValue cells;
+        cells.low = arena_read(instruction, FIELD_C_PAGE);
+        cells.mid = arena_read(instruction, FIELD_C_SLOT);
+        cells.high = arena_read(instruction, FIELD_C_BANK);
+        emit_cir_wide(cells);
+        cell storage = arena_read(instruction, FIELD_B_PAGE);
+        if (storage == RESOLVED_LOCAL_DYNAMIC) {
+            compiler_output!(0);
+        } else if (storage == RESOLVED_GLOBAL_DYNAMIC) {
+            compiler_output!(1);
+        } else {
+            fail();
+        }
+    } else if (kind == IR_COPY_OUTBOX) {
+        compiler_output!(node_value(instruction));
+        compiler_output!(instruction_source(instruction));
+    } else if (kind == IR_OFFSET_ADD_SCALED) {
+        compiler_output!(node_value(instruction));
+        compiler_output!(arena_read(instruction, FIELD_NAME_PAGE));
+        compiler_output!(arena_read(instruction, FIELD_A_PAGE));
+        compiler_output!(arena_read(instruction, FIELD_A_SLOT));
+        compiler_output!(arena_read(instruction, FIELD_A_BANK));
+    } else if (kind == IR_OFFSET_ADD_CONSTANT) {
+        compiler_output!(node_value(instruction));
+        compiler_output!(arena_read(instruction, FIELD_NAME_PAGE));
+        compiler_output!(arena_read(instruction, FIELD_A_SLOT));
+        compiler_output!(arena_read(instruction, FIELD_A_BANK));
+    } else {
+        fail();
+    }
+}
+
+cell cir_call_argument_count(NodeId continuation) {
+    NodeId argument = node_c(continuation);
+    cell count;
+    while (!node_is_null(argument)) {
+        if (count == 0xff) {
+            fail();
+        }
+        count += 1;
+        argument = node_next(argument);
+    }
+    return count;
+}
+
+void emit_cir_terminator(NodeId continuation) {
+    cell kind = node_tag(continuation);
+    compiler_output!(CIR_RECORD_TERMINATOR);
+    if (kind == TERM_GOTO) {
+        compiler_output!(1);
+        NodeId target = continuation_dispatch_id(node_name(continuation));
+        emit_cir_u16(target.slot, target.page);
+    } else if (kind == TERM_BRANCH) {
+        compiler_output!(2);
+        compiler_output!(node_value(continuation));
+        NodeId then_target = continuation_dispatch_id(node_name(continuation));
+        NodeId else_target = continuation_dispatch_id(node_b(continuation));
+        emit_cir_u16(then_target.slot, then_target.page);
+        emit_cir_u16(else_target.slot, else_target.page);
+    } else if (kind == TERM_CALL) {
+        compiler_output!(3);
+        NodeId callee = cir_function_id(node_name(continuation));
+        NodeId resume = continuation_dispatch_id(node_b(continuation));
+        emit_cir_u16(callee.slot, callee.page);
+        emit_cir_u16(resume.slot, resume.page);
+        compiler_output!(cir_call_argument_count(continuation));
+        NodeId argument = node_c(continuation);
+        while (!node_is_null(argument)) {
+            compiler_output!(node_value(argument));
+            compiler_output!(arena_read(argument, FIELD_B_PAGE));
+            if (node_tag(argument) == AST_DECLARATION_ARRAY) {
+                compiler_output!(arena_read(argument, FIELD_A_PAGE));
+            } else {
+                compiler_output!(1);
+            }
+            argument = node_next(argument);
+        }
+    } else if (kind == TERM_RETURN) {
+        if (node_value(continuation) == VOID_RETURN_SLOT) {
+            compiler_output!(4);
+        } else {
+            compiler_output!(5);
+            compiler_output!(node_value(continuation));
+        }
+    } else if (kind == TERM_HALT) {
+        compiler_output!(6);
+    } else if (kind == TERM_RETURN_ARRAY) {
+        compiler_output!(7);
+        compiler_output!(node_value(continuation));
+        compiler_output!(arena_read(continuation, FIELD_NAME_PAGE));
+    } else if (kind == TERM_ABORT) {
+        compiler_output!(8);
+    } else {
+        fail();
+    }
+}
+
+void emit_cir_continuation(NodeId continuation, NodeId function) {
+    NodeId continuation_id = continuation_dispatch_id(continuation);
+    NodeId function_id = cir_function_id(function);
+    compiler_output!(CIR_RECORD_CONTINUATION);
+    emit_cir_u16(continuation_id.slot, continuation_id.page);
+    emit_cir_u16(function_id.slot, function_id.page);
+    NodeId instruction = node_a(continuation);
+    while (!node_is_null(instruction)) {
+        emit_cir_instruction(instruction);
+        instruction = node_next(instruction);
+    }
+    emit_cir_terminator(continuation);
+}
+
+void emit_cir_program() {
+    compiler_output!('B');
+    compiler_output!('F');
+    compiler_output!('C');
+    compiler_output!('I');
+    compiler_output!('R');
+    compiler_output!(0);
+    compiler_output!(1);
+    compiler_output!('\n');
+    emit_cir_wide(stage7_static_cells);
+    NodeId main_id = cir_function_id(main_function);
+    emit_cir_u16(main_id.slot, main_id.page);
+
+    NodeId function = first_function;
+    while (!node_is_null(function)) {
+        emit_cir_function(function);
+        function = node_next(function);
+    }
+
+    function = first_function;
+    NodeId continuation = first_continuation;
+    while (!node_is_null(function)) {
+        NodeId next_function = node_next(function);
+        NodeId after;
+        if (!node_is_null(next_function)) {
+            after = node_a(node_c(next_function));
+        }
+        while (!node_equals(continuation, after)) {
+            emit_cir_continuation(continuation, function);
+            continuation = node_next(continuation);
+        }
+        function = next_function;
+    }
+    compiler_output!(CIR_RECORD_END);
+}
+
+void compile_program_to_cir() {
+    parse_ast_program();
+    expand_ast_macros();
+    analyze_ast_program();
+    lower_ast_program();
+    emit_cir_program();
+}

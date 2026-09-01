@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Write};
@@ -23,6 +24,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut profile_granularity = None;
     let mut embed_profile = false;
     let mut run_ir = false;
+    let mut cir_input = None;
     let mut ir_progress_interval = Duration::from_secs(10);
     let mut source_paths = Vec::new();
     while let Some(argument) = arguments.next() {
@@ -44,6 +46,8 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             embed_profile = true;
         } else if argument == "--run-ir" {
             run_ir = true;
+        } else if argument == "--cir-input" {
+            cir_input = Some(arguments.next().ok_or("--cir-input requires PATH or -")?);
         } else if argument == "--ir-progress-interval" {
             ir_progress_interval = parse_duration(
                 &arguments
@@ -54,12 +58,16 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             source_paths.push(argument);
         }
     }
-    if source_paths.is_empty() {
+    if source_paths.is_empty() && cir_input.is_none() {
         return Err(format!(
-            "usage: {} [--run-ir] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...",
+            "usage: {} [--run-ir] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--unlimited-tape]",
+            executable.to_string_lossy(),
             executable.to_string_lossy()
         )
         .into());
+    }
+    if cir_input.is_some() && (!source_paths.is_empty() || run_ir) {
+        return Err("--cir-input cannot be combined with source paths or --run-ir".into());
     }
     if profile_granularity.is_some() && profile_map_output.is_none() && !embed_profile {
         return Err(
@@ -73,6 +81,11 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             || embed_profile)
     {
         return Err("--run-ir cannot be combined with Brainfuck code-generation options".into());
+    }
+    if cir_input.is_some()
+        && (profile_map_output.is_some() || profile_granularity.is_some() || embed_profile)
+    {
+        return Err("--cir-input does not yet support profiling output options".into());
     }
     if let Some(output) = &profile_map_output {
         if output == "-" {
@@ -92,6 +105,82 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("--profile-map-output cannot overwrite an input source".into());
             }
         }
+    }
+
+    if let Some(path) = cir_input {
+        let bytes = if path == "-" {
+            let mut bytes = Vec::new();
+            io::Read::read_to_end(&mut io::stdin().lock(), &mut bytes)?;
+            bytes
+        } else {
+            fs::read(&path)
+                .map_err(|error| format!("failed to read '{}': {error}", path.to_string_lossy()))?
+        };
+        let decode_started = Instant::now();
+        let flat = bf_compiler::SelfhostCirProgram::decode(&bytes)?;
+        let mut portal_regions = BTreeSet::new();
+        let mut portal_function_regions = BTreeSet::new();
+        let mut portal_sites = 0usize;
+        for continuation in &flat.continuations {
+            for instruction in &continuation.instructions {
+                if let bf_compiler::SelfhostCirInstruction::Array {
+                    base,
+                    cells,
+                    storage,
+                    ..
+                } = instruction
+                {
+                    portal_sites += 1;
+                    portal_regions.insert((*storage as u8, *base, *cells));
+                    portal_function_regions.insert((
+                        continuation.function,
+                        *storage as u8,
+                        *base,
+                        *cells,
+                    ));
+                }
+            }
+        }
+        eprintln!(
+            "bfc-cir phase=decode status=finished elapsed_ms={} bytes={} functions={} continuations={} static_cells={} portal_sites={} portal_regions={} portal_function_regions={} {}",
+            decode_started.elapsed().as_millis(),
+            bytes.len(),
+            flat.functions.len(),
+            flat.continuations.len(),
+            flat.static_cells,
+            portal_sites,
+            portal_regions.len(),
+            portal_function_regions.len(),
+            memory_metrics(),
+        );
+        let lower_started = Instant::now();
+        let program = bf_compiler::lower_selfhost_cir(&flat)?;
+        eprintln!(
+            "bfc-cir phase=adapt status=finished elapsed_ms={} functions={} continuations={} globals={} {}",
+            lower_started.elapsed().as_millis(),
+            program.functions().len(),
+            program.continuations().len(),
+            program.globals().len(),
+            memory_metrics(),
+        );
+        let compile_started = Instant::now();
+        let lowered = if unlimited_tape {
+            bf_compiler::lower_continuations_unbounded(&program)?
+        } else {
+            bf_compiler::lower_continuations(&program)?
+        };
+        let brainfuck = bf_compiler::optimize_bf(&lowered);
+        eprintln!(
+            "bfc-cir phase=compile status=finished elapsed_ms={} output_bytes={} {}",
+            compile_started.elapsed().as_millis(),
+            brainfuck.source_len(),
+            memory_metrics(),
+        );
+        let stdout = io::stdout();
+        let mut output = BufWriter::with_capacity(1024 * 1024, stdout.lock());
+        brainfuck.write_source(&mut output)?;
+        output.flush()?;
+        return Ok(());
     }
 
     let mut sources = Vec::with_capacity(source_paths.len());

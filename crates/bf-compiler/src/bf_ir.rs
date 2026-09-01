@@ -1,6 +1,7 @@
 //! Brainfuck-shaped intermediate representation.
 
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
 use bf_profiling::ProfileSiteId;
 
@@ -268,6 +269,68 @@ impl BfProgram {
         write_instructions(&self.instructions, &mut source);
         source
     }
+
+    /// Exact serialized Brainfuck byte count without materializing the source.
+    pub fn source_len(&self) -> u64 {
+        source_len(&self.instructions)
+    }
+
+    /// Serialize directly to a byte stream, bounding memory independently of
+    /// long pointer movements in the generated program.
+    pub fn write_source(&self, output: &mut impl Write) -> io::Result<()> {
+        write_instructions_streaming(&self.instructions, output)
+    }
+}
+
+fn source_len(instructions: &[BfInstruction]) -> u64 {
+    instructions
+        .iter()
+        .map(|instruction| match instruction {
+            BfInstruction::Move(amount) => amount.unsigned_abs() as u64,
+            BfInstruction::Add(value) if *value <= 128 => u64::from(*value),
+            BfInstruction::Add(value) => u64::from(256_u16 - u16::from(*value)),
+            BfInstruction::Input | BfInstruction::Output => 1,
+            BfInstruction::Loop(body) => 2 + source_len(body),
+        })
+        .sum()
+}
+
+fn write_instructions_streaming(
+    instructions: &[BfInstruction],
+    output: &mut impl Write,
+) -> io::Result<()> {
+    fn repeated(output: &mut impl Write, byte: u8, mut count: usize) -> io::Result<()> {
+        let buffer = [byte; 8192];
+        while count != 0 {
+            let chunk = count.min(buffer.len());
+            output.write_all(&buffer[..chunk])?;
+            count -= chunk;
+        }
+        Ok(())
+    }
+
+    for instruction in instructions {
+        match instruction {
+            BfInstruction::Move(amount) if *amount >= 0 => {
+                repeated(output, b'>', amount.unsigned_abs())?;
+            }
+            BfInstruction::Move(amount) => repeated(output, b'<', amount.unsigned_abs())?,
+            BfInstruction::Add(value) if *value <= 128 => {
+                repeated(output, b'+', usize::from(*value))?;
+            }
+            BfInstruction::Add(value) => {
+                repeated(output, b'-', usize::from(256_u16 - u16::from(*value)))?;
+            }
+            BfInstruction::Input => output.write_all(b",")?,
+            BfInstruction::Output => output.write_all(b".")?,
+            BfInstruction::Loop(body) => {
+                output.write_all(b"[")?;
+                write_instructions_streaming(body, output)?;
+                output.write_all(b"]")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_instructions(instructions: &[BfInstruction], output: &mut String) {
@@ -372,6 +435,10 @@ mod tests {
         ]);
 
         assert_eq!(program.to_source(), ">><++-,.[-]");
+        assert_eq!(program.source_len(), 11);
+        let mut streamed = Vec::new();
+        program.write_source(&mut streamed).unwrap();
+        assert_eq!(streamed, program.to_source().into_bytes());
     }
 
     #[test]

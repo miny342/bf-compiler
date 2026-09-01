@@ -5,7 +5,7 @@ use std::fmt;
 use crate::bf_optimizer::{optimize_annotated_bf, optimize_bf};
 use crate::continuation_ir::{
     Address, AggregateRegion, ArrayRegion, Continuation, ContinuationId, ContinuationProgram,
-    FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId,
+    FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId, GlobalId,
     LogicalOffset, ParameterLocation, Terminator, ValueOperand, ValueType,
 };
 use crate::frame_layout::{AbiConfig, AbiField, FrameLayout, FrameLayoutError, PROTOCOL_CELLS};
@@ -214,6 +214,15 @@ struct FunctionLayout {
     portal_temporary_cells: usize,
 }
 
+const GLOBAL_ROUTE_CELLS: usize = 7;
+const ROUTE_OFFSET_LOW: usize = 0;
+const ROUTE_OFFSET_HIGH: usize = 1;
+const ROUTE_VALUE: usize = 2;
+const ROUTE_ACCESSOR_LOW: usize = 3;
+const ROUTE_ACCESSOR_HIGH: usize = 4;
+const ROUTE_RESUME_LOW: usize = 5;
+const ROUTE_RESUME_HIGH: usize = 6;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Location {
     /// Offset from the current function's dispatch-context base.
@@ -226,6 +235,29 @@ fn build_layouts(
     program: &ContinuationProgram,
     config: AbiConfig,
 ) -> Result<HashMap<FunctionId, FunctionLayout>, AbiCodegenError> {
+    let has_global_portal = program.continuations().iter().any(|continuation| {
+        matches!(
+            continuation.terminator(),
+            Terminator::ArrayLoad {
+                array: AggregateRegion::Global(_),
+                ..
+            } | Terminator::ArrayStore {
+                array: AggregateRegion::Global(_),
+                ..
+            } | Terminator::AggregateLoad {
+                source: AggregateRegion::Global(_),
+                ..
+            } | Terminator::AggregateStore {
+                destination: AggregateRegion::Global(_),
+                ..
+            }
+        )
+    });
+    let route_cells = if has_global_portal {
+        GLOBAL_ROUTE_CELLS
+    } else {
+        0
+    };
     let mut layouts = HashMap::with_capacity(program.functions().len());
     for function in program.functions() {
         let branch_temporaries = program
@@ -258,11 +290,12 @@ fn build_layouts(
             .checked_add(branch_temporaries)
             .ok_or(FrameLayoutError::SizeOverflow)?;
         let portal_temporary_cells = value_cells - portal_temporary_start;
-        let frame = FrameLayout::with_aggregates(
+        let frame = FrameLayout::with_aggregates_and_route(
             config,
             value_cells,
             function.frame_aggregates(),
             function.outbox_cells(),
+            route_cells,
         )?;
         layouts.insert(
             function.id(),
@@ -322,6 +355,13 @@ struct PortalSite {
     cells: usize,
     return_to: ContinuationId,
     next_resume: Option<ContinuationId>,
+    router: Option<ContinuationId>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GlobalPortalRouter {
+    id: ContinuationId,
+    global: GlobalId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -329,6 +369,7 @@ enum DispatchEntry<'a> {
     Continuation(&'a Continuation),
     PortalAccessor(PortalAccessor),
     PortalResume(PortalSite),
+    GlobalPortalRouter(GlobalPortalRouter),
 }
 
 impl DispatchEntry<'_> {
@@ -337,6 +378,7 @@ impl DispatchEntry<'_> {
             Self::Continuation(continuation) => continuation.id(),
             Self::PortalAccessor(accessor) => accessor.id,
             Self::PortalResume(site) => site.resume,
+            Self::GlobalPortalRouter(router) => router.id,
         }
     }
 }
@@ -346,6 +388,7 @@ struct PortalPlan {
     accessors: Vec<PortalAccessor>,
     sites: HashMap<ContinuationId, PortalSite>,
     ordered_sites: Vec<PortalSite>,
+    routers: Vec<GlobalPortalRouter>,
 }
 
 impl PortalPlan {
@@ -359,6 +402,8 @@ impl PortalPlan {
         let mut accessor_ids = HashMap::new();
         let mut sites = HashMap::new();
         let mut ordered_sites = Vec::new();
+        let mut routers = Vec::new();
+        let mut router_ids = HashMap::new();
         for continuation in program.continuations() {
             let (region, offset, operation, cells, return_to) = match *continuation.terminator() {
                 Terminator::ArrayLoad {
@@ -417,6 +462,19 @@ impl PortalPlan {
                 ),
                 _ => continue,
             };
+            let router = match region {
+                AggregateRegion::Global(global) => {
+                    Some(if let Some(id) = router_ids.get(&global).copied() {
+                        id
+                    } else {
+                        let id = allocate_hidden_id(&mut used)?;
+                        router_ids.insert(global, id);
+                        routers.push(GlobalPortalRouter { id, global });
+                        id
+                    })
+                }
+                AggregateRegion::Frame(_) | AggregateRegion::Outbox => None,
+            };
             let key = operation.kind();
             let accessor = if let Some(accessor) = accessor_ids.get(&key).copied() {
                 accessor
@@ -442,6 +500,7 @@ impl PortalPlan {
                     cells,
                     return_to,
                     next_resume: resumes.get(leaf + 1).copied(),
+                    router,
                 };
                 ordered_sites.push(site);
             }
@@ -457,6 +516,7 @@ impl PortalPlan {
             accessors,
             sites,
             ordered_sites,
+            routers,
         })
     }
 }
@@ -684,6 +744,12 @@ impl<'a> AbiEmitter<'a> {
                     .entry((site.resume.get() >> 8) as u8)
                     .or_default()
                     .push(DispatchEntry::PortalResume(site));
+            }
+            for &router in &emitter.portal.routers {
+                pages
+                    .entry((router.id.get() >> 8) as u8)
+                    .or_default()
+                    .push(DispatchEntry::GlobalPortalRouter(router));
             }
             let pages = pages
                 .into_iter()
@@ -1009,6 +1075,7 @@ impl<'a> AbiEmitter<'a> {
                 Ok(())
             }
             DispatchEntry::PortalResume(site) => self.emit_portal_resume(site),
+            DispatchEntry::GlobalPortalRouter(router) => self.emit_global_portal_router(router),
         }
     }
 
@@ -1441,7 +1508,7 @@ impl<'a> AbiEmitter<'a> {
             .iter()
             .map(|parameter| {
                 let cells = match parameter {
-                    ParameterLocation::Cell(_) => None,
+                    ParameterLocation::Cell(_) | ParameterLocation::AggregateElement { .. } => None,
                     ParameterLocation::Array(array) | ParameterLocation::Aggregate(array) => Some(
                         callee_function
                             .frame_aggregate(*array)
@@ -1473,6 +1540,17 @@ impl<'a> AbiEmitter<'a> {
                     let src = self.address_location(argument, caller)?;
                     let dst = Location::Relative(
                         callee_context_delta + callee_frame.frame_offset(parameter),
+                    );
+                    self.copy_locations(src, dst, restore);
+                }
+                (
+                    ValueOperand::Cell(argument),
+                    ParameterLocation::AggregateElement { aggregate, index },
+                ) => {
+                    let src = self.address_location(argument, caller)?;
+                    let dst = Location::Relative(
+                        callee_context_delta
+                            + callee_frame.aggregate_element_offset(aggregate, index)?,
                     );
                     self.copy_locations(src, dst, restore);
                 }
@@ -1670,6 +1748,9 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn emit_portal_call(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
+        if let Some(router) = site.router {
+            return self.stage_global_portal(site, router);
+        }
         let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
 
         for field in AbiField::ALL {
@@ -1719,6 +1800,77 @@ impl<'a> AbiEmitter<'a> {
             site.resume,
         )?;
         self.enter_portal(site.region, site.function)
+    }
+
+    fn stage_global_portal(
+        &mut self,
+        site: PortalSite,
+        router: ContinuationId,
+    ) -> Result<(), AbiCodegenError> {
+        let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+        let route_low = self.route_location(ROUTE_OFFSET_LOW)?;
+        let route_high = self.route_location(ROUTE_OFFSET_HIGH)?;
+        match site.offset {
+            PortalOffset::Byte(index) => {
+                let source = self.address_location(index, site.function)?;
+                self.copy_locations(source, route_low, restore);
+                self.clear_location(route_high);
+            }
+            PortalOffset::Word(offset) => {
+                let low = self.address_location(offset.low, site.function)?;
+                let high = self.address_location(offset.high, site.function)?;
+                self.copy_locations(low, route_low, restore);
+                self.copy_locations(high, route_high, restore);
+            }
+        }
+        if let PortalOperation::Store { source } = site.operation {
+            let value_source = if site.cells > 1 {
+                self.portal_temporary_location(site.function, site.leaf)?
+            } else {
+                self.value_operand_element_location(source, site.leaf, site.function)?
+            };
+            self.copy_locations(value_source, self.route_location(ROUTE_VALUE)?, restore);
+        } else {
+            self.clear_location(self.route_location(ROUTE_VALUE)?);
+        }
+        for (index, value) in [
+            (ROUTE_ACCESSOR_LOW, site.accessor.get() as u8),
+            (ROUTE_ACCESSOR_HIGH, (site.accessor.get() >> 8) as u8),
+            (ROUTE_RESUME_LOW, site.resume.get() as u8),
+            (ROUTE_RESUME_HIGH, (site.resume.get() >> 8) as u8),
+        ] {
+            self.set_location(self.route_location(index)?, value);
+        }
+        self.set_next_pc(router)
+    }
+
+    fn emit_global_portal_router(
+        &mut self,
+        router: GlobalPortalRouter,
+    ) -> Result<(), AbiCodegenError> {
+        let region = AggregateRegion::Global(router.global);
+        // A static portal starts zero and its resume path clears every protocol
+        // field after each access. Route staging is single-use, so moving the
+        // seven request bytes is both smaller and cheaper than seven restored
+        // cross-stack copies plus sixteen redundant remote clears.
+        for (route, field) in [
+            (ROUTE_OFFSET_LOW, AbiField::Index),
+            (ROUTE_OFFSET_HIGH, AbiField::Scratch0),
+            (ROUTE_VALUE, AbiField::Value),
+            (ROUTE_ACCESSOR_LOW, AbiField::NextPcLow),
+            (ROUTE_ACCESSOR_HIGH, AbiField::NextPcHigh),
+            (ROUTE_RESUME_LOW, AbiField::ReturnPcLow),
+            (ROUTE_RESUME_HIGH, AbiField::ReturnPcHigh),
+        ] {
+            let source = self.route_location(route)?;
+            let destination = self.portal_field_location(region, field, self.program.main())?;
+            self.move_location_to_zero(source, destination);
+        }
+        self.set_location(
+            self.portal_field_location(region, AbiField::Active, self.program.main())?,
+            1,
+        );
+        self.enter_portal(region, self.program.main())
     }
 
     fn emit_aggregate_accessor(&mut self, accessor: PortalAccessor) -> Result<(), AbiCodegenError> {
@@ -2301,10 +2453,23 @@ impl<'a> AbiEmitter<'a> {
         )))
     }
 
+    fn route_location(&self, index: usize) -> Result<Location, AbiCodegenError> {
+        Ok(Location::Relative(
+            self.layout(self.program.main())?
+                .frame
+                .route_offset(index)?,
+        ))
+    }
+
     fn common_outbox_offset(&self, index: usize) -> isize {
         let chunk = index / self.config.chunk_cells();
         let within = index % self.config.chunk_cells();
-        -((chunk + 1) as isize * self.config.stride() as isize) + 1 + within as isize
+        let route_chunks = self
+            .layout(self.program.main())
+            .expect("main layout")
+            .frame
+            .route_chunks();
+        -((route_chunks + chunk + 1) as isize * self.config.stride() as isize) + 1 + within as isize
     }
 
     fn acquire_branch_temporary(&mut self, function: FunctionId) -> Result<isize, AbiCodegenError> {
@@ -2573,6 +2738,23 @@ impl<'a> AbiEmitter<'a> {
             return;
         }
         self.clear_location(dst);
+        self.move_context_to_location(src);
+        let body = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.move_location_to_context(src);
+            emitter.move_context_to_location(dst);
+            emitter.adjust(1);
+            emitter.move_location_to_context(dst);
+            emitter.move_context_to_location(src);
+        });
+        self.emit_loop(body);
+        self.move_location_to_context(src);
+    }
+
+    fn move_location_to_zero(&mut self, src: Location, dst: Location) {
+        if src == dst {
+            return;
+        }
         self.move_context_to_location(src);
         let body = self.capture_infallible(|emitter| {
             emitter.adjust(255);

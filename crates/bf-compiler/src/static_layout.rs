@@ -1,11 +1,10 @@
 //! Checked physical layout of file-scope objects and the stack anchor.
 //!
-//! Scalar globals occupy ordinary tape cells at the low-address end. The D=16
-//! ABI reserves nine shared cells for bounded-cost copies from scalar globals,
-//! then global aggregate regions follow in declaration order. Every nonempty
-//! aggregate receives an aligned portal prefix; zero-sized aggregates retain
-//! identity without consuming tape. The first cell after the static regions is
-//! the zero-valued stack anchor head.
+//! Global aggregate regions occupy the low-address end in declaration order.
+//! Every nonempty aggregate receives an aligned portal prefix; zero-sized
+//! aggregates retain identity without consuming tape. Scalar globals and the
+//! D=16 remote-copy scratch sit next to the stack anchor, keeping their emitted
+//! navigation templates bounded even when aggregate storage is very large.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -77,28 +76,7 @@ impl StaticLayout {
             .filter(|descriptor| descriptor.value_type() == ValueType::Cell)
             .count();
         let mut globals = Vec::with_capacity(descriptors.len());
-
-        let mut scalar_position = 0usize;
-        for descriptor in descriptors {
-            if descriptor.value_type() == ValueType::Cell {
-                globals.push(GlobalLayout::Cell {
-                    id: descriptor.id(),
-                    position: scalar_position,
-                });
-                scalar_position = scalar_position
-                    .checked_add(1)
-                    .ok_or(StaticLayoutError::SizeOverflow)?;
-            }
-        }
-
-        let remote_copy_scratch_start =
-            (config.chunk_cells() >= REMOTE_COPY_SCRATCH_CELLS).then_some(scalar_cells);
-        let scratch_cells = remote_copy_scratch_start
-            .map(|_| REMOTE_COPY_SCRATCH_CELLS)
-            .unwrap_or(0);
-        let mut next_head = scalar_cells
-            .checked_add(scratch_cells)
-            .ok_or(StaticLayoutError::SizeOverflow)?;
+        let mut next_head = 0usize;
         for descriptor in descriptors {
             let cells = match descriptor.value_type() {
                 ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
@@ -125,6 +103,27 @@ impl StaticLayout {
                 .checked_add(physical_cells)
                 .ok_or(StaticLayoutError::SizeOverflow)?;
         }
+
+        let mut scalar_position = next_head;
+        for descriptor in descriptors {
+            if descriptor.value_type() == ValueType::Cell {
+                globals.push(GlobalLayout::Cell {
+                    id: descriptor.id(),
+                    position: scalar_position,
+                });
+                scalar_position = scalar_position
+                    .checked_add(1)
+                    .ok_or(StaticLayoutError::SizeOverflow)?;
+            }
+        }
+        let remote_copy_scratch_start =
+            (config.chunk_cells() >= REMOTE_COPY_SCRATCH_CELLS).then_some(scalar_position);
+        let scratch_cells = remote_copy_scratch_start
+            .map(|_| REMOTE_COPY_SCRATCH_CELLS)
+            .unwrap_or(0);
+        next_head = scalar_position
+            .checked_add(scratch_cells)
+            .ok_or(StaticLayoutError::SizeOverflow)?;
 
         let layout = Self {
             config,
@@ -481,27 +480,29 @@ mod tests {
     }
 
     #[test]
-    fn mixed_globals_use_scalar_prefix_and_source_order_for_arrays() {
+    fn mixed_globals_keep_scalars_near_anchor_and_arrays_in_source_order() {
         let descriptors = mixed_descriptors();
         let d16 = StaticLayout::new(AbiConfig::new(16).unwrap(), &descriptors).unwrap();
 
         assert_eq!(d16.scalar_cells(), 2);
-        assert_eq!(d16.scalar_position(GlobalId::new(1)), Ok(0));
-        assert_eq!(d16.scalar_position(GlobalId::new(3)), Ok(1));
-        assert_eq!(d16.remote_copy_scratch_position(0), Some(2));
-        assert_eq!(d16.remote_copy_scratch_position(8), Some(10));
+        assert_eq!(d16.scalar_position(GlobalId::new(1)), Ok(85));
+        assert_eq!(d16.scalar_position(GlobalId::new(3)), Ok(86));
+        assert_eq!(d16.remote_copy_scratch_position(0), Some(87));
+        assert_eq!(d16.remote_copy_scratch_position(8), Some(95));
         assert_eq!(d16.remote_copy_scratch_position(9), None);
-        assert_eq!(d16.array_base_head(GlobalId::new(0)), Ok(11));
+        assert_eq!(d16.array_base_head(GlobalId::new(0)), Ok(0));
         assert_eq!(d16.array_chunk_count(GlobalId::new(0)), Ok(2));
-        assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(45));
+        assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(34));
         assert_eq!(d16.array_chunk_count(GlobalId::new(2)), Ok(3));
         assert_eq!(d16.anchor_head(), 96);
 
         let d8 = StaticLayout::new(AbiConfig::new(8).unwrap(), &descriptors).unwrap();
         assert_eq!(d8.remote_copy_scratch_position(0), None);
-        assert_eq!(d8.array_base_head(GlobalId::new(0)), Ok(2));
+        assert_eq!(d8.scalar_position(GlobalId::new(1)), Ok(72));
+        assert_eq!(d8.scalar_position(GlobalId::new(3)), Ok(73));
+        assert_eq!(d8.array_base_head(GlobalId::new(0)), Ok(0));
         assert_eq!(d8.array_chunk_count(GlobalId::new(0)), Ok(3));
-        assert_eq!(d8.array_base_head(GlobalId::new(2)), Ok(29));
+        assert_eq!(d8.array_base_head(GlobalId::new(2)), Ok(27));
         assert_eq!(d8.array_chunk_count(GlobalId::new(2)), Ok(5));
         assert_eq!(d8.anchor_head(), 74);
     }
@@ -554,7 +555,7 @@ mod tests {
             assert_eq!(layout.array_chunk_count(global), Ok(expected_chunks));
             assert_eq!(
                 layout.array_element_position(global, 255).unwrap(),
-                scratch_cells + config.logical_offset_from_head(PROTOCOL_CELLS + 255)
+                config.logical_offset_from_head(PROTOCOL_CELLS + 255)
             );
             assert_eq!(
                 layout.array_element_position(global, 256),

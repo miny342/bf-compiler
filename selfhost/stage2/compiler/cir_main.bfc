@@ -1,0 +1,13 @@
+// production compilerのbinary CIR出力用entrypoint。
+
+void read_character() {
+    current_char = input();
+}
+
+macro compiler_output(value) {
+    output(value);
+}
+
+void main() {
+    compile_program_to_cir();
+}

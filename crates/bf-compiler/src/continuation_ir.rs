@@ -206,6 +206,15 @@ pub enum Address {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParameterLocation {
     Cell(FrameSlot),
+    /// One scalar cell inside an aligned aggregate region.
+    ///
+    /// This is primarily useful for importing flat, alias-preserving IRs:
+    /// their whole frame can remain one portal-capable aggregate while calls
+    /// still pass scalar parameters independently.
+    AggregateElement {
+        aggregate: FrameAggregateId,
+        index: usize,
+    },
     Array(FrameArrayId),
     Aggregate(FrameAggregateId),
 }
@@ -351,7 +360,9 @@ impl FunctionDescriptor {
             .iter()
             .filter_map(|parameter| match parameter {
                 ParameterLocation::Cell(slot) => Some(*slot),
-                ParameterLocation::Array(_) | ParameterLocation::Aggregate(_) => None,
+                ParameterLocation::AggregateElement { .. }
+                | ParameterLocation::Array(_)
+                | ParameterLocation::Aggregate(_) => None,
             })
             .collect();
         Self {
@@ -1212,6 +1223,26 @@ fn validate_program(
                         parameter,
                     });
                 }
+                ParameterLocation::AggregateElement { aggregate, index } => {
+                    let Some(descriptor) = function
+                        .frame_aggregates
+                        .iter()
+                        .find(|descriptor| descriptor.id == aggregate)
+                    else {
+                        return Err(ContinuationIrError::UnknownParameterArray {
+                            function: function.id,
+                            array: aggregate,
+                        });
+                    };
+                    if index >= descriptor.cells {
+                        return Err(ContinuationIrError::ArrayElementOutOfBounds {
+                            continuation: function.entry,
+                            array: AggregateRegion::Frame(aggregate),
+                            index,
+                            cells: descriptor.cells,
+                        });
+                    }
+                }
                 ParameterLocation::Cell(_)
                 | ParameterLocation::Array(_)
                 | ParameterLocation::Aggregate(_) => {}
@@ -1222,7 +1253,9 @@ fn validate_program(
                         function: function.id,
                         slot,
                     },
-                    ParameterLocation::Array(_) | ParameterLocation::Aggregate(_) => {
+                    ParameterLocation::AggregateElement { .. }
+                    | ParameterLocation::Array(_)
+                    | ParameterLocation::Aggregate(_) => {
                         ContinuationIrError::DuplicateParameterLocation {
                             function: function.id,
                             parameter,
@@ -1717,7 +1750,7 @@ fn value_operand_type(
 
 fn parameter_type(parameter: ParameterLocation, function: &FunctionDescriptor) -> ValueType {
     match parameter {
-        ParameterLocation::Cell(_) => ValueType::Cell,
+        ParameterLocation::Cell(_) | ParameterLocation::AggregateElement { .. } => ValueType::Cell,
         ParameterLocation::Array(array) => ValueType::Array(
             function
                 .frame_array(array)
@@ -1759,7 +1792,14 @@ fn validate_logical_offset(
     validate_address(offset.low, continuation, function, globals)?;
     validate_address(offset.high, continuation, function, globals)?;
     for address in [offset.low, offset.high] {
-        if !matches!(address, Address::Frame(_)) {
+        if !matches!(
+            address,
+            Address::Frame(_)
+                | Address::ArrayElement {
+                    array: AggregateRegion::Frame(_),
+                    ..
+                }
+        ) {
             return Err(ContinuationIrError::LogicalOffsetIsNotFrameOwned {
                 continuation,
                 address,

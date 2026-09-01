@@ -684,6 +684,27 @@ Continuation IRのconstructorは次を検証する。
 不正なIRをコード生成器が暗黙に修正するのではなく、明示的なエラーとして
 拒否する。
 
+## selfhost binary CIR
+
+stage-2 selfhost compilerは、arena recordやtyped ASTをserializeせず、lowering後のflat ABI CIRだけを
+`BFCIR\0\x01\n` magicで始まるbinary record streamへ出力できる。headerは24-bit little-endianの
+static cell数と16-bit main function IDを持つ。その後にfunction、continuation、instruction、
+terminator recordが続き、`0xff`で終了する。
+
+- function recordはID、entry continuation、flat frame幅、return種別、parameterのdestination/幅を持つ。
+- continuation recordは16-bit dispatch IDとowner functionを明示する。
+- scalar slotは8-bit、dispatcher/function IDとlogical offset量は16-bit、global base/lengthは24-bitである。
+- call recordはcallee、resume、評価済みargumentのsource/destination/幅を持つ。
+- dynamic access recordはoperation、data slot、offset low/high、base、region幅、frame/global種別を持つ。
+
+Rust decoderはrecordを直接typed vectorへ読み、flat frame全体を一つのaligned aggregateへ写す。
+配列命令はhidden continuationを挟むportal terminatorへ分割する。globalはdynamic accessされた区間だけを
+aggregate segment化し、それ以外で実際に参照されたcellだけをscalar globalにする。このため24-bitの
+source logical addressをtarget tape上へそのまま再現する必要はなく、sourceが観測できるaliasだけを保つ。
+
+CLIは`bfc --cir-input FILE --unlimited-tape`（または`--cir-input -`）でこのstreamをRust ABI backendへ
+渡す。BF IRのserializerは長いMoveを巨大な`String`へ展開せずstdoutへ直接書く。
+
 ## 当面の実装順序
 
 1. 現在のセルIR、BF IR、BF文字列化を基準実装として安定させる。（完了）
@@ -704,8 +725,8 @@ Continuation IRのconstructorは次を検証する。
     recordへcompact化し、同じarenaでの自己入力到達位置を12,567 byteから15,454 byteへ改善した。
     旧direct parser専用sourceをproduction連結から除外した。さらにscalar literalの4-cell化、binary
     右辺即値、parse時定数畳み込みにより、直前構成の15,431 byteから17,726 byteまで到達する。現在の
-    全source需要の単純外挿は約156,000 cellとなるため、完全自己コンパイルにはscratch arena、
-    segmented storage、またはstreaming化が必要。）
+    全source需要に対して16-bank arenaとbinary CIR streamingを導入し、selfhost frontendからRust ABI
+    backendへ渡す完全自己入力経路を通した。）
 13. profileに基づき、BF固有templateとcost modelを段階的に追加する。（着手）
 14. `ContinuationProgram → ContinuationProgram`のCFG縮約passを追加し、dispatcher case数と
     continuation IDを削減する。
