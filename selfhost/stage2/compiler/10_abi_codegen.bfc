@@ -34,6 +34,38 @@ void emit_repeat_character(cell character, cell count) {
     }
 }
 
+void emit_repeat_256(cell character) {
+    cell count;
+    compiler_output!(character);
+    count = 1;
+    while (count != 0) {
+        compiler_output!(character);
+        count += 1;
+    }
+}
+
+void emit_repeat_65536(cell character) {
+    cell count;
+    emit_repeat_256(character);
+    count = 1;
+    while (count != 0) {
+        emit_repeat_256(character);
+        count += 1;
+    }
+}
+
+void emit_repeat_wide(cell character, WideValue count) {
+    while (count.high != 0) {
+        emit_repeat_65536(character);
+        count.high -= 1;
+    }
+    while (count.mid != 0) {
+        emit_repeat_256(character);
+        count.mid -= 1;
+    }
+    emit_repeat_character(character, count.low);
+}
+
 void emit_add_constant(cell destination, cell value) {
     emit_move_to(destination);
     if (value <= 128) {
@@ -75,17 +107,37 @@ void emit_logical_offset_increment(cell low, cell high) {
     emit_loop_close(FRAME_BRANCH);
 }
 
+void emit_logical_offset_steps(
+    cell low,
+    cell high,
+    cell amount_low,
+    cell amount_high
+) {
+    while (amount_high != 0) {
+        cell count;
+        emit_logical_offset_increment(low, high);
+        count = 1;
+        while (count != 0) {
+            emit_logical_offset_increment(low, high);
+            count += 1;
+        }
+        amount_high -= 1;
+    }
+    while (amount_low != 0) {
+        emit_logical_offset_increment(low, high);
+        amount_low -= 1;
+    }
+}
+
 void emit_offset_instruction(NodeId instruction) {
     cell low = physical_frame_slot(node_value(instruction));
     cell high = physical_frame_slot(
         arena_read(instruction, FIELD_NAME_PAGE)
     );
-    cell amount = arena_read(instruction, FIELD_A_SLOT);
+    cell amount_low = arena_read(instruction, FIELD_A_SLOT);
+    cell amount_high = arena_read(instruction, FIELD_A_BANK);
     if (node_tag(instruction) == IR_OFFSET_ADD_CONSTANT) {
-        while (amount != 0) {
-            emit_logical_offset_increment(low, high);
-            amount -= 1;
-        }
+        emit_logical_offset_steps(low, high, amount_low, amount_high);
         return;
     }
     cell source = physical_frame_slot(
@@ -94,11 +146,7 @@ void emit_offset_instruction(NodeId instruction) {
     emit_loop_open(source);
     emit_move_to(source);
     compiler_output!('-');
-    cell step;
-    while (step < amount) {
-        emit_logical_offset_increment(low, high);
-        step += 1;
-    }
+    emit_logical_offset_steps(low, high, amount_low, amount_high);
     emit_loop_close(source);
 }
 
@@ -193,27 +241,27 @@ void emit_anchor_to_current(cell frame_cells) {
     target_position = 0;
 }
 
-void emit_anchor_to_global(cell global) {
-    emit_repeat_character('<', stage7_static_cells - global);
+void emit_anchor_to_global(WideValue global) {
+    emit_repeat_wide('<', wide_subtract(stage7_static_cells, global));
     target_position = 0;
 }
 
-void emit_global_to_anchor(cell global) {
-    emit_repeat_character('>', stage7_static_cells - global);
+void emit_global_to_anchor(WideValue global) {
+    emit_repeat_wide('>', wide_subtract(stage7_static_cells, global));
     target_position = 0;
 }
 
-void emit_current_to_global(cell global, cell frame_cells) {
+void emit_current_to_global(WideValue global, cell frame_cells) {
     emit_current_to_anchor(frame_cells);
     emit_anchor_to_global(global);
 }
 
-void emit_global_to_current(cell global, cell frame_cells) {
+void emit_global_to_current(WideValue global, cell frame_cells) {
     emit_global_to_anchor(global);
     emit_anchor_to_current(frame_cells);
 }
 
-void emit_global_constant(cell global, cell value, cell frame_cells) {
+void emit_global_constant(WideValue global, cell value, cell frame_cells) {
     emit_current_to_global(global, frame_cells);
     compiler_output!('[');
     compiler_output!('-');
@@ -229,7 +277,7 @@ void emit_global_constant(cell global, cell value, cell frame_cells) {
     emit_global_to_current(global, frame_cells);
 }
 
-void emit_global_copy(cell global, cell destination, cell frame_cells) {
+void emit_global_copy(WideValue global, cell destination, cell frame_cells) {
     emit_clear(destination);
     emit_clear(FRAME_RESTORE);
     emit_current_to_global(global, frame_cells);
@@ -259,7 +307,7 @@ void emit_global_copy(cell global, cell destination, cell frame_cells) {
 
 void emit_transfer_to_global(
     cell source,
-    cell global,
+    WideValue global,
     cell subtract,
     cell clear_first,
     cell frame_cells
@@ -338,14 +386,14 @@ void emit_clear_previous_context(cell destination, cell frame_cells) {
 void emit_array_case_operation(
     cell kind,
     cell data,
-    cell base,
-    cell element,
+    WideValue base,
+    WideValue element,
     cell storage,
     cell frame_cells
 ) {
     cell data_slot = physical_frame_slot(data);
     if (storage == RESOLVED_GLOBAL_DYNAMIC) {
-        cell global = base + element;
+        WideValue global = wide_add(base, element);
         if (kind == IR_ARRAY_LOAD) {
             emit_global_copy(global, data_slot, frame_cells);
         } else if (kind == IR_ARRAY_STORE) {
@@ -360,7 +408,11 @@ void emit_array_case_operation(
         return;
     }
 
-    cell array_slot = physical_frame_slot(base + element);
+    if (base.mid != 0 || base.high != 0
+        || element.mid != 0 || element.high != 0) {
+        fail();
+    }
+    cell array_slot = physical_frame_slot(base.low + element.low);
     if (kind == IR_ARRAY_LOAD) {
         emit_frame_copy(array_slot, data_slot);
     } else if (kind == IR_ARRAY_STORE) {
@@ -378,17 +430,18 @@ void emit_array_case_operation(
 void emit_array_countdown_case(
     cell kind,
     cell data,
-    cell base,
-    cell element,
+    WideValue base,
+    WideValue element,
     cell storage,
+    cell branch,
     cell frame_cells
 ) {
-    emit_loop_open(FRAME_BRANCH);
-    emit_move_to(FRAME_BRANCH);
+    emit_loop_open(branch);
+    emit_move_to(branch);
     compiler_output!('-');
     emit_move_to(0);
     emit_array_case_operation(kind, data, base, element, storage, frame_cells);
-    emit_loop_close(FRAME_BRANCH);
+    emit_loop_close(branch);
     emit_move_to(0);
 }
 
@@ -396,17 +449,18 @@ void emit_array_countdown_level(
     cell kind,
     cell data,
     cell index,
-    cell base,
-    cell element,
+    WideValue base,
+    WideValue element,
     cell storage,
     cell remaining,
+    cell branch,
     cell frame_cells
 ) {
     cell index_slot = physical_frame_slot(index);
     emit_loop_open(index_slot);
     if (remaining == 0) {
         emit_clear(index_slot);
-        emit_clear(FRAME_BRANCH);
+        emit_clear(branch);
     } else {
         emit_move_to(index_slot);
         compiler_output!('-');
@@ -416,9 +470,10 @@ void emit_array_countdown_level(
             data,
             index,
             base,
-            element + 1,
+            wide_add(element, wide_from_cell(1)),
             storage,
             remaining - 1,
+            branch,
             frame_cells
         );
     }
@@ -430,6 +485,95 @@ void emit_array_countdown_level(
         base,
         element,
         storage,
+        branch,
+        frame_cells
+    );
+}
+
+void emit_array_page_countdown_case(
+    cell kind,
+    cell data,
+    cell index,
+    WideValue base,
+    cell page,
+    cell full_pages,
+    cell tail,
+    cell storage,
+    cell frame_cells
+) {
+    emit_loop_open(FRAME_SCRATCH_3);
+    emit_move_to(FRAME_SCRATCH_3);
+    compiler_output!('-');
+    emit_move_to(0);
+    WideValue page_offset;
+    page_offset.mid = page;
+    cell remaining = 0xff;
+    if (page == full_pages) {
+        remaining = tail - 1;
+    }
+    emit_constant(FRAME_BRANCH, 1);
+    emit_array_countdown_level(
+        kind,
+        data,
+        index,
+        wide_add(base, page_offset),
+        wide_from_cell(0),
+        storage,
+        remaining,
+        FRAME_BRANCH,
+        frame_cells
+    );
+    emit_loop_close(FRAME_SCRATCH_3);
+    emit_move_to(0);
+}
+
+void emit_array_page_countdown_level(
+    cell kind,
+    cell data,
+    cell index_low,
+    cell index_high,
+    WideValue base,
+    cell page,
+    cell full_pages,
+    cell tail,
+    cell storage,
+    cell remaining,
+    cell frame_cells
+) {
+    cell high_slot = physical_frame_slot(index_high);
+    emit_loop_open(high_slot);
+    if (remaining == 0) {
+        emit_clear(high_slot);
+        emit_clear(FRAME_SCRATCH_3);
+    } else {
+        emit_move_to(high_slot);
+        compiler_output!('-');
+        emit_move_to(0);
+        emit_array_page_countdown_level(
+            kind,
+            data,
+            index_low,
+            index_high,
+            base,
+            page + 1,
+            full_pages,
+            tail,
+            storage,
+            remaining - 1,
+            frame_cells
+        );
+    }
+    emit_loop_close(high_slot);
+    emit_move_to(0);
+    emit_array_page_countdown_case(
+        kind,
+        data,
+        index_low,
+        base,
+        page,
+        full_pages,
+        tail,
+        storage,
         frame_cells
     );
 }
@@ -438,35 +582,63 @@ void emit_array_instruction(NodeId instruction) {
     cell kind = node_tag(instruction);
     cell data = node_value(instruction);
     cell index = arena_read(instruction, FIELD_NAME_PAGE);
-    cell base = arena_read(instruction, FIELD_A_PAGE);
-    cell length = arena_read(instruction, FIELD_A_SLOT);
+    cell offset_high = arena_read(instruction, FIELD_NAME_SLOT);
+    WideValue base = instruction_address(instruction);
+    WideValue length;
+    length.low = arena_read(instruction, FIELD_C_PAGE);
+    length.mid = arena_read(instruction, FIELD_C_SLOT);
+    length.high = arena_read(instruction, FIELD_C_BANK);
     cell storage = arena_read(instruction, FIELD_B_PAGE);
-    cell offset_high = arena_read(instruction, FIELD_B_SLOT);
+    if (wide_is_zero(length) || length.high != 0) {
+        fail();
+    }
     if (kind == IR_ARRAY_LOAD) {
         emit_clear(physical_frame_slot(data));
     }
-    // A valid access into the current bounded physical region has a zero high
-    // byte.  A nonzero high byte is out of range and takes the no-op UB path.
-    emit_constant(FRAME_SCRATCH_2, 1);
-    cell high_slot = physical_frame_slot(offset_high);
-    emit_loop_open(high_slot);
-    emit_clear(high_slot);
-    emit_clear(FRAME_SCRATCH_2);
-    emit_loop_close(high_slot);
-    emit_loop_open(FRAME_SCRATCH_2);
-    emit_clear(FRAME_SCRATCH_2);
-    emit_constant(FRAME_BRANCH, 1);
-    emit_array_countdown_level(
+    if (length.mid == 0) {
+        // A one-page region only accepts a zero high byte.
+        emit_constant(FRAME_SCRATCH_2, 1);
+        cell high_slot = physical_frame_slot(offset_high);
+        emit_loop_open(high_slot);
+        emit_clear(high_slot);
+        emit_clear(FRAME_SCRATCH_2);
+        emit_loop_close(high_slot);
+        emit_loop_open(FRAME_SCRATCH_2);
+        emit_clear(FRAME_SCRATCH_2);
+        emit_constant(FRAME_BRANCH, 1);
+        emit_array_countdown_level(
+            kind,
+            data,
+            index,
+            base,
+            wide_from_cell(0),
+            storage,
+            length.low - 1,
+            FRAME_BRANCH,
+            stage8_frame_cells
+        );
+        emit_loop_close(FRAME_SCRATCH_2);
+        return;
+    }
+
+    cell pages = length.mid;
+    if (length.low != 0) {
+        pages += 1;
+    }
+    emit_constant(FRAME_SCRATCH_3, 1);
+    emit_array_page_countdown_level(
         kind,
         data,
         index,
+        offset_high,
         base,
         0,
+        length.mid,
+        length.low,
         storage,
-        length - 1,
+        pages - 1,
         stage8_frame_cells
     );
-    emit_loop_close(FRAME_SCRATCH_2);
 }
 
 void emit_ir_instruction(NodeId instruction) {
@@ -499,21 +671,21 @@ void emit_ir_instruction(NodeId instruction) {
         emit_frame_negate(destination);
     } else if (kind == IR_SET_GLOBAL) {
         emit_global_constant(
+            instruction_address(instruction),
             node_value(instruction),
-            instruction_source(instruction),
             stage8_frame_cells
         );
     } else if (kind == IR_COPY_GLOBAL) {
         emit_global_copy(
-            instruction_source(instruction),
+            instruction_address(instruction),
             destination,
             stage8_frame_cells
         );
     } else if (kind == IR_STORE_GLOBAL || kind == IR_ADD_GLOBAL
         || kind == IR_SUBTRACT_GLOBAL) {
         emit_transfer_to_global(
-            source,
-            node_value(instruction),
+            destination,
+            instruction_address(instruction),
             kind == IR_SUBTRACT_GLOBAL,
             kind == IR_STORE_GLOBAL,
             stage8_frame_cells
@@ -808,7 +980,7 @@ void calculate_stage8_frame_size() {
 void emit_continuation_program() {
     calculate_stage8_frame_size();
     // static globals | zero anchor | one frame-stride gap | root frame
-    emit_repeat_character('>', stage7_static_cells);
+    emit_repeat_wide('>', stage7_static_cells);
     emit_repeat_character('>', stage8_frame_cells);
     target_position = 0;
     NodeId main_entry = node_a(node_c(main_function));

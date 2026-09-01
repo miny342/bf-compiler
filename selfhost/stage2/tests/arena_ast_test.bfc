@@ -5,6 +5,21 @@ cell name_first_byte(NodeId name) {
     return arena_cell_read(start);
 }
 
+void test_wide_arithmetic() {
+    WideValue left;
+    left.low = 0xff;
+    left.mid = 1;
+    WideValue sum = wide_add(left, wide_from_cell(2));
+    expect_test(sum.low == 1 && sum.mid == 2 && sum.high == 0, '>');
+    WideValue difference = wide_subtract(sum, left);
+    expect_test(difference.low == 2 && difference.mid == 0
+        && difference.high == 0, '?');
+    WideValue page = wide_multiply_length(wide_from_cell(1), 0, 1);
+    WideValue bank = wide_multiply_length(page, 0xff, 0);
+    expect_test(page.low == 0 && page.mid == 1 && page.high == 0
+        && bank.low == 0 && bank.mid == 0xff && bank.high == 0, '/');
+}
+
 void test_compact_node_sizes() {
     expect_test(node_cell_count(NODE_EMPTY_STATEMENT) == 4
         && node_cell_count(NODE_INPUT_EXPRESSION) == 4, '3');
@@ -13,9 +28,9 @@ void test_compact_node_sizes() {
     expect_test(node_cell_count(NODE_LITERAL_EXPRESSION) == 5
         && node_cell_count(NODE_LEN_EXPRESSION) == 9, '5');
     expect_test(node_cell_count(NODE_BINARY_EXPRESSION) == 12
-        && node_cell_count(NODE_INSTRUCTION) == 13, '6');
-    expect_test(node_cell_count(NODE_NAME_EXPRESSION) == 15
-        && node_cell_count(NODE_GLOBAL) == 16, '7');
+        && node_cell_count(NODE_INSTRUCTION) == 18, '6');
+    expect_test(node_cell_count(NODE_NAME_EXPRESSION) == 20
+        && node_cell_count(NODE_GLOBAL) == 20, '7');
     expect_test(node_cell_count(NODE_FUNCTION) == 18
         && node_cell_count(NODE_CONTINUATION) == 20, '8');
 

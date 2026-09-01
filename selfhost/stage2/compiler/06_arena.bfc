@@ -33,6 +33,93 @@ struct NodeId {
     cell slot;
 }
 
+struct WideValue {
+    cell low;
+    cell mid;
+    cell high;
+}
+
+WideValue wide_from_cell(cell value) {
+    WideValue result;
+    result.low = value;
+    return result;
+}
+
+cell wide_is_zero(WideValue value) {
+    return value.low == 0 && value.mid == 0 && value.high == 0;
+}
+
+WideValue wide_add(WideValue left, WideValue right) {
+    WideValue result;
+    result.low = left.low + right.low;
+    cell carry = result.low < left.low;
+    result.mid = left.mid + right.mid;
+    cell next_carry = result.mid < left.mid;
+    cell before_carry = result.mid;
+    result.mid += carry;
+    if (result.mid < before_carry) {
+        next_carry = 1;
+    }
+    result.high = left.high + right.high;
+    if (result.high < left.high) {
+        fail();
+    }
+    before_carry = result.high;
+    result.high += next_carry;
+    if (result.high < before_carry) {
+        fail();
+    }
+    return result;
+}
+
+WideValue wide_subtract(WideValue left, WideValue right) {
+    WideValue result;
+    cell borrow = left.low < right.low;
+    result.low = left.low - right.low;
+    cell next_borrow = left.mid < right.mid;
+    result.mid = left.mid - right.mid;
+    if (borrow) {
+        if (result.mid == 0) {
+            next_borrow = 1;
+        }
+        result.mid -= 1;
+    }
+    if (left.high < right.high) {
+        fail();
+    }
+    result.high = left.high - right.high;
+    if (next_borrow) {
+        if (result.high == 0) {
+            fail();
+        }
+        result.high -= 1;
+    }
+    return result;
+}
+
+WideValue wide_multiply_length(
+    WideValue value,
+    cell length,
+    cell length_is_256
+) {
+    WideValue result;
+    cell index;
+    if (length_is_256) {
+        result = wide_add(result, value);
+        index = 1;
+        while (index != 0) {
+            result = wide_add(result, value);
+            index += 1;
+        }
+    } else {
+        while (index < length) {
+            result = wide_add(result, value);
+            index += 1;
+        }
+    }
+    return result;
+}
+
 const cell NODE_NULL = 0;
 const cell NODE_NAME_RECORD = 1;
 const cell NODE_FUNCTION = 2;
@@ -265,9 +352,9 @@ cell node_cell_count(cell kind) {
         return 12;
     }
     if (kind == NODE_INSTRUCTION) {
-        return 13;
+        return 18;
     }
-    if (kind == NODE_NAME_EXPRESSION || kind == NODE_CALL_EXPRESSION
+    if (kind == NODE_CALL_EXPRESSION
         || kind == NODE_FUNCTION_DESCRIPTOR || kind == NODE_ENUM_VARIANT
         || kind == NODE_STRUCT_FIELD || kind == NODE_ENUM_EXPRESSION
         || kind == NODE_STRING_EXPRESSION || kind == NODE_CONSTANT
@@ -275,16 +362,16 @@ cell node_cell_count(cell kind) {
         || kind == NODE_MACRO_INVOCATION) {
         return 15;
     }
-    if (kind == NODE_PARAMETER || kind == NODE_DECLARATION
-        || kind == NODE_GLOBAL) {
+    if (kind == NODE_PARAMETER || kind == NODE_DECLARATION) {
         return 16;
     }
     if (kind == NODE_FUNCTION || kind == NODE_IF_STATEMENT
-        || kind == NODE_INDEX_EXPRESSION || kind == NODE_TYPE
-        || kind == NODE_FIELD_EXPRESSION) {
+        || kind == NODE_TYPE) {
         return 18;
     }
-    if (kind == NODE_CONTINUATION) {
+    if (kind == NODE_CONTINUATION || kind == NODE_GLOBAL
+        || kind == NODE_NAME_EXPRESSION || kind == NODE_INDEX_EXPRESSION
+        || kind == NODE_FIELD_EXPRESSION) {
         return 20;
     }
     fail();

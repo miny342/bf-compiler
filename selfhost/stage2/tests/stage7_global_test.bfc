@@ -13,7 +13,8 @@ void test_stage7_globals() {
         && arena_read(node_b(array_global), FIELD_C_PAGE) == 4, 'M');
 
     analyze_ast_program();
-    expect_test(stage7_static_cells == 5
+    expect_test(stage7_static_cells.low == 5
+        && stage7_static_cells.mid == 0 && stage7_static_cells.high == 0
         && arena_read(scalar_global, FIELD_C_PAGE) == 0
         && arena_read(array_global, FIELD_C_PAGE) == 1, 'N');
 
@@ -29,5 +30,16 @@ void test_stage7_globals() {
 
     lower_ast_program();
     NodeId main_entry = node_a(node_c(main));
-    expect_test(node_tag(node_a(main_entry)) == IR_SET_GLOBAL, 'F');
+    NodeId instruction = node_a(main_entry);
+    cell saw_initializer_store;
+    cell saw_explicit_zero;
+    while (!node_is_null(instruction)) {
+        if (node_tag(instruction) == IR_STORE_GLOBAL) {
+            saw_initializer_store = 1;
+        } else if (node_tag(instruction) == IR_SET_GLOBAL) {
+            saw_explicit_zero = 1;
+        }
+        instruction = node_next(instruction);
+    }
+    expect_test(saw_initializer_store && saw_explicit_zero, 'F');
 }

@@ -89,23 +89,25 @@ production実装を変えずに次をBF上で検証できる。
 - ASCII空白、行コメント、blockコメント
 
 production経路には、identifier 64 byte、function 255個、block nesting 16段、uniform
-frameのlocal/temporary 239 cell、static global 255 cell、型layout 255 cell、packed AST/IR arena
-261,120 cellという明示的な制限がある。配列長256の構文は認識するが、zero-cell要素以外は
-現在の1 byte layout容量には収まらないため拒否する。streaming parserは、function bodyの
+frameのlocal/temporary 239 cell、16-bit dynamic aggregate offset、packed AST/IR arena
+261,120 cellという明示的な制限がある。型layout、struct field offset、static globalのbase/sizeは
+little-endian 24-bit値で保持し、配列長256と`cell[255][256]`のようなlarge globalを受理する。
+streaming parserは、function bodyの
 local宣言を開始するnominal型定義がそのfunctionより前に現れることを要求する。
 制限超過または後段階の構文を検出すると`BFC_STAGE12_ERROR`を出力して停止する。runtime演算は
 通常のBFCと同じくmod 256でwrapする。動的projectionはlow/high byteのlogical offsetを
-左から右へ各indexを1回ずつ評価して構築する。現在の物理layoutは依然としてlocal 239 cell、
-global 255 cellに制限されるため、有効な実体化範囲ではhigh byteは0になる。非placeのaggregate
-式への動的projectionは未対応である。旧第4段階direct parserは内部回帰test用に残している。
+左から右へ各indexを1回ずつ評価して構築する。非placeのaggregate式への動的projectionは、
+frameへmaterializeできる239 cell以下の値だけに対応する。旧第4段階direct parserは内部回帰test用に
+残している。
 
 Continuationにはarena上の`NodeId`とは別に1始まりの密な16-bit dispatch IDを割り当てる。
 ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的countdownでdispatchし、
 caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
 dispatch cycle末までは`Pc`を0に保つ。
 
-arena recordは`next`と頻出fieldを前方へ置いた4〜18 cellのkind別layoutを使用する。
-Continuationだけはdispatch IDを含む20 cellである。literal、input、unary、binary、
+arena recordは`next`と頻出fieldを前方へ置いた4〜20 cellのkind別layoutを使用する。
+Continuation、global、wide addressを保持するname/index/field expressionは20 cellである。
+literal、input、unary、binary、
 `len`の結果型は`cell`から自明なのでhandleを保存しない。その他のexpressionはsemantic解決後に
 source名fieldを型handleとして再利用する。これにより型情報専用fieldを増やさず、profileした
 node領域を30.5%削減する。scalar literalは値を短いrecord内へ詰め、parse時に連続して確保された
@@ -176,5 +178,13 @@ sourceに対して17,726 byteまで到達し、直前構成から14.87%改善し
 自己入力の旧密度から見積もった必要量には余裕がある。代償として内部test用のRust-bootstrap BFは
 約1.76 GBになる。開発用interpreterはprofileなしの実行時にraw命令配列を作らずFast IRへ直接RLE変換し、
 pointer source offsetも連続rangeへ圧縮する。これにより同artifactの内部testは最大RSS約2.56 GBで
-実行できる。次の自己コンパイル上の制限は、selfhost semantic/layoutが型とstatic globalの大きさを
-まだ1 byteに制限しており、自身のbank宣言を受理できない点である。
+実行できる。その後、型・struct offset・global base/sizeを24-bit化し、階層portalで
+`cell[255][256]`の最終要素を読み書きする回帰まで通した。
+
+現在の自己コンパイル上の制限は、full ASTと生成中Continuation IRを同じarenaへ同居させる空間量である。
+4 bank（261,120 cell）と8 bank（522,240 cell）はIR lowering中に枯渇した。測定用の16 bank
+（1,044,480 cell）ではloweringを越えてBF出力へ入ったが、335秒で5.34 GBを出力しても未完であり、
+bank追加だけでは最終解にならない。RustのContinuation IR直接VMでは同じ地点まで約30秒、RSS約31 MiBで
+到達し、16-bank測定もRSS約85 MiBでstreamingできた。次はselfhost frontendがContinuation IRを
+text/binary streamとして逐次出力し、Rust backendへ渡すか、ASTを破棄しながらIR領域を再利用して、
+ASTとIRのpeak同居量を減らす方針を優先する。

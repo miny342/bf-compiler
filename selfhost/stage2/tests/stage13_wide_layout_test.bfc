@@ -1,0 +1,32 @@
+cell[] stage13_wide_layout_test_source = "cell[255][256] giant;void main(){cell branch;if(branch){branch=2;}else{cell closed;closed=1;}cell page=input();cell slot=input();giant[page][slot]=7;output(giant[page][slot]);}";
+
+void test_stage13_wide_layout() {
+    reset_test_input(14);
+    parse_ast_program();
+    analyze_ast_program();
+
+    WideValue cells = global_cells(first_global);
+    expect_test(cells.low == 0 && cells.mid == 0xff && cells.high == 0
+        && stage7_static_cells.low == 0
+        && stage7_static_cells.mid == 0xff
+        && stage7_static_cells.high == 0, '+');
+
+    lower_ast_program();
+    cell portal_count;
+    NodeId continuation = first_continuation;
+    while (!node_is_null(continuation)) {
+        NodeId instruction = node_a(continuation);
+        while (!node_is_null(instruction)) {
+            cell kind = node_tag(instruction);
+            if (kind == IR_ARRAY_LOAD || kind == IR_ARRAY_STORE) {
+                portal_count += 1;
+                expect_test(arena_read(instruction, FIELD_C_PAGE) == 0
+                    && arena_read(instruction, FIELD_C_SLOT) == 0xff
+                    && arena_read(instruction, FIELD_C_BANK) == 0, ',');
+            }
+            instruction = node_next(instruction);
+        }
+        continuation = node_next(continuation);
+    }
+    expect_test(portal_count == 2, '.');
+}

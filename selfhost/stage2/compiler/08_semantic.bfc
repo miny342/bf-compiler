@@ -12,7 +12,7 @@ cell[16] semantic_scope_slot_base;
 NodeId semantic_current_function;
 NodeId main_function;
 cell function_count;
-cell stage7_static_cells;
+WideValue stage7_static_cells;
 
 const cell RESOLVED_LOCAL = 0;
 const cell RESOLVED_GLOBAL = 1;
@@ -31,6 +31,92 @@ const cell TYPE_STATE_DONE = 2;
 const cell CONSTANT_STATE_UNVISITED = 0;
 const cell CONSTANT_STATE_VISITING = 1;
 const cell CONSTANT_STATE_DONE = 2;
+
+WideValue type_cells(NodeId ty) {
+    WideValue result;
+    result.low = node_value(ty);
+    result.mid = arena_read(ty, FIELD_B_SLOT);
+    result.high = arena_read(ty, FIELD_B_BANK);
+    return result;
+}
+
+void set_type_cells(NodeId ty, WideValue cells) {
+    node_set_value(ty, cells.low);
+    arena_write(ty, FIELD_B_SLOT, cells.mid);
+    arena_write(ty, FIELD_B_BANK, cells.high);
+}
+
+WideValue struct_field_offset(NodeId field) {
+    WideValue result;
+    result.low = node_value(field);
+    result.mid = node_tag(field);
+    result.high = arena_read(field, FIELD_B_PAGE);
+    return result;
+}
+
+void set_struct_field_offset(NodeId field, WideValue offset) {
+    node_set_value(field, offset.low);
+    node_set_tag(field, offset.mid);
+    arena_write(field, FIELD_B_PAGE, offset.high);
+}
+
+WideValue resolved_address(NodeId expression) {
+    WideValue result;
+    result.low = node_value(expression);
+    result.mid = arena_read(expression, FIELD_DISPATCH_LOW);
+    result.high = arena_read(expression, FIELD_DISPATCH_HIGH);
+    return result;
+}
+
+void set_resolved_address(NodeId expression, WideValue address) {
+    node_set_value(expression, address.low);
+    arena_write(expression, FIELD_DISPATCH_LOW, address.mid);
+    arena_write(expression, FIELD_DISPATCH_HIGH, address.high);
+}
+
+WideValue projection_amount(NodeId expression) {
+    WideValue result;
+    result.low = arena_read(expression, FIELD_C_PAGE);
+    result.mid = arena_read(expression, FIELD_C_SLOT);
+    return result;
+}
+
+void set_projection(NodeId expression, WideValue amount, cell kind) {
+    if (amount.high != 0) {
+        fail();
+    }
+    arena_write(expression, FIELD_C_PAGE, amount.low);
+    arena_write(expression, FIELD_C_SLOT, amount.mid);
+    arena_write(expression, FIELD_C_BANK, kind);
+}
+
+WideValue global_base(NodeId global) {
+    WideValue result;
+    result.low = arena_read(global, FIELD_C_PAGE);
+    result.mid = arena_read(global, FIELD_C_SLOT);
+    result.high = arena_read(global, FIELD_C_BANK);
+    return result;
+}
+
+void set_global_base(NodeId global, WideValue base) {
+    arena_write(global, FIELD_C_PAGE, base.low);
+    arena_write(global, FIELD_C_SLOT, base.mid);
+    arena_write(global, FIELD_C_BANK, base.high);
+}
+
+WideValue global_cells(NodeId global) {
+    WideValue result;
+    result.low = node_value(global);
+    result.mid = arena_read(global, FIELD_DISPATCH_LOW);
+    result.high = arena_read(global, FIELD_DISPATCH_HIGH);
+    return result;
+}
+
+void set_global_cells(NodeId global, WideValue cells) {
+    node_set_value(global, cells.low);
+    arena_write(global, FIELD_DISPATCH_LOW, cells.mid);
+    arena_write(global, FIELD_DISPATCH_HIGH, cells.high);
+}
 
 struct ConstantValue {
     cell known;
@@ -166,7 +252,11 @@ cell add_semantic_local(NodeId name, NodeId ty) {
         }
         probe += 1;
     }
-    cell cells = node_value(ty);
+    WideValue wide_cells = type_cells(ty);
+    if (wide_cells.mid != 0 || wide_cells.high != 0) {
+        fail();
+    }
+    cell cells = wide_cells.low;
     if (cells > 0xef || semantic_next_slot > 0xef - cells) {
         fail();
     }
@@ -369,9 +459,9 @@ void resolve_type_layout(NodeId ty) {
     }
     arena_write(ty, FIELD_B_PAGE, TYPE_STATE_VISITING);
     if (kind == TYPE_CELL) {
-        node_set_value(ty, 1);
+        set_type_cells(ty, wide_from_cell(1));
     } else if (kind == TYPE_VOID) {
-        node_set_value(ty, 0);
+        set_type_cells(ty, wide_from_cell(0));
     } else if (kind == TYPE_ENUM) {
         NodeId variant = node_a(ty);
         if (node_is_null(variant)) {
@@ -421,13 +511,13 @@ void resolve_type_layout(NodeId ty) {
         if (zero_count != 1) {
             fail();
         }
-        node_set_value(ty, 1);
+        set_type_cells(ty, wide_from_cell(1));
     } else if (kind == TYPE_STRUCT) {
         NodeId field = node_a(ty);
         if (node_is_null(field)) {
             fail();
         }
-        cell cells;
+        WideValue cells;
         while (!node_is_null(field)) {
             NodeId earlier = node_a(ty);
             while (!node_equals(earlier, field)) {
@@ -438,18 +528,15 @@ void resolve_type_layout(NodeId ty) {
             }
             NodeId field_type = node_a(field);
             resolve_type_layout(field_type);
-            node_set_value(field, cells);
-            if (cells > 0xff - node_value(field_type)) {
-                fail();
-            }
-            cells += node_value(field_type);
+            set_struct_field_offset(field, cells);
+            cells = wide_add(cells, type_cells(field_type));
             field = node_next(field);
         }
-        node_set_value(ty, cells);
+        set_type_cells(ty, cells);
     } else if (kind == TYPE_ARRAY) {
         NodeId element = node_a(ty);
         resolve_type_layout(element);
-        cell element_cells = node_value(element);
+        WideValue element_cells = type_cells(element);
         cell length = arena_read(ty, FIELD_C_PAGE);
         cell length_kind = arena_read(ty, FIELD_C_SLOT);
         if (length_kind == ARRAY_LENGTH_CONSTANT) {
@@ -462,23 +549,12 @@ void resolve_type_layout(NodeId ty) {
             arena_write(ty, FIELD_C_SLOT, ARRAY_LENGTH_LITERAL);
             length_kind = ARRAY_LENGTH_LITERAL;
         }
-        if (length_kind == ARRAY_LENGTH_256) {
-            if (element_cells != 0) {
-                fail();
-            }
-            node_set_value(ty, 0);
-        } else {
-            cell cells;
-            cell index;
-            while (index < length) {
-                if (cells > 0xff - element_cells) {
-                    fail();
-                }
-                cells += element_cells;
-                index += 1;
-            }
-            node_set_value(ty, cells);
-        }
+        WideValue cells = wide_multiply_length(
+            element_cells,
+            length,
+            length_kind == ARRAY_LENGTH_256
+        );
+        set_type_cells(ty, cells);
     } else {
         fail();
     }
@@ -557,7 +633,10 @@ NodeId analyze_ast_expression(NodeId expression) {
         if (encoded_binding != 0) {
             cell binding = encoded_binding - 1;
             node_set_tag(expression, RESOLVED_LOCAL);
-            node_set_value(expression, semantic_local_slots[binding]);
+            set_resolved_address(
+                expression,
+                wide_from_cell(semantic_local_slots[binding])
+            );
             ty = semantic_local_types[binding];
         } else {
             NodeId constant = find_constant_by_name_or_null(node_name(expression));
@@ -572,7 +651,7 @@ NodeId analyze_ast_expression(NodeId expression) {
                 fail();
             }
             node_set_tag(expression, RESOLVED_GLOBAL);
-            node_set_value(expression, arena_read(global, FIELD_C_PAGE));
+            set_resolved_address(expression, global_base(global));
             ty = node_b(global);
         }
         set_expression_type(expression, ty);
@@ -591,39 +670,33 @@ NodeId analyze_ast_expression(NodeId expression) {
         cell length = arena_read(base_type, FIELD_C_PAGE);
         cell is_256 = arena_read(base_type, FIELD_C_SLOT);
         NodeId element_type = node_a(base_type);
-        cell element_cells = node_value(element_type);
+        WideValue element_cells = type_cells(element_type);
         ConstantValue constant = evaluate_constant_expression(index);
         if (constant.known && !is_256 && constant.value >= length) {
             fail();
         }
         if (constant.known) {
-            cell offset;
-            cell count = constant.value;
-            while (count != 0) {
-                if (offset > 0xff - element_cells) {
-                    fail();
-                }
-                offset += element_cells;
-                count -= 1;
-            }
+            WideValue offset = wide_multiply_length(
+                element_cells,
+                constant.value,
+                0
+            );
             if (expression_is_static_place(base_expression)) {
                 node_set_tag(expression, node_tag(base_expression));
-                if (node_value(base_expression) > 0xff - offset) {
-                    fail();
-                }
-                node_set_value(expression, node_value(base_expression) + offset);
+                set_resolved_address(
+                    expression,
+                    wide_add(resolved_address(base_expression), offset)
+                );
             } else if (expression_is_dynamic_place(base_expression)) {
                 node_set_tag(expression, node_tag(base_expression));
-                node_set_value(expression, node_value(base_expression));
-                arena_write(expression, FIELD_C_PAGE, offset);
-                arena_write(expression, FIELD_C_SLOT,
-                    DYNAMIC_PROJECTION_CONSTANT);
+                set_resolved_address(expression, resolved_address(base_expression));
+                set_projection(expression, offset, DYNAMIC_PROJECTION_CONSTANT);
             } else {
                 node_set_tag(expression, RESOLVED_VALUE_PROJECT);
-                node_set_value(expression, offset);
+                set_resolved_address(expression, offset);
             }
         } else {
-            if (is_256 || element_cells == 0) {
+            if (wide_is_zero(element_cells) || element_cells.high != 0) {
                 fail();
             }
             cell storage = node_tag(base_expression);
@@ -638,9 +711,8 @@ NodeId analyze_ast_expression(NodeId expression) {
             } else {
                 fail();
             }
-            node_set_value(expression, node_value(base_expression));
-            arena_write(expression, FIELD_C_PAGE, element_cells);
-            arena_write(expression, FIELD_C_SLOT, DYNAMIC_PROJECTION_INDEX);
+            set_resolved_address(expression, resolved_address(base_expression));
+            set_projection(expression, element_cells, DYNAMIC_PROJECTION_INDEX);
         }
         set_expression_type(expression, element_type);
         return element_type;
@@ -652,22 +724,20 @@ NodeId analyze_ast_expression(NodeId expression) {
             fail();
         }
         NodeId field = find_struct_field(base_type, node_name(expression));
-        cell offset = node_value(field);
+        WideValue offset = struct_field_offset(field);
         if (expression_is_static_place(base_expression)) {
             node_set_tag(expression, node_tag(base_expression));
-            if (node_value(base_expression) > 0xff - offset) {
-                fail();
-            }
-            node_set_value(expression, node_value(base_expression) + offset);
+            set_resolved_address(
+                expression,
+                wide_add(resolved_address(base_expression), offset)
+            );
         } else if (expression_is_dynamic_place(base_expression)) {
             node_set_tag(expression, node_tag(base_expression));
-            node_set_value(expression, node_value(base_expression));
-            arena_write(expression, FIELD_C_PAGE, offset);
-            arena_write(expression, FIELD_C_SLOT,
-                DYNAMIC_PROJECTION_CONSTANT);
+            set_resolved_address(expression, resolved_address(base_expression));
+            set_projection(expression, offset, DYNAMIC_PROJECTION_CONSTANT);
         } else {
             node_set_tag(expression, RESOLVED_VALUE_PROJECT);
-            node_set_value(expression, offset);
+            set_resolved_address(expression, offset);
         }
         NodeId ty = node_a(field);
         set_expression_type(expression, ty);
@@ -886,7 +956,7 @@ void collect_file_declarations() {
         ty = node_next(ty);
     }
 
-    stage7_static_cells = 0;
+    stage7_static_cells = wide_from_cell(0);
     global = first_global;
     while (!node_is_null(global)) {
         NodeId earlier_global = first_global;
@@ -906,14 +976,11 @@ void collect_file_declarations() {
             }
             named_type = node_next(named_type);
         }
-        cell cells = node_value(ty);
-        if (stage7_static_cells > 0xff - cells) {
-            fail();
-        }
+        WideValue cells = type_cells(ty);
         node_set_tag(global, type_is_aggregate(ty));
-        node_set_value(global, cells);
-        arena_write(global, FIELD_C_PAGE, stage7_static_cells);
-        stage7_static_cells += cells;
+        set_global_cells(global, cells);
+        set_global_base(global, stage7_static_cells);
+        stage7_static_cells = wide_add(stage7_static_cells, cells);
         global = node_next(global);
     }
 

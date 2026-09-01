@@ -116,6 +116,37 @@ void append_ir_instruction(cell kind, cell destination, cell source) {
     lowering_instruction_tail = instruction;
 }
 
+WideValue instruction_address(NodeId instruction) {
+    WideValue result;
+    result.low = arena_read(instruction, FIELD_A_PAGE);
+    result.mid = arena_read(instruction, FIELD_A_SLOT);
+    result.high = arena_read(instruction, FIELD_A_BANK);
+    return result;
+}
+
+void set_instruction_address(NodeId instruction, WideValue address) {
+    arena_write(instruction, FIELD_A_PAGE, address.low);
+    arena_write(instruction, FIELD_A_SLOT, address.mid);
+    arena_write(instruction, FIELD_A_BANK, address.high);
+}
+
+void append_global_ir_instruction(
+    cell kind,
+    cell data,
+    WideValue address
+) {
+    NodeId instruction = allocate_node(NODE_INSTRUCTION);
+    node_set_tag(instruction, kind);
+    node_set_value(instruction, data);
+    set_instruction_address(instruction, address);
+    if (node_is_null(node_a(lowering_current_continuation))) {
+        node_set_a(lowering_current_continuation, instruction);
+    } else {
+        node_set_next(lowering_instruction_tail, instruction);
+    }
+    lowering_instruction_tail = instruction;
+}
+
 cell instruction_source(NodeId instruction) {
     return arena_read(instruction, FIELD_NAME_PAGE);
 }
@@ -125,18 +156,20 @@ void append_array_ir_instruction(
     cell data,
     cell offset_low,
     cell offset_high,
-    cell base,
-    cell cells,
+    WideValue base,
+    WideValue cells,
     cell storage
 ) {
     NodeId instruction = allocate_node(NODE_INSTRUCTION);
     node_set_tag(instruction, kind);
     node_set_value(instruction, data);
     arena_write(instruction, FIELD_NAME_PAGE, offset_low);
-    arena_write(instruction, FIELD_A_PAGE, base);
-    arena_write(instruction, FIELD_A_SLOT, cells);
+    arena_write(instruction, FIELD_NAME_SLOT, offset_high);
+    set_instruction_address(instruction, base);
     arena_write(instruction, FIELD_B_PAGE, storage);
-    arena_write(instruction, FIELD_B_SLOT, offset_high);
+    arena_write(instruction, FIELD_C_PAGE, cells.low);
+    arena_write(instruction, FIELD_C_SLOT, cells.mid);
+    arena_write(instruction, FIELD_C_BANK, cells.high);
     if (node_is_null(node_a(lowering_current_continuation))) {
         node_set_a(lowering_current_continuation, instruction);
     } else {
@@ -150,14 +183,18 @@ void append_offset_ir_instruction(
     cell low,
     cell high,
     cell source,
-    cell amount
+    WideValue amount
 ) {
     NodeId instruction = allocate_node(NODE_INSTRUCTION);
     node_set_tag(instruction, kind);
     node_set_value(instruction, low);
     arena_write(instruction, FIELD_NAME_PAGE, high);
     arena_write(instruction, FIELD_A_PAGE, source);
-    arena_write(instruction, FIELD_A_SLOT, amount);
+    arena_write(instruction, FIELD_A_SLOT, amount.low);
+    arena_write(instruction, FIELD_A_BANK, amount.mid);
+    if (amount.high != 0) {
+        fail();
+    }
     if (node_is_null(node_a(lowering_current_continuation))) {
         node_set_a(lowering_current_continuation, instruction);
     } else {
@@ -268,12 +305,20 @@ void lower_ast_call(NodeId expression) {
     lowering_temp_next = temporary_base;
 }
 
-cell dynamic_region_cells(NodeId expression) {
+cell bounded_type_cells(NodeId ty) {
+    WideValue cells = type_cells(ty);
+    if (cells.mid != 0 || cells.high != 0) {
+        fail();
+    }
+    return cells.low;
+}
+
+WideValue dynamic_region_cells(NodeId expression) {
     NodeId base = node_a(expression);
     while (expression_is_dynamic_place(base)) {
         base = node_a(base);
     }
-    return node_value(expression_type(base));
+    return type_cells(expression_type(base));
 }
 
 void lower_dynamic_offset(NodeId expression, cell low, cell high) {
@@ -284,8 +329,8 @@ void lower_dynamic_offset(NodeId expression, cell low, cell high) {
         append_ir_instruction(IR_SET, low, 0);
         append_ir_instruction(IR_SET, high, 0);
     }
-    cell projection_kind = arena_read(expression, FIELD_C_SLOT);
-    cell amount = arena_read(expression, FIELD_C_PAGE);
+    cell projection_kind = arena_read(expression, FIELD_C_BANK);
+    WideValue amount = projection_amount(expression);
     if (projection_kind == DYNAMIC_PROJECTION_INDEX) {
         cell index = allocate_lowering_temp();
         lower_ast_expression(node_b(expression), index);
@@ -322,7 +367,7 @@ void append_dynamic_portal(
         data,
         low,
         high,
-        node_value(expression),
+        resolved_address(expression),
         dynamic_region_cells(expression),
         node_tag(expression)
     );
@@ -357,7 +402,7 @@ void lower_dynamic_aggregate(
                 offset_low,
                 offset_high,
                 0,
-                1
+                wide_from_cell(1)
             );
         }
     }
@@ -389,20 +434,20 @@ void lower_aggregate_expression(NodeId expression, cell destination, cell length
         || kind == NODE_FIELD_EXPRESSION)
         && (node_tag(expression) == RESOLVED_LOCAL
             || node_tag(expression) == RESOLVED_GLOBAL)) {
-        cell source = node_value(expression);
+        WideValue source = resolved_address(expression);
         cell index;
         while (index < length) {
             if (node_tag(expression) == RESOLVED_GLOBAL) {
-                append_ir_instruction(
+                append_global_ir_instruction(
                     IR_COPY_GLOBAL,
                     destination + index,
-                    source + index
+                    wide_add(source, wide_from_cell(index))
                 );
             } else {
                 append_ir_instruction(
                     IR_COPY,
                     destination + index,
-                    source + index
+                    source.low + index
                 );
             }
             index += 1;
@@ -421,7 +466,7 @@ void lower_aggregate_expression(NodeId expression, cell destination, cell length
     if ((kind == NODE_INDEX_EXPRESSION || kind == NODE_FIELD_EXPRESSION)
         && node_tag(expression) == RESOLVED_VALUE_PROJECT) {
         NodeId base = node_a(expression);
-        cell base_cells = node_value(expression_type(base));
+        cell base_cells = bounded_type_cells(expression_type(base));
         cell temporary = allocate_lowering_cells(base_cells);
         lower_aggregate_expression(base, temporary, base_cells);
         cell index;
@@ -429,7 +474,7 @@ void lower_aggregate_expression(NodeId expression, cell destination, cell length
             append_ir_instruction(
                 IR_COPY,
                 destination + index,
-                temporary + node_value(expression) + index
+                temporary + resolved_address(expression).low + index
             );
             index += 1;
         }
@@ -456,7 +501,11 @@ void lower_ast_expression(NodeId expression, cell destination) {
         if (node_tag(expression) == RESOLVED_CONSTANT) {
             append_ir_instruction(IR_SET, destination, node_value(expression));
         } else if (node_tag(expression) == RESOLVED_GLOBAL) {
-            append_ir_instruction(IR_COPY_GLOBAL, destination, node_value(expression));
+            append_global_ir_instruction(
+                IR_COPY_GLOBAL,
+                destination,
+                resolved_address(expression)
+            );
         } else {
             append_ir_instruction(IR_COPY, destination, node_value(expression));
         }
@@ -481,7 +530,7 @@ void lower_ast_expression(NodeId expression, cell destination) {
         cell storage = node_tag(expression);
         if (storage == RESOLVED_VALUE_PROJECT) {
             NodeId base = node_a(expression);
-            cell base_cells = node_value(expression_type(base));
+            cell base_cells = bounded_type_cells(expression_type(base));
             cell temporary = allocate_lowering_cells(base_cells);
             lower_aggregate_expression(base, temporary, base_cells);
             append_ir_instruction(
@@ -497,13 +546,13 @@ void lower_ast_expression(NodeId expression, cell destination) {
     if (kind == NODE_FIELD_EXPRESSION
         && node_tag(expression) == RESOLVED_VALUE_PROJECT) {
         NodeId base = node_a(expression);
-        cell base_cells = node_value(expression_type(base));
+        cell base_cells = bounded_type_cells(expression_type(base));
         cell temporary = allocate_lowering_cells(base_cells);
         lower_aggregate_expression(base, temporary, base_cells);
         append_ir_instruction(
             IR_COPY,
             destination,
-            temporary + node_value(expression)
+            temporary + resolved_address(expression).low
         );
         release_lowering_temp(temporary);
         return;
@@ -643,7 +692,7 @@ void lower_ast_statement(NodeId statement) {
     }
     if (kind == NODE_ASSIGNMENT) {
         NodeId left = node_a(statement);
-        cell aggregate_cells = node_value(expression_type(left));
+        cell aggregate_cells = bounded_type_cells(expression_type(left));
         if (type_is_aggregate(expression_type(left))) {
             cell snapshot = allocate_lowering_cells(aggregate_cells);
             lower_aggregate_expression(node_b(statement), snapshot, aggregate_cells);
@@ -672,7 +721,7 @@ void lower_ast_statement(NodeId statement) {
                             offset_low,
                             offset_high,
                             0,
-                            1
+                            wide_from_cell(1)
                         );
                     }
                 }
@@ -682,10 +731,13 @@ void lower_ast_statement(NodeId statement) {
             }
             while (index < aggregate_cells) {
                 if (node_tag(left) == RESOLVED_GLOBAL) {
-                    append_ir_instruction(
+                    append_global_ir_instruction(
                         IR_STORE_GLOBAL,
-                        node_value(left) + index,
-                        snapshot + index
+                        snapshot + index,
+                        wide_add(
+                            resolved_address(left),
+                            wide_from_cell(index)
+                        )
                     );
                 } else {
                     append_ir_instruction(
@@ -729,7 +781,11 @@ void lower_ast_statement(NodeId statement) {
             } else if (operator == AST_ASSIGNMENT_SUBTRACT) {
                 instruction = IR_SUBTRACT_GLOBAL;
             }
-            append_ir_instruction(instruction, node_value(left), source);
+            append_global_ir_instruction(
+                instruction,
+                source,
+                resolved_address(left)
+            );
         } else {
             cell destination = node_value(left);
             if (operator == AST_ASSIGNMENT_ADD) {
@@ -829,27 +885,33 @@ void lower_ast_statement(NodeId statement) {
 
 void lower_global_initializers() {
     NodeId global = first_global;
+    cell initializer_seen;
     while (!node_is_null(global)) {
-        cell base = arena_read(global, FIELD_C_PAGE);
-        cell cells = 1;
-        if (node_tag(global) == AST_DECLARATION_ARRAY) {
-            cells = node_value(global);
-        }
-        cell index;
-        while (index < cells) {
-            append_ir_instruction(IR_SET_GLOBAL, base + index, 0);
-            index += 1;
+        WideValue base = global_base(global);
+        if (initializer_seen) {
+            WideValue remaining = global_cells(global);
+            WideValue address = base;
+            while (!wide_is_zero(remaining)) {
+                append_global_ir_instruction(IR_SET_GLOBAL, 0, address);
+                address = wide_add(address, wide_from_cell(1));
+                remaining = wide_subtract(remaining, wide_from_cell(1));
+            }
         }
         if (!node_is_null(node_a(global))) {
             if (node_tag(global) == AST_DECLARATION_ARRAY) {
+                WideValue wide_cells = global_cells(global);
+                if (wide_cells.mid != 0 || wide_cells.high != 0) {
+                    fail();
+                }
+                cell cells = wide_cells.low;
                 cell source = allocate_lowering_cells(cells);
                 lower_aggregate_expression(node_a(global), source, cells);
-                index = 0;
+                cell index;
                 while (index < cells) {
-                    append_ir_instruction(
+                    append_global_ir_instruction(
                         IR_STORE_GLOBAL,
-                        base + index,
-                        source + index
+                        source + index,
+                        wide_add(base, wide_from_cell(index))
                     );
                     index += 1;
                 }
@@ -857,9 +919,10 @@ void lower_global_initializers() {
             } else {
                 cell source = allocate_lowering_temp();
                 lower_ast_expression(node_a(global), source);
-                append_ir_instruction(IR_STORE_GLOBAL, base, source);
+                append_global_ir_instruction(IR_STORE_GLOBAL, source, base);
                 release_lowering_temp(source);
             }
+            initializer_seen = 1;
         }
         global = node_next(global);
     }
