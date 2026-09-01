@@ -12,6 +12,7 @@ mod codegen;
 mod continuation_adapter;
 mod continuation_ir;
 mod continuation_lowering;
+mod continuation_vm;
 mod frame_layout;
 mod frontend;
 mod hir;
@@ -43,6 +44,10 @@ pub use continuation_ir::{
     FrameArrayId, FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId,
     GlobalDescriptor, GlobalId, LogicalOffset, ParameterLocation, Terminator, ValueOperand,
     ValueType,
+};
+pub use continuation_vm::{
+    ContinuationRunOptions, ContinuationRunProgress, ContinuationRunStats, ContinuationVmError,
+    run_continuations_with_io,
 };
 pub use frame_layout::{
     AbiConfig, AbiField, DEFAULT_CHUNK_CELLS, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,

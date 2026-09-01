@@ -213,6 +213,14 @@ HIRからのloweringは、sourceの`if`、`while`、短絡論理演算、call、
 現行実装には`ContinuationProgram → ContinuationProgram`の独立したoptimizer passはない。
 Continuation lowering中の定数条件除去を除けば、`ContinuationProgram`は生成直後にABI backendへ渡る。
 
+開発時は`bfc --run-ir source.bfc`で、ABI backendとBrainfuckへの展開を行わず
+`ContinuationProgram`をRust上で直接実行できる。この経路はcellのmod 256演算、frame、call/return、
+aggregate outbox、動的portalの意味を保ち、標準出力を固定長bufferからstreamingする。10秒ごと
+（`--ir-progress-interval`で変更可能）にcontinuation/frame命令数、call depth、出力byte数、
+Linux上のRSS/HWMを標準エラーへ出し、終了時には上位10件のhot continuationも表示する。
+巨大なBF artifactを介さずselfhost compilerの意味上の失敗とhot pathを調べるための経路であり、
+最終的なBF backendの互換性検証を置き換えるものではない。
+
 最近のdispatcherのhigh/low byte countdown化は、Continuation IRを書き換える処理ではない。
 ABI backendがuser continuationとhidden portal continuationからdispatch tableを組み立て、より短い
 BF templateを選ぶbackend最適化である。同様に、連続するaggregate cellのclearをrange templateへ

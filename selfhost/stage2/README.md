@@ -127,6 +127,18 @@ repository rootで次を実行する。
 scripts/verify-stage2-selfhost.sh
 ```
 
+巨大なbootstrap BFを生成・実行する前に、同じBFC製compilerをContinuation IR上で直接動かせる。
+出力は逐次書き出され、進捗とmemory指標は標準エラーへ出る。
+
+```console
+scripts/concat-stage2-compiler.sh main > stage2-compiler.bfc
+bfc --run-ir --ir-progress-interval 1s stage2-compiler.bfc \
+  < stage2-compiler.bfc > stage2-self.bf 2> stage2-self.metrics
+```
+
+この経路はfrontend/loweringとselfhost compiler本体の高速な診断用である。生成したcompilerを
+Brainfuck VM上で動かす回帰は、引き続き`verify-stage2-selfhost.sh`で確認する。
+
 検証scriptは最初に`test.bfc`版をBFへ変換して内部testの`ok`を確認する。続いて`main.bfc`版を
 連結して二段階のコンパイルを実行する。生成結果にエラーmarkerやBrainfuck以外のbyteがないことを
 調べた後、第7段階のglobal/portal回帰に加え、配列initializer、全体代入、値渡し、再帰的aggregate
