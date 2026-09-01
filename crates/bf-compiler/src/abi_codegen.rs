@@ -2047,33 +2047,81 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn compute_aggregate_chunk_offset(&mut self) -> Result<(), AbiCodegenError> {
-        self.copy_abi_field(AbiField::Index, AbiField::PcLow)?;
-        self.copy_abi_field(AbiField::Scratch0, AbiField::PcHigh)?;
-        for field in [
-            AbiField::Index,
-            AbiField::Scratch0,
-            AbiField::Scratch1,
-            AbiField::Scratch2,
-            AbiField::Scratch3,
-        ] {
-            self.clear_abi_field(field)?;
+        // The only supported chunk widths are powers of two. For an offset
+        // H:L and D=2^shift, compute the portal displacement directly:
+        // remainder = L & (D - 1), quotient = (H << (8-shift)) | (L >> shift).
+        // This replaces up to 65,535 division ticks with two local byte
+        // decompositions whose work is bounded by the byte values.
+        let shift = self.config.chunk_cells().trailing_zeros() as usize;
+        debug_assert!(matches!(shift, 3 | 4));
+        self.move_abi_field(AbiField::Index, AbiField::PcLow);
+        self.move_abi_field(AbiField::Scratch0, AbiField::PcHigh);
+
+        let low_fields = if shift == 4 {
+            [
+                AbiField::Index,
+                AbiField::Condition,
+                AbiField::Restore,
+                AbiField::Scratch0,
+                AbiField::Scratch1,
+                AbiField::Scratch2,
+                AbiField::Scratch3,
+                AbiField::NextPcLow,
+            ]
+        } else {
+            [
+                AbiField::Index,
+                AbiField::Condition,
+                AbiField::Restore,
+                AbiField::Scratch1,
+                AbiField::Scratch0,
+                AbiField::Scratch2,
+                AbiField::Scratch3,
+                AbiField::NextPcLow,
+            ]
+        };
+        let low_bits = self.abi_field_offsets(low_fields)?;
+        let temporary = self.current_abi_offset(AbiField::Branch)?;
+        self.decompose_abi_byte(AbiField::PcLow, &low_bits, temporary)?;
+        for index in 1..shift {
+            self.move_static_value(low_bits[index], low_bits[0], 1_u8 << index);
         }
-        self.set_abi_field(AbiField::Scratch3, self.config.chunk_cells() as u8)?;
-        self.consume_byte_with_ticks(AbiField::PcLow)?;
-        let high = self.current_abi_offset(AbiField::PcHigh)?;
-        self.move_to(high);
-        let high_body = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.division_tick()?;
-            emitter.set_abi_field(AbiField::PcLow, u8::MAX)?;
-            emitter.consume_byte_with_ticks(AbiField::PcLow)?;
-            emitter.move_to(high);
-            Ok(())
-        })?;
-        self.emit_loop(high_body);
-        self.move_to(0);
-        self.clear_abi_field(AbiField::Scratch3)?;
+        for index in (shift + 1)..8 {
+            self.move_static_value(low_bits[index], low_bits[shift], 1_u8 << (index - shift));
+        }
+
+        let high_fields = if shift == 4 {
+            [
+                AbiField::PcLow,
+                AbiField::Condition,
+                AbiField::Restore,
+                AbiField::Scratch0,
+                AbiField::Scratch2,
+                AbiField::Scratch3,
+                AbiField::NextPcLow,
+                AbiField::NextPcHigh,
+            ]
+        } else {
+            [
+                AbiField::PcLow,
+                AbiField::Condition,
+                AbiField::Restore,
+                AbiField::Scratch2,
+                AbiField::Scratch0,
+                AbiField::Scratch3,
+                AbiField::NextPcLow,
+                AbiField::NextPcHigh,
+            ]
+        };
+        let high_bits = self.abi_field_offsets(high_fields)?;
+        self.decompose_abi_byte(AbiField::PcHigh, &high_bits, temporary)?;
+        let quotient_low = self.current_abi_offset(AbiField::Scratch1)?;
+        for (index, &bit) in high_bits.iter().take(shift).enumerate() {
+            self.move_static_value(bit, quotient_low, 1_u8 << (8 - shift + index));
+        }
+        for index in (shift + 1)..8 {
+            self.move_static_value(high_bits[index], high_bits[shift], 1_u8 << (index - shift));
+        }
 
         let scratch = self.current_abi_offset(AbiField::Scratch0)?;
         self.copy(
@@ -2089,67 +2137,30 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    fn consume_byte_with_ticks(&mut self, field: AbiField) -> Result<(), AbiCodegenError> {
-        let offset = self.current_abi_offset(field)?;
-        self.move_to(offset);
-        let body = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.division_tick()?;
-            emitter.move_to(offset);
-            Ok(())
-        })?;
-        self.emit_loop(body);
-        self.move_to(0);
-        Ok(())
+    fn abi_field_offsets(&self, fields: [AbiField; 8]) -> Result<[isize; 8], AbiCodegenError> {
+        let mut offsets = [0; 8];
+        for (offset, field) in offsets.iter_mut().zip(fields) {
+            *offset = self.current_abi_offset(field)?;
+        }
+        Ok(offsets)
     }
 
-    fn division_tick(&mut self) -> Result<(), AbiCodegenError> {
-        self.add_abi_field(AbiField::Index, 1)?;
-        self.add_abi_field(AbiField::Scratch3, u8::MAX)?;
-        self.copy_abi_field(AbiField::Scratch3, AbiField::Condition)?;
-        self.set_abi_field(AbiField::Branch, 1)?;
-        self.clear_branch_on_nonzero(AbiField::Condition)?;
-        let branch = self.current_abi_offset(AbiField::Branch)?;
-        self.move_to(branch);
-        let wrap = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.clear_abi_field(AbiField::Index)?;
-            emitter.set_abi_field(AbiField::Scratch3, emitter.config.chunk_cells() as u8)?;
-            emitter.increment_abi_u16(
-                AbiField::Scratch1,
-                AbiField::Scratch2,
-                AbiField::Scratch0,
-            )?;
-            emitter.move_to(branch);
-            Ok(())
-        })?;
-        self.emit_loop(wrap);
-        self.move_to(0);
-        Ok(())
-    }
-
-    fn increment_abi_u16(
+    fn decompose_abi_byte(
         &mut self,
-        low: AbiField,
-        high: AbiField,
-        carry: AbiField,
+        source: AbiField,
+        bits: &[isize; 8],
+        temporary: isize,
     ) -> Result<(), AbiCodegenError> {
-        self.copy_abi_field(low, AbiField::Condition)?;
-        self.add_abi_field(AbiField::Condition, 1)?;
-        self.set_abi_field(carry, 1)?;
-        self.clear_field_on_nonzero(AbiField::Condition, carry)?;
-        self.add_abi_field(low, 1)?;
-        let carry_offset = self.current_abi_offset(carry)?;
-        self.move_to(carry_offset);
-        let body = self.capture(|emitter| {
+        self.clear(temporary);
+        for &bit in bits {
+            self.clear(bit);
+        }
+        let source = self.current_abi_offset(source)?;
+        self.move_to(source);
+        let body = self.capture_infallible(|emitter| {
             emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.add_abi_field(high, 1)?;
-            emitter.move_to(carry_offset);
-            Ok(())
-        })?;
+            emitter.increment_bits(bits, temporary, 0, source);
+        });
         self.emit_loop(body);
         self.move_to(0);
         Ok(())
@@ -2268,24 +2279,6 @@ impl<'a> AbiEmitter<'a> {
             self.emit_loop(body);
             self.move_to(0);
         }
-        Ok(())
-    }
-
-    fn clear_field_on_nonzero(
-        &mut self,
-        condition: AbiField,
-        field: AbiField,
-    ) -> Result<(), AbiCodegenError> {
-        let condition = self.current_abi_offset(condition)?;
-        self.move_to(condition);
-        let body = self.capture(|emitter| {
-            emitter.clear_current();
-            emitter.clear_abi_field(field)?;
-            emitter.move_to(condition);
-            Ok(())
-        })?;
-        self.emit_loop(body);
-        self.move_to(0);
         Ok(())
     }
 
@@ -4428,6 +4421,67 @@ mod tests {
                 execute_continuations(&program, chunk_cells),
                 &[10, 10, 10, 20, 30]
             );
+        }
+    }
+
+    #[test]
+    fn dynamic_portal_offset_preserves_high_quotient_bits() {
+        let main = FunctionId::new(0);
+        let root = crate::FrameAggregateId::new(0);
+        let low = FrameSlot::new(0);
+        let high = FrameSlot::new(1);
+        let destination = FrameSlot::new(2);
+        let function = FunctionDescriptor::new_aggregates(
+            main,
+            vec![],
+            3,
+            vec![crate::FrameAggregateDescriptor::new(root, 8192)],
+            0,
+            ValueType::Void,
+            id(1),
+        );
+        let continuations = vec![
+            Continuation::new(
+                id(1),
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::ArrayElement {
+                            array: AggregateRegion::Frame(root),
+                            index: 8191,
+                        },
+                        value: b'Q',
+                    },
+                    FrameInstruction::Set {
+                        dst: Address::Frame(low),
+                        value: 255,
+                    },
+                    FrameInstruction::Set {
+                        dst: Address::Frame(high),
+                        value: 31,
+                    },
+                ],
+                Terminator::AggregateLoad {
+                    source: AggregateRegion::Frame(root),
+                    offset: LogicalOffset::new(Address::Frame(low), Address::Frame(high)),
+                    destination: ValueOperand::Cell(Address::Frame(destination)),
+                    cells: 1,
+                    return_to: id(2),
+                },
+            ),
+            Continuation::new(
+                id(2),
+                main,
+                vec![FrameInstruction::Output {
+                    src: Address::Frame(destination),
+                }],
+                Terminator::Halt,
+            ),
+        ];
+        let program = ContinuationProgram::new(main, vec![function], continuations).unwrap();
+
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"Q");
         }
     }
 

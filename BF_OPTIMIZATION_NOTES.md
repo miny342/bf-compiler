@@ -347,6 +347,38 @@ full compilerをsamplingなしで各10秒に制限し、execute開始後6秒のs
 同じpage内のuser continuationを後方へ動かす。次にID配置を広げる場合は、Rust direct VMのcontinuation countを
 用いた全entryの重み付きpermutationとして別途比較する。
 
+### 固定chunk幅の16-bit portal divmod
+
+portal accessorは16-bit offsetをchunk displacementとpayload remainderへ分ける。従来templateはlow byteを
+1回ずつ、high byteを1 unitごとにさらに256回tickし、各tickでremainder counterの比較と16-bit quotientの
+carry処理を行っていた。offset `H:L`の実行量は最大65,535 ticksになる。
+
+ABIが許すchunk幅はD=8またはD=16だけなので、`D = 2^shift`として次を直接構成する。
+
+```text
+remainder    = L & (D - 1)
+quotient_low = (L >> shift) | (H << (8 - shift))
+quotient_high = H >> shift
+```
+
+low/high byteをそれぞれframe内の8 binary cellsへ分解し、必要なbitを重み付きtransferで既存の
+`Index`, `Scratch1`, `Scratch2`へ畳む。dispatch中はzeroである`Pc*`, `NextPc*`と既存scratch fieldsを
+再利用するため、frameやportal layoutへcellを追加しない。offset `0x1fff`を使う回帰をD=8/16双方へ追加し、
+quotient high byteまで検証した。
+
+hidden PC反転版をbaselineとして、full compilerをsamplingなしで10秒に制限した結果は次のとおり。
+
+| 指標 | tick divmod | bit divmod | 変化 |
+| --- | ---: | ---: | ---: |
+| BF source bytes | 870,818,118 | 870,818,392 | +274 bytes |
+| `hello.bfc` compile execute | 386 ms | 377 ms | -2.40% |
+| full入力bytes（6秒、samplingなし） | 2,079 | 2,252 | +8.32% |
+| interpreter RSS | 1,134,108 KiB | 1,133,884 KiB | 実質同じ |
+
+2 ms samplingでは6秒時点の入力が1,999から2,144 bytesへ7.25%増え、従来約17%を占めた2つの
+`abi.portal.offset`はtop 10から消えた。生成量とmemoryを実質維持して改善したため採用する。次のportal候補は、
+別々に実行しているwindow right/access/window leftの移動回数削減である。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を
