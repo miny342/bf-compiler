@@ -387,6 +387,73 @@ impl DispatchEntry<'_> {
     }
 }
 
+/// Maps stable logical continuation IDs to the bytes stored in ABI PC fields.
+/// Portal entries are allocated after user continuations and therefore tend
+/// to occupy the expensive end of the final low-byte page. Reverse only pages
+/// where doing so lowers the aggregate countdown distance of hidden entries.
+#[derive(Debug, Default)]
+struct DispatchEncoding {
+    reversed_low_pages: HashMap<u8, (u8, u8)>,
+}
+
+impl DispatchEncoding {
+    fn new(program: &ContinuationProgram, portal: &PortalPlan) -> Self {
+        let mut pages = BTreeMap::<u8, (Vec<u8>, Vec<u8>)>::new();
+        let mut record = |id: ContinuationId, hidden: bool| {
+            let value = id.get();
+            let page = pages.entry((value >> 8) as u8).or_default();
+            page.0.push(value as u8);
+            if hidden {
+                page.1.push(value as u8);
+            }
+        };
+        for continuation in program.continuations() {
+            record(continuation.id(), false);
+        }
+        for &accessor in &portal.accessors {
+            record(accessor.id, true);
+        }
+        for &site in &portal.ordered_sites {
+            record(site.resume, true);
+        }
+        for &router in &portal.routers {
+            record(router.id, true);
+        }
+
+        let reversed_low_pages = pages
+            .into_iter()
+            .filter_map(|(high, (lows, hidden))| {
+                if hidden.is_empty() {
+                    return None;
+                }
+                let minimum = *lows.iter().min().expect("dispatch page is nonempty");
+                let maximum = *lows.iter().max().expect("dispatch page is nonempty");
+                let ascending_cost = hidden
+                    .iter()
+                    .map(|&low| usize::from(low - minimum))
+                    .sum::<usize>();
+                let descending_cost = hidden
+                    .iter()
+                    .map(|&low| usize::from(maximum - low))
+                    .sum::<usize>();
+                (descending_cost < ascending_cost).then_some((high, (minimum, maximum)))
+            })
+            .collect();
+        Self { reversed_low_pages }
+    }
+
+    fn encode(&self, id: ContinuationId) -> u16 {
+        let value = id.get();
+        let high = (value >> 8) as u8;
+        let low = value as u8;
+        let encoded_low = self
+            .reversed_low_pages
+            .get(&high)
+            .map_or(low, |&(minimum, maximum)| minimum + (maximum - low));
+        (u16::from(high) << 8) | u16::from(encoded_low)
+    }
+}
+
 #[derive(Debug)]
 struct PortalPlan {
     accessors: Vec<PortalAccessor>,
@@ -589,6 +656,7 @@ struct AbiEmitter<'a> {
     layouts: &'a HashMap<FunctionId, FunctionLayout>,
     static_layout: &'a StaticLayout,
     portal: &'a PortalPlan,
+    dispatch_encoding: DispatchEncoding,
     config: AbiConfig,
     output: Vec<AnnotatedBfInstruction>,
     sites: ProfileSiteTable,
@@ -615,11 +683,13 @@ impl<'a> AbiEmitter<'a> {
         config: AbiConfig,
         granularity: ProfileGranularity,
     ) -> Self {
+        let dispatch_encoding = DispatchEncoding::new(program, portal);
         Self {
             program,
             layouts,
             static_layout,
             portal,
+            dispatch_encoding,
             config,
             output: Vec::new(),
             sites: ProfileSiteTable::with_root("BFC artifact"),
@@ -732,26 +802,30 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(0);
             let mut pages = BTreeMap::<u8, Vec<DispatchEntry<'_>>>::new();
             for continuation in emitter.program.continuations() {
+                let encoded = emitter.dispatch_encoding.encode(continuation.id());
                 pages
-                    .entry((continuation.id().get() >> 8) as u8)
+                    .entry((encoded >> 8) as u8)
                     .or_default()
                     .push(DispatchEntry::Continuation(continuation));
             }
             for &accessor in &emitter.portal.accessors {
+                let encoded = emitter.dispatch_encoding.encode(accessor.id);
                 pages
-                    .entry((accessor.id.get() >> 8) as u8)
+                    .entry((encoded >> 8) as u8)
                     .or_default()
                     .push(DispatchEntry::PortalAccessor(accessor));
             }
             for &site in &emitter.portal.ordered_sites {
+                let encoded = emitter.dispatch_encoding.encode(site.resume);
                 pages
-                    .entry((site.resume.get() >> 8) as u8)
+                    .entry((encoded >> 8) as u8)
                     .or_default()
                     .push(DispatchEntry::PortalResume(site));
             }
             for &router in &emitter.portal.routers {
+                let encoded = emitter.dispatch_encoding.encode(router.id);
                 pages
-                    .entry((router.id.get() >> 8) as u8)
+                    .entry((encoded >> 8) as u8)
                     .or_default()
                     .push(DispatchEntry::GlobalPortalRouter(router));
             }
@@ -762,7 +836,7 @@ impl<'a> AbiEmitter<'a> {
                     // is zero until the end of this dispatcher cycle. Keeping the
                     // zero case first prevents that fresh context from being
                     // mistaken for continuation xx00 later in the same page.
-                    entries.sort_by_key(|entry| entry.id().get() as u8);
+                    entries.sort_by_key(|entry| emitter.dispatch_encoding.encode(entry.id()) as u8);
                     (high, entries)
                 })
                 .collect::<Vec<_>>();
@@ -925,8 +999,13 @@ impl<'a> AbiEmitter<'a> {
         entries: &[DispatchEntry<'a>],
     ) -> Result<(), AbiCodegenError> {
         let low_span = usize::from(
-            (entries.last().expect("nonempty dispatch page").id().get() as u8)
-                - (entries.first().expect("nonempty dispatch page").id().get() as u8),
+            (self
+                .dispatch_encoding
+                .encode(entries.last().expect("nonempty dispatch page").id()) as u8)
+                - (self
+                    .dispatch_encoding
+                    .encode(entries.first().expect("nonempty dispatch page").id())
+                    as u8),
         ) + 1;
         if low_span == entries.len() {
             self.with_profile_site(
@@ -951,15 +1030,15 @@ impl<'a> AbiEmitter<'a> {
     ) -> Result<(), AbiCodegenError> {
         let minimum = entries
             .first()
-            .map(|entry| entry.id().get() as u8)
+            .map(|entry| self.dispatch_encoding.encode(entry.id()) as u8)
             .expect("every dispatch page contains at least one entry");
         let maximum = entries
             .last()
-            .map(|entry| entry.id().get() as u8)
+            .map(|entry| self.dispatch_encoding.encode(entry.id()) as u8)
             .expect("every dispatch page contains at least one entry");
         let mut cases = [None; 256];
         for &entry in entries {
-            let relative = (entry.id().get() as u8).wrapping_sub(minimum);
+            let relative = (self.dispatch_encoding.encode(entry.id()) as u8).wrapping_sub(minimum);
             cases[usize::from(relative)] = Some(entry);
         }
         // Normalize the page's occupied low-byte range to zero. Values below
@@ -986,7 +1065,7 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn emit_equality_case(&mut self, entry: DispatchEntry<'a>) -> Result<(), AbiCodegenError> {
-        let id = entry.id().get();
+        let id = self.dispatch_encoding.encode(entry.id());
         self.copy_abi_field(AbiField::PcLow, AbiField::Condition)?;
         self.add_abi_field(AbiField::Condition, 0_u8.wrapping_sub(id as u8))?;
         self.set_abi_field(AbiField::Branch, 1)?;
@@ -1838,10 +1917,22 @@ impl<'a> AbiEmitter<'a> {
             self.clear_location(self.route_location(ROUTE_VALUE)?);
         }
         for (index, value) in [
-            (ROUTE_ACCESSOR_LOW, site.accessor.get() as u8),
-            (ROUTE_ACCESSOR_HIGH, (site.accessor.get() >> 8) as u8),
-            (ROUTE_RESUME_LOW, site.resume.get() as u8),
-            (ROUTE_RESUME_HIGH, (site.resume.get() >> 8) as u8),
+            (
+                ROUTE_ACCESSOR_LOW,
+                self.dispatch_encoding.encode(site.accessor) as u8,
+            ),
+            (
+                ROUTE_ACCESSOR_HIGH,
+                (self.dispatch_encoding.encode(site.accessor) >> 8) as u8,
+            ),
+            (
+                ROUTE_RESUME_LOW,
+                self.dispatch_encoding.encode(site.resume) as u8,
+            ),
+            (
+                ROUTE_RESUME_HIGH,
+                (self.dispatch_encoding.encode(site.resume) >> 8) as u8,
+            ),
         ] {
             self.set_location(self.route_location(index)?, value);
         }
@@ -2363,13 +2454,14 @@ impl<'a> AbiEmitter<'a> {
         high: AbiField,
         value: ContinuationId,
     ) -> Result<(), AbiCodegenError> {
+        let value = self.dispatch_encoding.encode(value);
         self.set_location(
             self.portal_field_location(array, low, function)?,
-            value.get() as u8,
+            value as u8,
         );
         self.set_location(
             self.portal_field_location(array, high, function)?,
-            (value.get() >> 8) as u8,
+            (value >> 8) as u8,
         );
         Ok(())
     }
@@ -2550,19 +2642,21 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn set_next_pc(&mut self, id: ContinuationId) -> Result<(), AbiCodegenError> {
-        self.set_abi_field(AbiField::NextPcLow, id.get() as u8)?;
-        self.set_abi_field(AbiField::NextPcHigh, (id.get() >> 8) as u8)
+        let id = self.dispatch_encoding.encode(id);
+        self.set_abi_field(AbiField::NextPcLow, id as u8)?;
+        self.set_abi_field(AbiField::NextPcHigh, (id >> 8) as u8)
     }
 
     fn set_pc_raw(&mut self, context_base: isize, id: ContinuationId) {
         let config = self.config;
+        let id = self.dispatch_encoding.encode(id);
         self.set_raw(
             context_base + config.logical_offset_from_head(AbiField::PcLow.index()) as isize,
-            id.get() as u8,
+            id as u8,
         );
         self.set_raw(
             context_base + config.logical_offset_from_head(AbiField::PcHigh.index()) as isize,
-            (id.get() >> 8) as u8,
+            (id >> 8) as u8,
         );
     }
 
@@ -2573,10 +2667,11 @@ impl<'a> AbiEmitter<'a> {
         high: AbiField,
         id: ContinuationId,
     ) {
+        let id = self.dispatch_encoding.encode(id);
         let low = context_base + self.config.logical_offset_from_head(low.index()) as isize;
         let high = context_base + self.config.logical_offset_from_head(high.index()) as isize;
-        self.set(low, id.get() as u8);
-        self.set(high, (id.get() >> 8) as u8);
+        self.set(low, id as u8);
+        self.set(high, (id >> 8) as u8);
     }
 
     fn set_abi_field(&mut self, field: AbiField, value: u8) -> Result<(), AbiCodegenError> {
@@ -4382,6 +4477,11 @@ mod tests {
             continuations,
         )
         .unwrap();
+        let portal = PortalPlan::new(&program).unwrap();
+        let encoding = DispatchEncoding::new(&program, &portal);
+        assert_eq!(portal.ordered_sites[0].resume.get(), 5);
+        assert_eq!(encoding.encode(id(1)), 5);
+        assert_eq!(encoding.encode(portal.ordered_sites[0].resume), 1);
         for chunk_cells in [8, 16] {
             let layouts = build_layouts(&program, AbiConfig::new(chunk_cells).unwrap()).unwrap();
             assert_eq!(layouts[&main].frame.route_chunks(), 1, "D={chunk_cells}");

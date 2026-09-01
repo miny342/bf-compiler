@@ -321,6 +321,32 @@ payloadはload時に0であり、high bytesは通常小さいため、これら4
 全field版へ広げずこのPareto点を採用する。次はnested stack scanを含むtransferのinterpreter native化、または
 low-byte continuation IDのprofile-guided配置を独立に比較する。
 
+### portal hidden PCのpage内反転
+
+3本nibble版のsampleでは、頻繁なportal accessor/resumeが論理ID `5856`, `5861`, `5862`にあり、low byteが
+`224`, `229`, `230`だった。hidden dispatch entryはuser continuationの後ろへ割り当てられるため、最後の
+部分pageでcountdown距離とroute PC搬送値がともに大きくなる。
+
+論理ContinuationIdとprofile keyは維持し、ABIのPC fieldへ保存する物理low byteだけをpage内で符号化する。
+hidden entryのascending countdown距離の合計よりdescending距離の合計が小さいpageだけ、occupied rangeを
+反転する。dispatcher table、main/call/goto/branch target、portal accessor/resumeはすべて同じ全単射を使う。
+hidden entryを持たないpageとhigh byteは変えない。
+
+full compilerをsamplingなしで各10秒に制限し、execute開始後6秒のsnapshotを比較した。生成BFの差は
+物理PC定数の符号化だけで、RSSも変わらなかった。
+
+| 指標 | ascending PC | hidden優先反転 | 変化 |
+| --- | ---: | ---: | ---: |
+| BF source bytes | 870,818,191 | 870,818,118 | -73 bytes |
+| `hello.bfc` compile execute | 433 ms | 393 ms | -9.11% |
+| full入力bytes（6秒、samplingなし） | 1,999 | 2,079 | +4.00% |
+| interpreter RSS | 1,134,056 KiB | 1,134,108 KiB | 実質同じ |
+
+2 ms samplingでも6秒時点の入力は1,918から1,999 bytesへ4.22%増えた。BF sourceやmemoryを増やさず
+改善が再現したため採用する。ただし最大siteは引き続き`abi.dispatch.page.countdown`であり、page全体の反転は
+同じpage内のuser continuationを後方へ動かす。次にID配置を広げる場合は、Rust direct VMのcontinuation countを
+用いた全entryの重み付きpermutationとして別途比較する。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を
