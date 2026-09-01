@@ -60,8 +60,8 @@ profiling modeは次の三つとする。
 
 | mode | 内容 | 用途 |
 |---|---|---|
-| `counters` | site別operation counterのみ | 常用、低overhead |
-| `sample` | counterに加えてwall-time sampling | 大きなself-host workload |
+| `counters` | site別operation counter | exact countが必要な調査 |
+| `sample` | wall-time samplingのみ | 大きなself-host workload、低overhead |
 | `exact` | profile block境界でclockを読む | microbenchmark、短いprobe |
 
 ## Profile site model
@@ -324,7 +324,8 @@ modeでは必ずerrorとする。
 
 ### Parse結果
 
-parserは各BF命令について従来のsource byte offsetに加え、BF命令ordinalとprofile site IDを保持する。
+parserはBF sourceを一度走査し、source byte offset、BF命令ordinal、profile site IDを解決しながら直接fast IRを
+構築する。raw BF命令ごとの中間配列は作らない。
 
 ```text
 operation
@@ -333,8 +334,9 @@ instruction_ordinal
 profile_site_id
 ```
 
-sidecar rangeはordinalが進む順に一度だけ走査して適用し、命令ごとのbinary searchを避ける。profilingなしでは
-site IDを常に0とし、追加処理を最小化する。
+sidecar rangeはordinalが進む順に一度だけ走査して適用し、命令ごとのbinary searchを避ける。これにより巨大な
+self-host artifactでもprofile付きparseの空間量をfast IRとsource sizeに抑える。profilingなしではsite IDを
+常に0とし、追加処理を最小化する。
 
 ### Fast IR
 
@@ -412,6 +414,21 @@ sample数が20未満のsiteには`low_confidence`を付ける。
 sampler threadのoverheadが無視できない環境向けに、将来Linuxのprocess CPU timerまたは外部profilerとの連携を
 追加してよい。初期versionではportableな実装とcounterの一致を優先する。
 
+`sample` modeはsite別operation counterを更新しない。global `RunStats`は維持するが、site別のexact countが
+必要な場合は`counters` modeを使用する。samplingとfull counter更新を同時に行うと、大きなself-host workloadで
+samplingの低overheadという目的を失うためである。
+
+## 実行中snapshotとinterrupt
+
+CLIはprofileの有無にかかわらずSIGINTを捕捉し、VM execution threadが安全な位置で最後のsnapshotをstderrへ
+出してexit code 130で終了する。signal handler自身はatomic flagの更新だけを行い、allocation、I/O、profile
+集計は行わない。`--progress-interval 10s`を指定すると同じ形式を周期的にも出す。
+snapshot待ちの間にもう一度SIGINTを受けた場合は即座にexit 130とする。
+
+snapshotにはelapsed、現在siteとその親context、input/output byte数、native/RLE instruction数、pointer、RSSを
+含める。profile付きの場合はsample数またはfast operation数による上位10 siteも含める。実行hot pathでは
+16,384 native operationごとにだけ時刻とinterrupt flagを確認し、通常実行への影響を抑える。
+
 ## Exact profiler
 
 exact modeは`ProfileBlock`の実行開始と終了でmonotonic clockを読み、elapsed timeをsiteへ加算する。generic loop
@@ -474,6 +491,8 @@ bf-interpreter [options] program.bf
 
 --stats
 --timings
+--progress-interval 10s
+--no-progress
 --profile-map PATH
 --profile-mode counters|sample|exact
 --profile-sample-interval 1ms
@@ -492,16 +511,20 @@ bf-interpreter [options] program.bf
 - BF program outputは従来どおりstdoutへ出し、profile reportと混在させない。
 - machine-readable resultはJSONを初期形式とする。
 - `--timings`だけではsite provenanceを読み込まない。
+- SIGINT時はprofileの有無にかかわらず最後の`bf-progress` snapshotをstderrへ出す。
+- `--progress-interval`はprofileなしでも使用できる。profile付きなら現在siteとhot sitesも表示する。
+- 純粋なbaselineを取る場合は`--no-progress`でSIGINT pollも無効化できる。
 
 compiler CLIには次を追加する。
 
 ```text
 bfc --profile-map-output program.bfmap.json sources...
+bfc --cir-input program.cir --profile-map-output program.bfmap.json
 bfc --embed-profile sources...
 bfc --profile-granularity abi|continuation|instruction|source
 ```
 
-`--profile-map-output`は通常BFをstdoutへ出す既存動作と併用できる。stdoutへBF、指定pathへsidecarを書く。
+`--profile-map-output`はsource入力とself-host CIR入力の両方で使用できる。stdoutへBF、指定pathへsidecarを書く。
 同じpathやstdoutを両方へ指定することはerrorにする。
 
 ## Granularity
@@ -630,9 +653,14 @@ BF以外のbyteは従来どおり無視する。
 3. `sample`。
 4. `exact`。
 
-reportには1に対するwall time倍率を記載する。初期目標は、大きなself-host workloadで`counters`を10%以内、
-1 ms samplingを15%以内のoverheadに抑えることとする。達成できない場合もcorrectnessを優先し、baselineと
-profiling結果を混同しない。exact modeには一律のoverhead上限を設けない。
+reportには1に対するwall time倍率を記載する。初期目標は、大きなself-host workloadで1 ms samplingを15%以内の
+overheadに抑えることとする。`counters`はexact countのための高overhead modeとして別に評価する。達成できない
+場合もcorrectnessを優先し、baselineとprofiling結果を混同しない。exact modeには一律のoverhead上限を設けない。
+
+2026-09-02の小型continuation workload（3回平均）では`--no-progress` baseline 0.764秒、既定のSIGINT
+snapshot待受0.774秒（+1.2%）、`counters` 1.311秒（+71.6%）、1 ms `sample` 0.846秒（+10.7%）だった。
+full compiler BFの2 ms `sample`では同じ6秒時点の入力消費がprofileなし1610 bytes、sample 1556 bytesで、
+概算overheadは3〜4%だった。
 
 ## 導入順序
 

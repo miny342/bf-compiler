@@ -1848,6 +1848,16 @@ impl<'a> AbiEmitter<'a> {
         &mut self,
         router: GlobalPortalRouter,
     ) -> Result<(), AbiCodegenError> {
+        let key = format!("abi.portal.router.global.{}", router.global.index());
+        self.with_profile_site("abi", &key, "global portal router", |emitter| {
+            emitter.emit_global_portal_router_inner(router)
+        })
+    }
+
+    fn emit_global_portal_router_inner(
+        &mut self,
+        router: GlobalPortalRouter,
+    ) -> Result<(), AbiCodegenError> {
         let region = AggregateRegion::Global(router.global);
         // A static portal starts zero and its resume path clears every protocol
         // field after each access. Route staging is single-use, so moving the

@@ -5,11 +5,14 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bf_interpreter::{
-    ProfileMap, ProfileMode, ProfileOptions, ProfileResult, RunOptions, RunResult, RunStats,
-    SiteCounters, Timings, run_with_options,
+    Error as InterpreterError, ProfileMap, ProfileMode, ProfileOptions, ProfileResult,
+    ProgressOptions, ProgressSnapshot, RunOptions, RunResult, RunStats, SiteCounters, Timings,
+    run_with_options,
 };
 use bf_profiling::embedded_profile_map;
 use serde_json::{Value, json};
@@ -17,11 +20,52 @@ use serde_json::{Value, json};
 fn main() -> ExitCode {
     match main_result() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if matches!(error.downcast_ref(), Some(InterpreterError::Interrupted)) => {
+            ExitCode::from(130)
+        }
         Err(error) => {
             eprintln!("bf-interpreter: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+const SIGINT: i32 = 2;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn signal(signal: i32, handler: usize) -> usize;
+    fn _exit(status: i32) -> !;
+}
+
+#[cfg(unix)]
+extern "C" fn handle_sigint(_signal: i32) {
+    if INTERRUPTED.swap(true, Ordering::Relaxed) {
+        // SAFETY: `_exit` is async-signal-safe and provides an escape hatch if
+        // the VM has not yet reached its next observation point.
+        unsafe { _exit(130) }
+    }
+}
+
+fn install_interrupt_handler() -> io::Result<()> {
+    INTERRUPTED.store(false, Ordering::Relaxed);
+    #[cfg(unix)]
+    {
+        // SAFETY: the handler only performs a lock-free atomic store, and its
+        // function pointer remains valid for the lifetime of the process.
+        let previous = unsafe { signal(SIGINT, handle_sigint as *const () as usize) };
+        if previous == usize::MAX {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+fn was_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +84,8 @@ struct CliOptions {
     profile_mode: Option<ProfileMode>,
     profile_output: Option<PathBuf>,
     profile_format: ProfileFormat,
+    progress_interval: Option<Duration>,
+    progress_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +151,17 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         mode: options.profile_mode.unwrap_or(ProfileMode::Counters),
     });
     let report_map = profile.as_ref().map(|profile| profile.map.clone());
+    let progress = if options.progress_enabled {
+        install_interrupt_handler()?;
+        let progress_map = report_map.clone();
+        Some(ProgressOptions {
+            interval: options.progress_interval,
+            interrupted: was_interrupted,
+            callback: Arc::new(move |snapshot| print_progress(snapshot, progress_map.as_ref())),
+        })
+    } else {
+        None
+    };
     let result = run_with_options(
         &source,
         &input,
@@ -113,6 +170,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             collect_stats: options.print_stats || profile.is_some(),
             collect_timings: options.print_timings || profile.is_some(),
             profile,
+            progress,
         },
     )?;
 
@@ -190,6 +248,8 @@ fn parse_arguments(
     let mut sample_interval_set = false;
     let mut profile_output = None;
     let mut profile_format = ProfileFormat::Text;
+    let mut progress_interval = None;
+    let mut progress_enabled = true;
 
     while let Some(argument) = arguments.next() {
         if argument == "--stats" {
@@ -243,6 +303,11 @@ fn parse_arguments(
                     ));
                 }
             };
+        } else if argument == "--progress-interval" {
+            let value = required_value(executable, "--progress-interval", arguments.next())?;
+            progress_interval = Some(parse_duration(&value)?);
+        } else if argument == "--no-progress" {
+            progress_enabled = false;
         } else if argument.to_string_lossy().starts_with('-')
             || program_path.replace(PathBuf::from(argument)).is_some()
         {
@@ -270,6 +335,9 @@ fn parse_arguments(
     if sample_interval_set && !matches!(profile_mode, Some(ProfileMode::Sample { .. })) {
         return Err("--profile-sample-interval requires --profile-mode sample".into());
     }
+    if !progress_enabled && progress_interval.is_some() {
+        return Err("--no-progress cannot be combined with --progress-interval".into());
+    }
     Ok(CliOptions {
         print_stats,
         print_timings,
@@ -280,6 +348,8 @@ fn parse_arguments(
         profile_mode,
         profile_output,
         profile_format,
+        progress_interval,
+        progress_enabled,
     })
 }
 
@@ -369,6 +439,89 @@ fn print_stats(stats: &RunStats) {
         "transfer_iterations={}",
         stats.optimization.transfer_iterations
     );
+}
+
+fn print_progress(snapshot: &ProgressSnapshot, map: Option<&ProfileMap>) {
+    let current = snapshot
+        .current_site
+        .and_then(|site| map.and_then(|map| map.sites.iter().find(|metadata| metadata.id == site)));
+    let current_site = snapshot
+        .current_site
+        .map_or_else(|| "none".to_string(), |site| site.0.to_string());
+    let current_key = current.map_or("none", |site| site.stable_key.as_str());
+    let current_context = snapshot
+        .current_site
+        .and_then(|site| profile_context(map, site))
+        .unwrap_or("none");
+    eprintln!(
+        "bf-progress reason={} elapsed_ms={} current_site={} current_key={} current_context={} input_bytes={} output_bytes={} native_operations={} rle_instructions={} pointer={} max_pointer={} {}",
+        if snapshot.interrupted {
+            "interrupt"
+        } else {
+            "periodic"
+        },
+        snapshot.elapsed.as_millis(),
+        current_site,
+        current_key,
+        current_context,
+        snapshot.input_bytes,
+        snapshot.output_bytes,
+        snapshot.stats.optimization.executed_native_operations,
+        snapshot.stats.executed_rle_instructions,
+        snapshot.pointer,
+        snapshot.stats.max_pointer,
+        memory_metrics(),
+    );
+    for (rank, hot) in snapshot.hot_sites.iter().enumerate() {
+        let metadata = map.and_then(|map| map.sites.iter().find(|site| site.id == hot.site));
+        let context = profile_context(map, hot.site).unwrap_or("none");
+        eprintln!(
+            "bf-progress-hot rank={} site={} key={} context={} samples={} fast_operations={} raw_bf_instructions={} pointer_distance={}",
+            rank + 1,
+            hot.site.0,
+            metadata.map_or("unknown", |site| site.stable_key.as_str()),
+            context,
+            hot.samples,
+            hot.counters.fast_operations,
+            hot.counters.raw_bf_instructions,
+            hot.counters.pointer_distance,
+        );
+    }
+}
+
+fn profile_context(map: Option<&ProfileMap>, site: bf_interpreter::ProfileSiteId) -> Option<&str> {
+    let map = map?;
+    let mut current = Some(site);
+    while let Some(id) = current {
+        let metadata = map.sites.iter().find(|metadata| metadata.id == id)?;
+        if metadata.kind == "continuation"
+            || metadata.stable_key.starts_with("abi.dispatch.case.")
+            || metadata.stable_key.starts_with("abi.portal.router.global.")
+        {
+            return Some(metadata.stable_key.as_str());
+        }
+        current = metadata.parent;
+    }
+    None
+}
+
+fn memory_metrics() -> String {
+    let Ok(status) = fs::read_to_string("/proc/self/status") else {
+        return "rss_kib=unknown hwm_kib=unknown vm_kib=unknown".into();
+    };
+    let value = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|line| line.split_ascii_whitespace().next())
+            .unwrap_or("unknown")
+    };
+    format!(
+        "rss_kib={} hwm_kib={} vm_kib={}",
+        value("VmRSS:"),
+        value("VmHWM:"),
+        value("VmSize:"),
+    )
 }
 
 fn print_timings(timings: Timings, cli: CliTimings) {
@@ -666,7 +819,7 @@ fn duration_percent(numerator: u128, denominator: u128) -> f64 {
 
 fn usage(executable: &OsStr) -> String {
     format!(
-        "usage: {} [--stats] [--timings] [--unlimited-tape] [--profile-map PATH] [--accept-embedded-profile] \
+        "usage: {} [--stats] [--timings] [--unlimited-tape] [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
          [--profile-mode counters|sample|exact] [--profile-sample-interval 1ms] \
          [--profile-output PATH] [--profile-format text|json] <program.bf>",
         executable.to_string_lossy()

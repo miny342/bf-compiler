@@ -62,12 +62,58 @@ pub struct RunResult {
 }
 
 /// Options for the configurable interpreter entry point.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RunOptions {
     pub unbounded_tape: bool,
     pub collect_stats: bool,
     pub collect_timings: bool,
     pub profile: Option<ProfileOptions>,
+    pub progress: Option<ProgressOptions>,
+}
+
+impl fmt::Debug for RunOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RunOptions")
+            .field("unbounded_tape", &self.unbounded_tape)
+            .field("collect_stats", &self.collect_stats)
+            .field("collect_timings", &self.collect_timings)
+            .field("profile", &self.profile)
+            .field("progress", &self.progress.as_ref().map(|_| "enabled"))
+            .finish()
+    }
+}
+
+/// Low-frequency execution snapshots without enabling full profiling counters.
+#[derive(Clone)]
+pub struct ProgressOptions {
+    /// Emit periodic snapshots when set. Interrupt snapshots are independent.
+    pub interval: Option<Duration>,
+    /// Polled in batches by the VM; should remain very cheap.
+    pub interrupted: fn() -> bool,
+    /// Called from the execution thread, never from the signal handler.
+    pub callback: Arc<dyn Fn(&ProgressSnapshot) + Send + Sync>,
+}
+
+/// One point-in-time view of a running VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressSnapshot {
+    pub interrupted: bool,
+    pub elapsed: Duration,
+    pub current_site: Option<ProfileSiteId>,
+    pub input_bytes: usize,
+    pub output_bytes: usize,
+    pub pointer: usize,
+    pub stats: RunStats,
+    pub hot_sites: Vec<ProgressSiteSnapshot>,
+}
+
+/// Per-site data retained in a progress snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressSiteSnapshot {
+    pub site: ProfileSiteId,
+    pub counters: SiteCounters,
+    pub samples: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +185,7 @@ pub enum Error {
     TapeUnderflow { instruction_offset: usize },
     TapeOverflow { instruction_offset: usize },
     ProfileArtifact(String),
+    Interrupted,
     InvalidUtf8Output,
 }
 
@@ -160,6 +207,7 @@ impl fmt::Display for Error {
                 "data pointer moved right of the tape at byte offset {instruction_offset}"
             ),
             Self::ProfileArtifact(message) => write!(f, "profile artifact error: {message}"),
+            Self::Interrupted => write!(f, "interrupted"),
             Self::InvalidUtf8Output => write!(f, "program output is not valid UTF-8"),
         }
     }
@@ -167,6 +215,7 @@ impl fmt::Display for Error {
 
 impl StdError for Error {}
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     Right,
@@ -187,6 +236,7 @@ enum RleOp {
     Decrement,
 }
 
+#[cfg(test)]
 impl Op {
     const fn rle_op(self) -> Option<RleOp> {
         match self {
@@ -199,11 +249,11 @@ impl Op {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct Instruction {
     op: Op,
     source_offset: usize,
-    site: ResolvedProfileSite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +317,12 @@ pub fn run_with_options(
     input: &[u8],
     options: RunOptions,
 ) -> Result<RunResult, Error> {
+    if matches!(options.progress.as_ref().and_then(|progress| progress.interval), Some(interval) if interval.is_zero())
+    {
+        return Err(Error::ProfileArtifact(
+            "progress interval must be greater than zero".into(),
+        ));
+    }
     if let Some(profile) = &options.profile {
         if matches!(profile.mode, ProfileMode::Sample { interval } if interval.is_zero()) {
             return Err(Error::ProfileArtifact(
@@ -280,28 +336,20 @@ pub fn run_with_options(
     }
 
     let parse_started = options.collect_timings.then(Instant::now);
-    let (optimized, parse_elapsed, build_elapsed) = if let Some(profile) = &options.profile {
-        let instructions = parse_with_profile(source, Some(&profile.map))?;
-        let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
-        let build_started = options.collect_timings.then(Instant::now);
-        let optimized = optimize(&instructions, Some(&profile.map));
-        let build_elapsed = build_started.map_or(Duration::ZERO, |started| started.elapsed());
-        (optimized, parse_elapsed, build_elapsed)
-    } else {
-        // Generated self-host programs contain very long pointer runs. Building one
-        // 40-byte `Instruction` per BF byte before immediately coalescing those runs
-        // multiplies a large source into tens of gigabytes. Build the unprofiled fast
-        // representation directly instead.
-        let optimized = parse_optimized_unprofiled(source)?;
-        let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
-        (optimized, parse_elapsed, Duration::ZERO)
-    };
+    // Generated self-host programs contain very long pointer runs. Building one
+    // 40-byte `Instruction` per BF byte before immediately coalescing those runs
+    // multiplies a large source into tens of gigabytes. Build the fast representation
+    // directly in both profiled and unprofiled modes.
+    let optimized = parse_optimized(source, options.profile.as_ref().map(|profile| &profile.map))?;
+    let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
+    let build_elapsed = Duration::ZERO;
     let execute_started = (options.collect_timings || options.profile.is_some()).then(Instant::now);
     let mut result = execute(
         &optimized,
         input,
         options.unbounded_tape,
         options.profile.as_ref(),
+        options.progress.as_ref(),
     )?;
     let execute_elapsed = execute_started.map_or(Duration::ZERO, |started| started.elapsed());
     if options.collect_timings {
@@ -334,27 +382,8 @@ pub fn run_str(source: &str, input: &str) -> Result<String, Error> {
 
 #[cfg(test)]
 fn parse(source: &[u8]) -> Result<Vec<Instruction>, Error> {
-    parse_with_profile(source, None)
-}
-
-fn parse_with_profile(
-    source: &[u8],
-    profile_map: Option<&ProfileMap>,
-) -> Result<Vec<Instruction>, Error> {
     let mut instructions: Vec<Instruction> = Vec::new();
     let mut openings = Vec::new();
-    let mut range_index = 0_usize;
-    let range_slots = profile_map.map(|map| {
-        map.ranges
-            .iter()
-            .map(|range| {
-                map.sites
-                    .iter()
-                    .position(|site| site.id == range.site)
-                    .expect("validated profile range references a known site")
-            })
-            .collect::<Vec<_>>()
-    });
 
     for (source_offset, byte) in source.iter().copied().enumerate() {
         let op = match byte {
@@ -380,23 +409,7 @@ fn parse_with_profile(
             }
             _ => continue,
         };
-        let ordinal = instructions.len() as u64;
-        let site = profile_map
-            .map(|map| {
-                while map.ranges[range_index].end <= ordinal {
-                    range_index += 1;
-                }
-                ResolvedProfileSite {
-                    id: map.ranges[range_index].site,
-                    slot: range_slots.as_ref().unwrap()[range_index],
-                }
-            })
-            .unwrap_or(ResolvedProfileSite::ROOT);
-        instructions.push(Instruction {
-            op,
-            source_offset,
-            site,
-        });
+        instructions.push(Instruction { op, source_offset });
     }
 
     if let Some(opening_index) = openings.first().copied() {
@@ -529,6 +542,7 @@ struct FastBlock {
     instructions: Vec<FastInstruction>,
     last_rle: Option<RleOp>,
     opening_offset: Option<usize>,
+    opening_site: Option<ResolvedProfileSite>,
 }
 
 impl FastBlock {
@@ -537,33 +551,44 @@ impl FastBlock {
             instructions: Vec::new(),
             last_rle: None,
             opening_offset: None,
+            opening_site: None,
         }
     }
 
-    fn nested(opening_offset: usize) -> Self {
+    fn nested(opening_offset: usize, opening_site: ResolvedProfileSite) -> Self {
         Self {
             instructions: Vec::new(),
             last_rle: None,
             opening_offset: Some(opening_offset),
+            opening_site: Some(opening_site),
         }
     }
 
-    fn push_move(&mut self, op: RleOp, source_offset: usize) {
+    fn push_move(
+        &mut self,
+        op: RleOp,
+        source_offset: usize,
+        site: ResolvedProfileSite,
+        profile_map: Option<&ProfileMap>,
+    ) {
         let amount = if op == RleOp::Right { 1 } else { -1 };
         if self.last_rle == Some(op)
             && let Some(FastInstruction::Move {
+                site: current_site,
+                mixed,
                 amount: current,
                 source_offsets,
-                ..
             }) = self.instructions.last_mut()
         {
+            *mixed |= current_site.id != site.id;
+            *current_site = lowest_common_ancestor(profile_map, *current_site, site);
             *current += amount;
             source_offsets.push(source_offset);
         } else {
             let mut source_offsets = SourceOffsets::default();
             source_offsets.push(source_offset);
             self.instructions.push(FastInstruction::Move {
-                site: ResolvedProfileSite::ROOT,
+                site,
                 mixed: false,
                 amount,
                 source_offsets,
@@ -572,20 +597,23 @@ impl FastBlock {
         self.last_rle = Some(op);
     }
 
-    fn push_add(&mut self, op: RleOp) {
+    fn push_add(&mut self, op: RleOp, site: ResolvedProfileSite, profile_map: Option<&ProfileMap>) {
         let amount = if op == RleOp::Increment { 1 } else { 255 };
         if self.last_rle == Some(op)
             && let Some(FastInstruction::Add {
+                site: current_site,
+                mixed,
                 amount: current,
                 raw_count,
-                ..
             }) = self.instructions.last_mut()
         {
+            *mixed |= current_site.id != site.id;
+            *current_site = lowest_common_ancestor(profile_map, *current_site, site);
             *current = current.wrapping_add(amount);
             *raw_count += 1;
         } else {
             self.instructions.push(FastInstruction::Add {
-                site: ResolvedProfileSite::ROOT,
+                site,
                 mixed: false,
                 amount,
                 raw_count: 1,
@@ -600,26 +628,36 @@ impl FastBlock {
     }
 }
 
-fn parse_optimized_unprofiled(source: &[u8]) -> Result<Vec<FastInstruction>, Error> {
+fn parse_optimized(
+    source: &[u8],
+    profile_map: Option<&ProfileMap>,
+) -> Result<Vec<FastInstruction>, Error> {
     let mut blocks = vec![FastBlock::root()];
+    let mut ordinal = 0_u64;
+    let mut range_index = 0_usize;
+    let range_slots = profile_map.map(profile_range_slots);
     for (source_offset, byte) in source.iter().copied().enumerate() {
+        if !matches!(byte, b'>' | b'<' | b'+' | b'-' | b'.' | b',' | b'[' | b']') {
+            continue;
+        }
+        let site = resolved_profile_site(
+            profile_map,
+            range_slots.as_deref(),
+            &mut range_index,
+            ordinal,
+        );
+        ordinal += 1;
         let current = blocks.last_mut().unwrap();
         match byte {
-            b'>' => current.push_move(RleOp::Right, source_offset),
-            b'<' => current.push_move(RleOp::Left, source_offset),
-            b'+' => current.push_add(RleOp::Increment),
-            b'-' => current.push_add(RleOp::Decrement),
-            b'.' => current.push_non_rle(FastInstruction::Output {
-                site: ResolvedProfileSite::ROOT,
-                mixed: false,
-            }),
-            b',' => current.push_non_rle(FastInstruction::Input {
-                site: ResolvedProfileSite::ROOT,
-                mixed: false,
-            }),
+            b'>' => current.push_move(RleOp::Right, source_offset, site, profile_map),
+            b'<' => current.push_move(RleOp::Left, source_offset, site, profile_map),
+            b'+' => current.push_add(RleOp::Increment, site, profile_map),
+            b'-' => current.push_add(RleOp::Decrement, site, profile_map),
+            b'.' => current.push_non_rle(FastInstruction::Output { site, mixed: false }),
+            b',' => current.push_non_rle(FastInstruction::Input { site, mixed: false }),
             b'[' => {
                 current.last_rle = None;
-                blocks.push(FastBlock::nested(source_offset));
+                blocks.push(FastBlock::nested(source_offset, site));
             }
             b']' => {
                 if blocks.len() == 1 {
@@ -627,14 +665,29 @@ fn parse_optimized_unprofiled(source: &[u8]) -> Result<Vec<FastInstruction>, Err
                         offset: source_offset,
                     });
                 }
-                let body = blocks.pop().unwrap().instructions;
+                let block = blocks.pop().unwrap();
+                let body = block.instructions;
                 let optimization = recognize_fast_loop(&body);
+                let mut loop_site = block.opening_site.unwrap();
+                let mut mixed = false;
+                if optimization.is_some() {
+                    merge_provenance(&mut loop_site, &mut mixed, site, false, profile_map);
+                    for instruction in &body {
+                        merge_provenance(
+                            &mut loop_site,
+                            &mut mixed,
+                            instruction.site(),
+                            instruction.mixed_provenance(),
+                            profile_map,
+                        );
+                    }
+                }
                 blocks
                     .last_mut()
                     .unwrap()
                     .push_non_rle(FastInstruction::Loop {
-                        site: ResolvedProfileSite::ROOT,
-                        mixed: false,
+                        site: loop_site,
+                        mixed,
                         body,
                         optimization,
                     });
@@ -651,122 +704,45 @@ fn parse_optimized_unprofiled(source: &[u8]) -> Result<Vec<FastInstruction>, Err
     Ok(blocks.pop().unwrap().instructions)
 }
 
-fn optimize(
-    instructions: &[Instruction],
-    profile_map: Option<&ProfileMap>,
-) -> Vec<FastInstruction> {
-    optimize_range(instructions, 0, instructions.len(), profile_map)
+fn profile_range_slots(map: &ProfileMap) -> Vec<usize> {
+    map.ranges
+        .iter()
+        .map(|range| {
+            map.sites
+                .iter()
+                .position(|site| site.id == range.site)
+                .expect("validated profile range references a known site")
+        })
+        .collect()
 }
 
-fn optimize_range(
-    instructions: &[Instruction],
-    start: usize,
-    end: usize,
+fn resolved_profile_site(
     profile_map: Option<&ProfileMap>,
-) -> Vec<FastInstruction> {
-    let mut result = Vec::new();
-    let mut position = start;
-    while position < end {
-        match instructions[position].op {
-            Op::Right | Op::Left => {
-                let op = instructions[position].op;
-                let mut site = instructions[position].site;
-                let mut mixed = false;
-                let run_start = position;
-                while position < end && instructions[position].op == op {
-                    if profile_map.is_some() {
-                        mixed |= site.id != instructions[position].site.id;
-                        site =
-                            lowest_common_ancestor(profile_map, site, instructions[position].site);
-                    }
-                    position += 1;
-                }
-                let count = position - run_start;
-                let magnitude = isize::try_from(count).expect("BF source fits in isize");
-                let amount = if op == Op::Right {
-                    magnitude
-                } else {
-                    -magnitude
-                };
-                let mut source_offsets = SourceOffsets::default();
-                for instruction in &instructions[run_start..position] {
-                    source_offsets.push(instruction.source_offset);
-                }
-                result.push(FastInstruction::Move {
-                    site,
-                    mixed,
-                    amount,
-                    source_offsets,
-                });
-            }
-            Op::Increment | Op::Decrement => {
-                let op = instructions[position].op;
-                let mut site = instructions[position].site;
-                let mut mixed = false;
-                let run_start = position;
-                while position < end && instructions[position].op == op {
-                    if profile_map.is_some() {
-                        mixed |= site.id != instructions[position].site.id;
-                        site =
-                            lowest_common_ancestor(profile_map, site, instructions[position].site);
-                    }
-                    position += 1;
-                }
-                let count = position - run_start;
-                let magnitude = (count & 0xff) as u8;
-                let amount = if op == Op::Increment {
-                    magnitude
-                } else {
-                    0_u8.wrapping_sub(magnitude)
-                };
-                result.push(FastInstruction::Add {
-                    site,
-                    mixed,
-                    amount,
-                    raw_count: count as u64,
-                });
-            }
-            Op::Input => {
-                result.push(FastInstruction::Input {
-                    site: instructions[position].site,
-                    mixed: false,
-                });
-                position += 1;
-            }
-            Op::Output => {
-                result.push(FastInstruction::Output {
-                    site: instructions[position].site,
-                    mixed: false,
-                });
-                position += 1;
-            }
-            Op::JumpIfZero(target) => {
-                let closing = target - 1;
-                let body = optimize_range(instructions, position + 1, closing, profile_map);
-                let optimization = recognize_loop(instructions, position + 1, closing, &body);
-                let mut site = instructions[position].site;
-                let mut mixed = false;
-                if optimization.is_some() && profile_map.is_some() {
-                    // Native loop operations subsume the opening/closing brackets and all
-                    // instructions in their body, so attribute them to the LCA of that
-                    // complete provenance set rather than just the opening bracket.
-                    for instruction in &instructions[position + 1..target] {
-                        mixed |= site.id != instruction.site.id;
-                        site = lowest_common_ancestor(profile_map, site, instruction.site);
-                    }
-                }
-                result.push(FastInstruction::Loop {
-                    site,
-                    mixed,
-                    body,
-                    optimization,
-                });
-                position = target;
-            }
-            Op::JumpIfNonZero(_) => unreachable!("loop closing is consumed with its opening"),
-        }
+    range_slots: Option<&[usize]>,
+    range_index: &mut usize,
+    ordinal: u64,
+) -> ResolvedProfileSite {
+    let Some(map) = profile_map else {
+        return ResolvedProfileSite::ROOT;
+    };
+    while map.ranges[*range_index].end <= ordinal {
+        *range_index += 1;
     }
-    result
+    ResolvedProfileSite {
+        id: map.ranges[*range_index].site,
+        slot: range_slots.unwrap()[*range_index],
+    }
+}
+
+fn merge_provenance(
+    target: &mut ResolvedProfileSite,
+    mixed: &mut bool,
+    site: ResolvedProfileSite,
+    site_is_mixed: bool,
+    profile_map: Option<&ProfileMap>,
+) {
+    *mixed |= site_is_mixed || target.id != site.id;
+    *target = lowest_common_ancestor(profile_map, *target, site);
 }
 
 fn lowest_common_ancestor(
@@ -806,97 +782,6 @@ fn lowest_common_ancestor(
         current = parent(site);
     }
     ResolvedProfileSite::ROOT
-}
-
-fn recognize_loop(
-    instructions: &[Instruction],
-    start: usize,
-    end: usize,
-    body: &[FastInstruction],
-) -> Option<LoopOptimization> {
-    if start == end {
-        return None;
-    }
-
-    if let [
-        FastInstruction::Add {
-            amount, raw_count, ..
-        },
-    ] = body
-        && amount % 2 == 1
-    {
-        return Some(LoopOptimization::Clear {
-            delta: *amount,
-            body_raw_count: *raw_count,
-            body_rle_count: 1,
-        });
-    }
-
-    if let [
-        FastInstruction::Move {
-            amount,
-            source_offsets,
-            ..
-        },
-    ] = body
-    {
-        return Some(LoopOptimization::Scan {
-            amount: *amount,
-            source_offsets: source_offsets.clone(),
-        });
-    }
-
-    let mut pointer = 0_isize;
-    let mut min_offset = 0_isize;
-    let mut max_offset = 0_isize;
-    let mut updates = std::collections::BTreeMap::<isize, u8>::new();
-    let mut previous = None;
-    let mut rle_count = 0_u64;
-    let mut pointer_distance = 0_u64;
-
-    for instruction in &instructions[start..end] {
-        let rle_op = instruction.op.rle_op()?;
-        if previous != Some(rle_op) {
-            rle_count += 1;
-            previous = Some(rle_op);
-        }
-        match instruction.op {
-            Op::Right => {
-                pointer_distance += 1;
-                pointer += 1;
-                max_offset = max_offset.max(pointer);
-            }
-            Op::Left => {
-                pointer_distance += 1;
-                pointer -= 1;
-                min_offset = min_offset.min(pointer);
-            }
-            Op::Increment => {
-                let value = updates.entry(pointer).or_default();
-                *value = value.wrapping_add(1);
-            }
-            Op::Decrement => {
-                let value = updates.entry(pointer).or_default();
-                *value = value.wrapping_sub(1);
-            }
-            Op::Output | Op::Input | Op::JumpIfZero(_) | Op::JumpIfNonZero(_) => return None,
-        }
-    }
-
-    let source_delta = updates.remove(&0).unwrap_or(0);
-    if pointer != 0 || !matches!(source_delta, 1 | 255) {
-        return None;
-    }
-    updates.retain(|_, factor| *factor != 0);
-    Some(LoopOptimization::Transfer {
-        source_delta,
-        updates: updates.into_iter().collect::<Vec<_>>().into_boxed_slice(),
-        min_offset,
-        max_offset,
-        body_raw_count: (end - start) as u64,
-        body_rle_count: rle_count,
-        body_pointer_distance: pointer_distance,
-    })
 }
 
 fn recognize_fast_loop(body: &[FastInstruction]) -> Option<LoopOptimization> {
@@ -986,6 +871,7 @@ const INACTIVE_PROFILE_SITE: u32 = u32::MAX;
 
 struct ProfileCollector {
     sites: Vec<SiteProfile>,
+    mode: ProfileMode,
     exact: bool,
 }
 
@@ -1005,6 +891,7 @@ impl ProfileCollector {
             .collect();
         Self {
             sites,
+            mode: options.mode,
             exact: options.mode == ProfileMode::Exact,
         }
     }
@@ -1070,7 +957,13 @@ impl SamplingSession {
             .collect();
         (samples, self.interval)
     }
+
+    fn shared_samples(&self) -> Arc<Vec<AtomicU64>> {
+        Arc::clone(&self.samples)
+    }
 }
+
+const PROGRESS_POLL_OPERATIONS: u32 = 16_384;
 
 struct Machine<'a> {
     tape: Vec<u8>,
@@ -1085,10 +978,15 @@ struct Machine<'a> {
     grow_tape: bool,
     profile: Option<ProfileCollector>,
     sampled_site: Option<Arc<AtomicU32>>,
+    sampled_counts: Option<Arc<Vec<AtomicU64>>>,
     published_sample_site: u32,
     clock_reads: u64,
     profile_block_executions: u64,
     mixed_provenance_native_operations: u64,
+    progress: Option<ProgressOptions>,
+    progress_started: Instant,
+    next_progress: Option<Instant>,
+    progress_countdown: u32,
 }
 
 impl<'a> Machine<'a> {
@@ -1097,7 +995,10 @@ impl<'a> Machine<'a> {
         grow_tape: bool,
         profile_options: Option<&ProfileOptions>,
         sampled_site: Option<Arc<AtomicU32>>,
+        sampled_counts: Option<Arc<Vec<AtomicU64>>>,
+        progress: Option<&ProgressOptions>,
     ) -> Self {
+        let progress_started = Instant::now();
         Self {
             tape: vec![0; TAPE_LEN],
             pointer: 0,
@@ -1111,10 +1012,17 @@ impl<'a> Machine<'a> {
             grow_tape,
             profile: profile_options.map(ProfileCollector::new),
             sampled_site,
+            sampled_counts,
             published_sample_site: INACTIVE_PROFILE_SITE,
             clock_reads: 0,
             profile_block_executions: 0,
             mixed_provenance_native_operations: 0,
+            progress: progress.cloned(),
+            progress_started,
+            next_progress: progress
+                .and_then(|progress| progress.interval)
+                .and_then(|interval| progress_started.checked_add(interval)),
+            progress_countdown: PROGRESS_POLL_OPERATIONS,
         }
     }
 
@@ -1149,11 +1057,93 @@ impl<'a> Machine<'a> {
         }
     }
 
+    fn observe_progress(&mut self, site: ResolvedProfileSite) -> Result<(), Error> {
+        if self.progress.is_none() {
+            return Ok(());
+        }
+        self.progress_countdown -= 1;
+        if self.progress_countdown != 0 {
+            return Ok(());
+        }
+        self.progress_countdown = PROGRESS_POLL_OPERATIONS;
+
+        let progress = self.progress.as_ref().unwrap();
+        let interrupted = (progress.interrupted)();
+        let now = Instant::now();
+        let periodic = self.next_progress.is_some_and(|deadline| now >= deadline);
+        if !interrupted && !periodic {
+            return Ok(());
+        }
+
+        let snapshot = self.progress_snapshot(site, interrupted, now);
+        let callback = Arc::clone(&progress.callback);
+        callback(&snapshot);
+        if periodic {
+            self.next_progress = progress
+                .interval
+                .and_then(|interval| now.checked_add(interval));
+        }
+        if interrupted {
+            return Err(Error::Interrupted);
+        }
+        Ok(())
+    }
+
+    fn progress_snapshot(
+        &self,
+        current_site: ResolvedProfileSite,
+        interrupted: bool,
+        now: Instant,
+    ) -> ProgressSnapshot {
+        let mut hot_sites = self
+            .profile
+            .as_ref()
+            .map(|profile| {
+                profile
+                    .sites
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, site)| ProgressSiteSnapshot {
+                        site: site.site,
+                        counters: site.counters,
+                        samples: self
+                            .sampled_counts
+                            .as_ref()
+                            .and_then(|samples| samples.get(slot))
+                            .map_or(0, |samples| samples.load(Ordering::Relaxed)),
+                    })
+                    .filter(|site| site.counters.fast_operations != 0 || site.samples != 0)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        hot_sites.sort_unstable_by_key(|site| {
+            std::cmp::Reverse((site.samples, site.counters.fast_operations))
+        });
+        hot_sites.truncate(10);
+        ProgressSnapshot {
+            interrupted,
+            elapsed: now.saturating_duration_since(self.progress_started),
+            current_site: self.profile.as_ref().map(|_| current_site.id),
+            input_bytes: self.input_position.min(self.input.len()),
+            output_bytes: self.output.len(),
+            pointer: self.pointer,
+            stats: RunStats {
+                executed_instructions: self.executed_instructions,
+                executed_rle_instructions: self.executed_rle_instructions,
+                max_pointer: self.max_pointer,
+                optimization: self.optimization,
+            },
+            hot_sites,
+        }
+    }
+
     fn execute_block(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
-        if self.profile.is_none() {
-            self.execute_block_unprofiled(instructions)
-        } else {
-            self.execute_block_profiled(instructions)
+        match self.profile.as_ref().map(|profile| profile.mode) {
+            None => self.execute_block_light::<false>(instructions),
+            Some(ProfileMode::Sample { .. }) => self.execute_block_light::<true>(instructions),
+            Some(ProfileMode::Counters | ProfileMode::Exact) => {
+                self.execute_block_profiled(instructions)
+            }
         }
     }
 
@@ -1162,8 +1152,18 @@ impl<'a> Machine<'a> {
         self.executed_rle_instructions += rle;
     }
 
-    fn execute_block_unprofiled(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
+    fn execute_block_light<const SAMPLE: bool>(
+        &mut self,
+        instructions: &[FastInstruction],
+    ) -> Result<(), Error> {
         for instruction in instructions {
+            self.observe_progress(instruction.site())?;
+            if SAMPLE {
+                self.publish_sample_site(instruction.site());
+                if instruction.mixed_provenance() {
+                    self.mixed_provenance_native_operations += 1;
+                }
+            }
             self.optimization.executed_native_operations += 1;
             match instruction {
                 FastInstruction::Move {
@@ -1194,14 +1194,19 @@ impl<'a> Machine<'a> {
                 }
                 FastInstruction::Loop {
                     body, optimization, ..
-                } => self.execute_loop_unprofiled(body, optimization.as_ref())?,
+                } => self.execute_loop_light::<SAMPLE>(
+                    instruction.site(),
+                    body,
+                    optimization.as_ref(),
+                )?,
             }
         }
         Ok(())
     }
 
-    fn execute_loop_unprofiled(
+    fn execute_loop_light<const SAMPLE: bool>(
         &mut self,
+        site: ResolvedProfileSite,
         body: &[FastInstruction],
         optimization: Option<&LoopOptimization>,
     ) -> Result<(), Error> {
@@ -1227,6 +1232,7 @@ impl<'a> Machine<'a> {
                 self.optimization.scan_loops += 1;
                 self.add_counts_unprofiled(1, 1);
                 while self.tape[self.pointer] != 0 {
+                    self.observe_progress(site)?;
                     self.optimization.scan_steps += 1;
                     self.optimization.rle_operations += 1;
                     self.add_counts_unprofiled(source_offsets.len() as u64, 1);
@@ -1255,7 +1261,7 @@ impl<'a> Machine<'a> {
                 if iterations != 0
                     && (!self.offset_is_valid(*min_offset) || !self.offset_is_valid(*max_offset))
                 {
-                    return self.execute_generic_loop_unprofiled(body);
+                    return self.execute_generic_loop_light::<SAMPLE>(body);
                 }
 
                 self.optimization.transfer_loops += 1;
@@ -1285,14 +1291,17 @@ impl<'a> Machine<'a> {
                 }
                 Ok(())
             }
-            None => self.execute_generic_loop_unprofiled(body),
+            None => self.execute_generic_loop_light::<SAMPLE>(body),
         }
     }
 
-    fn execute_generic_loop_unprofiled(&mut self, body: &[FastInstruction]) -> Result<(), Error> {
+    fn execute_generic_loop_light<const SAMPLE: bool>(
+        &mut self,
+        body: &[FastInstruction],
+    ) -> Result<(), Error> {
         self.add_counts_unprofiled(1, 1);
         while self.tape[self.pointer] != 0 {
-            self.execute_block_unprofiled(body)?;
+            self.execute_block_light::<SAMPLE>(body)?;
             self.add_counts_unprofiled(1, 1);
         }
         Ok(())
@@ -1301,6 +1310,7 @@ impl<'a> Machine<'a> {
     fn execute_block_profiled(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
         for instruction in instructions {
             let site = instruction.site();
+            self.observe_progress(site)?;
             if self.sampled_site.is_some() {
                 self.publish_sample_site(site);
             }
@@ -1427,6 +1437,7 @@ impl<'a> Machine<'a> {
                 }
                 let mut iterations = 0_u64;
                 while self.tape[self.pointer] != 0 {
+                    self.observe_progress(site)?;
                     iterations += 1;
                     self.optimization.scan_steps += 1;
                     self.optimization.rle_operations += 1;
@@ -1595,13 +1606,22 @@ fn execute(
     input: &[u8],
     grow_tape: bool,
     profile_options: Option<&ProfileOptions>,
+    progress: Option<&ProgressOptions>,
 ) -> Result<RunResult, Error> {
     let site_slots = profile_options.map_or(0, |options| options.map.sites.len());
     let sampling = SamplingSession::start(profile_options, site_slots);
     let sampled_site = sampling
         .as_ref()
         .map(|session| Arc::clone(&session.current_site));
-    let mut machine = Machine::new(input, grow_tape, profile_options, sampled_site);
+    let sampled_counts = sampling.as_ref().map(SamplingSession::shared_samples);
+    let mut machine = Machine::new(
+        input,
+        grow_tape,
+        profile_options,
+        sampled_site,
+        sampled_counts,
+        progress,
+    );
     let execution = machine.execute_block(instructions);
     if let Some(sampled_site) = &machine.sampled_site {
         sampled_site.store(INACTIVE_PROFILE_SITE, Ordering::Release);
@@ -1744,6 +1764,13 @@ mod tests {
         PROFILE_MAP_FORMAT, PROFILE_MAP_VERSION, ProfileRange, ProfileSite, bf_identity,
     };
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    static TEST_INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+    fn test_interrupted() -> bool {
+        TEST_INTERRUPTED.load(Ordering::Relaxed)
+    }
 
     fn run_reference(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
         let instructions = parse(source)?;
@@ -1764,6 +1791,41 @@ mod tests {
         );
         assert_eq!(optimized.stats.max_pointer, reference.stats.max_pointer);
         optimized
+    }
+
+    #[test]
+    fn progress_callback_snapshots_before_interrupting() {
+        let source = b"+.".repeat(PROGRESS_POLL_OPERATIONS as usize);
+        let snapshot = Arc::new(Mutex::new(None));
+        let callback_snapshot = Arc::clone(&snapshot);
+        TEST_INTERRUPTED.store(true, Ordering::Relaxed);
+        let result = run_with_options(
+            &source,
+            b"",
+            RunOptions {
+                progress: Some(ProgressOptions {
+                    interval: None,
+                    interrupted: test_interrupted,
+                    callback: Arc::new(move |progress| {
+                        *callback_snapshot.lock().unwrap() = Some(progress.clone());
+                    }),
+                }),
+                ..RunOptions::default()
+            },
+        );
+        TEST_INTERRUPTED.store(false, Ordering::Relaxed);
+
+        assert_eq!(result, Err(Error::Interrupted));
+        let snapshot = snapshot.lock().unwrap().clone().unwrap();
+        assert!(snapshot.interrupted);
+        assert_eq!(
+            snapshot.stats.optimization.executed_native_operations,
+            u64::from(PROGRESS_POLL_OPERATIONS - 1),
+        );
+        assert_eq!(
+            snapshot.output_bytes,
+            ((PROGRESS_POLL_OPERATIONS - 1) / 2) as usize,
+        );
     }
 
     fn test_profile_map(source: &[u8], ranges: Vec<ProfileRange>) -> ProfileMap {
@@ -1935,7 +1997,7 @@ mod tests {
 
     #[test]
     fn unprofiled_parser_compacts_pointer_source_offsets_into_ranges() {
-        let optimized = parse_optimized_unprofiled(b">>> comment >>>").unwrap();
+        let optimized = parse_optimized(b">>> comment >>>", None).unwrap();
         let [
             FastInstruction::Move {
                 amount,
@@ -2173,9 +2235,17 @@ mod tests {
             },
         )
         .unwrap();
+        let sampled_profile = sampled.profile.unwrap();
         assert_eq!(
-            sampled.profile.unwrap().sampling_interval,
+            sampled_profile.sampling_interval,
             Some(Duration::from_millis(1))
+        );
+        assert_eq!(sampled_profile.profile_block_executions, 0);
+        assert!(
+            sampled_profile
+                .sites
+                .iter()
+                .all(|site| site.counters == SiteCounters::default())
         );
 
         let generic_source = b"++[.-]";

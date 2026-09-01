@@ -87,7 +87,7 @@ fn unbounded_backend_accepts_a_self_host_sized_static_region() {
 #[test]
 fn abi_profile_separates_portal_phases() {
     let program = lower_source(
-        "void main() { cell[2] values; cell index; values[index] = 1; output(values[index]); }",
+        "cell[2] values; void main() { cell index; values[index] = 1; output(values[index]); }",
     )
     .unwrap();
     let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi).unwrap();
@@ -105,6 +105,7 @@ fn abi_profile_separates_portal_phases() {
         "abi.portal.load",
         "abi.portal.store",
         "abi.portal.resume",
+        "abi.portal.router.global.0",
     ] {
         assert!(keys.contains(&key), "missing profile site {key}");
     }

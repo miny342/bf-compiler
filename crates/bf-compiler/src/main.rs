@@ -60,7 +60,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     }
     if source_paths.is_empty() && cir_input.is_none() {
         return Err(format!(
-            "usage: {} [--run-ir] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--unlimited-tape]",
+            "usage: {} [--run-ir] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
             executable.to_string_lossy(),
             executable.to_string_lossy()
         )
@@ -82,17 +82,18 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("--run-ir cannot be combined with Brainfuck code-generation options".into());
     }
-    if cir_input.is_some()
-        && (profile_map_output.is_some() || profile_granularity.is_some() || embed_profile)
-    {
-        return Err("--cir-input does not yet support profiling output options".into());
-    }
     if let Some(output) = &profile_map_output {
         if output == "-" {
             return Err("--profile-map-output cannot be stdout".into());
         }
         if source_paths.iter().any(|source| source == output) {
             return Err("--profile-map-output cannot overwrite an input source".into());
+        }
+        if cir_input
+            .as_ref()
+            .is_some_and(|input| input != "-" && input == output)
+        {
+            return Err("--profile-map-output cannot overwrite the CIR input".into());
         }
         let output_path = Path::new(output);
         if output_path.exists() {
@@ -103,6 +104,14 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
                 .any(|source| source == output_path)
             {
                 return Err("--profile-map-output cannot overwrite an input source".into());
+            }
+            if cir_input
+                .as_ref()
+                .filter(|input| *input != "-")
+                .and_then(|input| fs::canonicalize(input).ok())
+                .is_some_and(|input| input == output_path)
+            {
+                return Err("--profile-map-output cannot overwrite the CIR input".into());
             }
         }
     }
@@ -164,21 +173,51 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             memory_metrics(),
         );
         let compile_started = Instant::now();
-        let lowered = if unlimited_tape {
-            bf_compiler::lower_continuations_unbounded(&program)?
-        } else {
-            bf_compiler::lower_continuations(&program)?
-        };
-        let brainfuck = bf_compiler::optimize_bf(&lowered);
-        eprintln!(
-            "bfc-cir phase=compile status=finished elapsed_ms={} output_bytes={} {}",
-            compile_started.elapsed().as_millis(),
-            brainfuck.source_len(),
-            memory_metrics(),
-        );
+        let profile_granularity = profile_granularity
+            .or_else(|| {
+                profile_map_output
+                    .as_ref()
+                    .map(|_| bf_compiler::ProfileGranularity::Continuation)
+            })
+            .or_else(|| embed_profile.then_some(bf_compiler::ProfileGranularity::Continuation));
         let stdout = io::stdout();
         let mut output = BufWriter::with_capacity(1024 * 1024, stdout.lock());
-        brainfuck.write_source(&mut output)?;
+        if let Some(granularity) = profile_granularity {
+            let artifact = if unlimited_tape {
+                bf_compiler::compile_continuations_unbounded_with_profile(&program, granularity)?
+            } else {
+                bf_compiler::compile_continuations_with_profile(&program, granularity)?
+            };
+            if let Some(path) = profile_map_output {
+                fs::write(path, artifact.map.to_json_pretty()?)?;
+            }
+            let source = if embed_profile {
+                artifact.embedded_source()?
+            } else {
+                artifact.source
+            };
+            eprintln!(
+                "bfc-cir phase=compile status=finished elapsed_ms={} output_bytes={} profiled=true {}",
+                compile_started.elapsed().as_millis(),
+                source.len(),
+                memory_metrics(),
+            );
+            output.write_all(source.as_bytes())?;
+        } else {
+            let lowered = if unlimited_tape {
+                bf_compiler::lower_continuations_unbounded(&program)?
+            } else {
+                bf_compiler::lower_continuations(&program)?
+            };
+            let brainfuck = bf_compiler::optimize_bf(&lowered);
+            eprintln!(
+                "bfc-cir phase=compile status=finished elapsed_ms={} output_bytes={} profiled=false {}",
+                compile_started.elapsed().as_millis(),
+                brainfuck.source_len(),
+                memory_metrics(),
+            );
+            brainfuck.write_source(&mut output)?;
+        }
         output.flush()?;
         return Ok(());
     }
