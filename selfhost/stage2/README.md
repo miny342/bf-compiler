@@ -157,6 +157,10 @@ bfc --cir-input stage2-compiler.cir --unlimited-tape \
 call layout、CFG所有関係を検証する。backendの最終BF文字列化はrun-length BF IRからstdoutへ
 直接streamingし、出力サイズ分の`String`を確保しない。
 
+CIRからprofile mapつきBFを生成し、進捗・memoryを監視しながらfull self-hostをsamplingする手順は
+[`BF_OPTIMIZATION_NOTES.md`](../../BF_OPTIMIZATION_NOTES.md#長時間self-host-profileのrunbook)にまとめている。
+長時間計測ではBFと同時に`--profile-map-output`を指定し、同じartifact専用のsidecarを保存する。
+
 検証scriptは最初に`test.bfc`版をBFへ変換して内部testの`ok`を確認する。続いて`main.bfc`版を
 連結して二段階のコンパイルを実行する。生成結果にエラーmarkerやBrainfuck以外のbyteがないことを
 調べた後、第7段階のglobal/portal回帰に加え、配列initializer、全体代入、値渡し、再帰的aggregate

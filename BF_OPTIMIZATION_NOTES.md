@@ -43,6 +43,131 @@ bf-interpreter --stats program.bf < input
 これはセルフホスト検証を高速化するinterpreter実装であり、compiler backendのcost modelや生成BFを
 変更するものではない。
 
+## 長時間self-host profileのrunbook
+
+長時間実行で局所的な初期phaseだけを見て最適化しないため、production compiler全体を自己入力する。
+最初のfull runでは、CIRから生成するBFに`continuation` granularityのsidecar mapを付け、interpreterは
+2 ms samplingで動かす。これならABI site、function、continuation contextを追いつつ、`counters`や
+`exact`よりprofile overheadを抑えられる。`source` granularityは現時点ではsource spanをCIRへ保持して
+いないため`instruction`と同じ粒度になる。
+
+以下はrepository rootで実行する。artifactは巨大になるため、`/tmp`ではなく空き容量に余裕がある
+永続領域を使う。ここでは既存の計測用directoryである`logs/`の下へ時刻つきdirectoryを作る。
+
+```bash
+cargo build --release \
+  -p bf-compiler --bin bfc \
+  -p bf-interpreter --bin bf-interpreter
+
+run_dir="logs/full-selfhost-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$run_dir"
+
+scripts/concat-stage2-compiler.sh cir > "$run_dir/stage2-cir-compiler.bfc"
+scripts/concat-stage2-compiler.sh main > "$run_dir/stage2-compiler.bfc"
+
+target/release/bfc --run-ir --ir-progress-interval 15s \
+  "$run_dir/stage2-cir-compiler.bfc" \
+  < "$run_dir/stage2-compiler.bfc" \
+  > "$run_dir/stage2-compiler.cir" \
+  2> >(tee "$run_dir/cir-generation.metrics" >&2)
+
+target/release/bfc --cir-input "$run_dir/stage2-compiler.cir" \
+  --unlimited-tape \
+  --profile-map-output "$run_dir/stage2-compiler.bfmap.json" \
+  --profile-granularity continuation \
+  > "$run_dir/stage2-compiler.bf" \
+  2> >(tee "$run_dir/backend.metrics" >&2)
+```
+
+`--run-ir`はBFC製CIR frontendをRustのContinuation IR runnerで実行する。CIRはstdoutへ逐次出力され、
+`--ir-progress-interval`のsnapshotには現在のcontinuation、実行instruction/loop/call、出力byte数、
+RSS/HWM/VMが出る。次の`--cir-input`はcompact binary CIRを検証・decodeし、Rust ABI backendからBFを
+streaming出力する。profile sidecarはBF本体の命令数とhashを含むため、別のBFと組み合わせると
+interpreterが拒否する。BFを再生成したらsidecarも必ず同時に再生成する。
+
+長時間実行の前に、小さいsourceでBFとsidecarの組が使えることを確認する。
+
+```bash
+target/release/bf-interpreter \
+  --unlimited-tape \
+  --progress-interval 5s \
+  --profile-map "$run_dir/stage2-compiler.bfmap.json" \
+  --profile-mode sample \
+  --profile-sample-interval 2ms \
+  --profile-output "$run_dir/hello.profile.json" \
+  --profile-format json \
+  "$run_dir/stage2-compiler.bf" \
+  < selfhost/stage2/examples/hello.bfc \
+  > "$run_dir/hello.bf"
+
+target/release/bf-interpreter --unlimited-tape --no-progress \
+  "$run_dir/hello.bf"
+```
+
+最後の出力が`A!`と改行になることを確認してから、full self-hostを実行する。次の例は12時間で
+SIGINTを送り、その後30秒応答がなければ強制終了する。subshellのvirtual-memory上限6 GiBは、以前の
+数十GiBへの暴走でWSL全体をOOMにすることを避けるための安全弁であり、正当な実行が上限へ達した場合は
+`ulimit`値を上げる。profileを付けた現行artifactの想定使用量そのものを示す値ではない。
+
+```bash
+(
+  ulimit -Sv 6291456
+  exec timeout --foreground --signal=INT --kill-after=30s 12h \
+    target/release/bf-interpreter \
+      --unlimited-tape \
+      --progress-interval 60s \
+      --profile-map "$run_dir/stage2-compiler.bfmap.json" \
+      --profile-mode sample \
+      --profile-sample-interval 2ms \
+      --profile-output "$run_dir/full.profile.json" \
+      --profile-format json \
+      "$run_dir/stage2-compiler.bf"
+) < "$run_dir/stage2-compiler.bfc" \
+  > "$run_dir/stage3-compiler.bf" \
+  2> >(tee "$run_dir/full.metrics" >&2)
+```
+
+別terminalでは次を使える。`bf-progress`はelapsed time、現在site/key/context、入力・出力byte数、native
+operation、RLE換算instruction、pointer、最大pointer、RSS/HWM/VMを表示し、続く`bf-progress-hot`は
+その時点までの累積上位10 siteを表示する。
+
+```bash
+tail -f "$run_dir/full.metrics"
+watch -n 10 'ps -C bf-interpreter -o pid,etime,%cpu,rss,vsz,cmd'
+```
+
+interpreterは入力と実行中の出力をmemoryへ保持し、正常終了時にstdoutをまとめて書く。そのため
+`stage3-compiler.bf`のfile sizeが実行中に増えなくても停止とは限らず、`output_bytes`を見る。最初の
+Ctrl+C、または上記timeoutのSIGINTではsafe observation pointで`reason=interrupt`の最終snapshotを
+stderrへ出してexit code 130で終了する。2回目のCtrl+Cは即座にexitする。
+
+`full.profile.json`は正常終了してstdoutを書き終えた後にだけ生成される。中断時に残るprofile情報は
+`full.metrics`の累積snapshotだけであり、checkpoint/resume機能はない。このため、途中snapshotはphaseの
+診断には使えるが、globalな最適化判断には完走したJSONを使う。
+
+完走後はartifactを記録し、ABI stable keyを全context横断で合計する。単一siteの上位だけでなく、特に
+`abi.navigation.global`、`abi.dispatch.page.countdown`、`abi.portal.offset`などの合計を比較することで、
+同じglobal処理が多数のcontinuationへ分散した場合も見落とさない。
+
+```bash
+sha256sum "$run_dir/stage2-compiler.bf" "$run_dir/stage3-compiler.bf"
+
+jq '.phase_timings_ns, .run_stats, .profile.total_samples' \
+  "$run_dir/full.profile.json"
+
+jq -r '
+  .profile.sites
+  | group_by(.stable_key)
+  | map({key: .[0].stable_key, samples: (map(.samples) | add)})
+  | sort_by(.samples) | reverse | .[:30][]
+  | [.samples, .key] | @tsv
+' "$run_dir/full.profile.json"
+```
+
+2 ms sampleで20 sample未満のsiteはJSON上で`low_confidence: true`になる。候補をfull runで絞った後だけ、
+小さい再現入力または絞った比較で1 ms sampleや`exact`を使う。`counters`は全profile blockのcounter更新、
+`exact`はsite境界ごとのclock readを行うため、最初のfull self-host比較には使わない。
+
 ## 現在のpeephole最適化と基準値
 
 `compile`と`compile_continuations`は、未最適化BF IRへ`optimize_bf`を適用してから文字列化する。
