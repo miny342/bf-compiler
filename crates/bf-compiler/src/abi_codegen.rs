@@ -2016,7 +2016,7 @@ impl<'a> AbiEmitter<'a> {
             "abi",
             "abi.portal.window.right",
             "portal window right",
-            |emitter| emitter.shift_portal_by_count(AbiField::Scratch1, AbiField::Scratch2, true),
+            |emitter| emitter.shift_portal_by_offset(true),
         )?;
         let (access_key, access_label) = match accessor.kind {
             PortalAccessKind::Load => ("abi.portal.load", "portal payload load"),
@@ -2029,7 +2029,7 @@ impl<'a> AbiEmitter<'a> {
             "abi",
             "abi.portal.window.left",
             "portal window left",
-            |emitter| emitter.shift_portal_by_count(AbiField::Condition, AbiField::Restore, false),
+            |emitter| emitter.shift_portal_by_offset(false),
         )?;
         for field in [
             AbiField::Index,
@@ -2054,32 +2054,22 @@ impl<'a> AbiEmitter<'a> {
         // decompositions whose work is bounded by the byte values.
         let shift = self.config.chunk_cells().trailing_zeros() as usize;
         debug_assert!(matches!(shift, 3 | 4));
+        if shift == 4 {
+            return self.compute_aggregate_chunk_nibbles();
+        }
         self.move_abi_field(AbiField::Index, AbiField::PcLow);
         self.move_abi_field(AbiField::Scratch0, AbiField::PcHigh);
 
-        let low_fields = if shift == 4 {
-            [
-                AbiField::Index,
-                AbiField::Condition,
-                AbiField::Restore,
-                AbiField::Scratch0,
-                AbiField::Scratch1,
-                AbiField::Scratch2,
-                AbiField::Scratch3,
-                AbiField::NextPcLow,
-            ]
-        } else {
-            [
-                AbiField::Index,
-                AbiField::Condition,
-                AbiField::Restore,
-                AbiField::Scratch1,
-                AbiField::Scratch0,
-                AbiField::Scratch2,
-                AbiField::Scratch3,
-                AbiField::NextPcLow,
-            ]
-        };
+        let low_fields = [
+            AbiField::Index,
+            AbiField::Condition,
+            AbiField::Restore,
+            AbiField::Scratch1,
+            AbiField::Scratch0,
+            AbiField::Scratch2,
+            AbiField::Scratch3,
+            AbiField::NextPcLow,
+        ];
         let low_bits = self.abi_field_offsets(low_fields)?;
         let temporary = self.current_abi_offset(AbiField::Branch)?;
         self.decompose_abi_byte(AbiField::PcLow, &low_bits, temporary)?;
@@ -2090,29 +2080,16 @@ impl<'a> AbiEmitter<'a> {
             self.move_static_value(low_bits[index], low_bits[shift], 1_u8 << (index - shift));
         }
 
-        let high_fields = if shift == 4 {
-            [
-                AbiField::PcLow,
-                AbiField::Condition,
-                AbiField::Restore,
-                AbiField::Scratch0,
-                AbiField::Scratch2,
-                AbiField::Scratch3,
-                AbiField::NextPcLow,
-                AbiField::NextPcHigh,
-            ]
-        } else {
-            [
-                AbiField::PcLow,
-                AbiField::Condition,
-                AbiField::Restore,
-                AbiField::Scratch2,
-                AbiField::Scratch0,
-                AbiField::Scratch3,
-                AbiField::NextPcLow,
-                AbiField::NextPcHigh,
-            ]
-        };
+        let high_fields = [
+            AbiField::PcLow,
+            AbiField::Condition,
+            AbiField::Restore,
+            AbiField::Scratch2,
+            AbiField::Scratch0,
+            AbiField::Scratch3,
+            AbiField::NextPcLow,
+            AbiField::NextPcHigh,
+        ];
         let high_bits = self.abi_field_offsets(high_fields)?;
         self.decompose_abi_byte(AbiField::PcHigh, &high_bits, temporary)?;
         let quotient_low = self.current_abi_offset(AbiField::Scratch1)?;
@@ -2132,6 +2109,72 @@ impl<'a> AbiEmitter<'a> {
         self.copy(
             self.current_abi_offset(AbiField::Scratch2)?,
             self.current_abi_offset(AbiField::Restore)?,
+            scratch,
+        );
+        Ok(())
+    }
+
+    /// Split a D=16 offset into its four-bit remainder and three four-bit
+    /// chunk-position digits. Keeping the quotient in base 16 lets the portal
+    /// jump by 1, 16, and 256 chunks with at most 45 swaps instead of walking
+    /// through as many as 4,095 adjacent chunks. The second copy of each digit
+    /// drives the same jumps in reverse order after the payload access.
+    fn compute_aggregate_chunk_nibbles(&mut self) -> Result<(), AbiCodegenError> {
+        debug_assert_eq!(self.config.chunk_cells(), 16);
+        self.move_abi_field(AbiField::Index, AbiField::PcLow);
+        self.move_abi_field(AbiField::Scratch0, AbiField::PcHigh);
+
+        let low_bits = self.abi_field_offsets([
+            AbiField::Index,
+            AbiField::Condition,
+            AbiField::Restore,
+            AbiField::Scratch0,
+            AbiField::Scratch1,
+            AbiField::Scratch2,
+            AbiField::Scratch3,
+            AbiField::NextPcLow,
+        ])?;
+        let temporary = self.current_abi_offset(AbiField::Branch)?;
+        self.decompose_abi_byte(AbiField::PcLow, &low_bits, temporary)?;
+        for index in 1..4 {
+            self.move_static_value(low_bits[index], low_bits[0], 1_u8 << index);
+        }
+        for index in 5..8 {
+            self.move_static_value(low_bits[index], low_bits[4], 1_u8 << (index - 4));
+        }
+
+        let high_bits = self.abi_field_offsets([
+            AbiField::PcLow,
+            AbiField::Condition,
+            AbiField::Restore,
+            AbiField::Scratch0,
+            AbiField::Scratch2,
+            AbiField::Scratch3,
+            AbiField::NextPcLow,
+            AbiField::NextPcHigh,
+        ])?;
+        self.decompose_abi_byte(AbiField::PcHigh, &high_bits, temporary)?;
+        for index in 1..4 {
+            self.move_static_value(high_bits[index], high_bits[0], 1_u8 << index);
+        }
+        for index in 5..8 {
+            self.move_static_value(high_bits[index], high_bits[4], 1_u8 << (index - 4));
+        }
+
+        let scratch = self.current_abi_offset(AbiField::Scratch0)?;
+        self.copy(
+            self.current_abi_offset(AbiField::Scratch1)?,
+            self.current_abi_offset(AbiField::Restore)?,
+            scratch,
+        );
+        self.copy(
+            self.current_abi_offset(AbiField::PcLow)?,
+            self.current_abi_offset(AbiField::Condition)?,
+            scratch,
+        );
+        self.copy(
+            self.current_abi_offset(AbiField::Scratch2)?,
+            self.current_abi_offset(AbiField::PcHigh)?,
             scratch,
         );
         Ok(())
@@ -2166,12 +2209,32 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    fn shift_portal_by_count(
-        &mut self,
-        low: AbiField,
-        high: AbiField,
-        right: bool,
-    ) -> Result<(), AbiCodegenError> {
+    fn shift_portal_by_offset(&mut self, right: bool) -> Result<(), AbiCodegenError> {
+        if self.config.chunk_cells() == 16 {
+            let digits = if right {
+                [
+                    (AbiField::Scratch1, 1),
+                    (AbiField::PcLow, 16),
+                    (AbiField::Scratch2, 256),
+                ]
+            } else {
+                [
+                    (AbiField::PcHigh, 256),
+                    (AbiField::Condition, 16),
+                    (AbiField::Restore, 1),
+                ]
+            };
+            for (digit, chunks) in digits {
+                self.jump_portal_by_digit(digit, chunks, right)?;
+            }
+            return Ok(());
+        }
+
+        let (low, high) = if right {
+            (AbiField::Scratch1, AbiField::Scratch2)
+        } else {
+            (AbiField::Condition, AbiField::Restore)
+        };
         let low_offset = self.current_abi_offset(low)?;
         self.move_to(low_offset);
         let low_body = self.capture_infallible(|emitter| {
@@ -2204,6 +2267,68 @@ impl<'a> AbiEmitter<'a> {
         self.emit_loop(high_body);
         self.move_to(0);
         Ok(())
+    }
+
+    fn jump_portal_by_digit(
+        &mut self,
+        digit: AbiField,
+        chunks: isize,
+        right: bool,
+    ) -> Result<(), AbiCodegenError> {
+        let digit_offset = self.current_abi_offset(digit)?;
+        self.move_to(digit_offset);
+        let body = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.jump_portal_window(chunks, right);
+            emitter.move_to(digit_offset);
+        });
+        self.emit_loop(body);
+        self.move_to(0);
+        Ok(())
+    }
+
+    /// Swap the D=16 portal chunk with a payload chunk at a fixed distance.
+    /// Intermediate payload chunks remain untouched. Applying the same swaps
+    /// in reverse order restores the original aggregate layout exactly.
+    fn jump_portal_window(&mut self, chunks: isize, right: bool) {
+        debug_assert_eq!(self.config.chunk_cells(), 16);
+        debug_assert!(chunks > 0);
+        let stride = self.config.stride() as isize;
+        let delta = if right { chunks } else { -chunks };
+        let primary_lane = AbiField::Scratch0.index();
+        let primary = self
+            .config
+            .logical_offset_from_head(AbiField::Scratch0.index()) as isize;
+        let secondary = self
+            .config
+            .logical_offset_from_head(AbiField::Scratch3.index()) as isize;
+        let remote_primary = primary + delta * stride;
+        let cell = |chunk: isize, lane: usize| chunk * stride + 1 + lane as isize;
+
+        for lane in 0..self.config.chunk_cells() {
+            let always_zero = lane == AbiField::NextPcLow.index()
+                || lane == AbiField::NextPcHigh.index()
+                || lane == AbiField::Scratch0.index()
+                || lane == AbiField::Scratch3.index();
+            let local = cell(0, lane);
+            let remote = cell(delta, lane);
+            if always_zero {
+                self.move_value(remote, local);
+                continue;
+            }
+            let temporary = if lane < primary_lane {
+                primary
+            } else if lane == primary_lane {
+                secondary
+            } else {
+                remote_primary
+            };
+            self.move_value(remote, temporary);
+            self.move_value(local, remote);
+            self.move_value(temporary, local);
+        }
+        self.migrate_context(delta * stride);
     }
 
     fn shift_portal_window(&mut self, right: bool) {
@@ -3124,7 +3249,7 @@ impl<'a> AbiEmitter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use bf_interpreter::run;
+    use bf_interpreter::{RunResult, run, run_with_stats};
 
     use super::*;
     use crate::continuation_adapter::adapt_flat_program;
@@ -3144,10 +3269,17 @@ mod tests {
     }
 
     fn execute_continuations(program: &ContinuationProgram, chunk_cells: usize) -> Vec<u8> {
+        execute_continuations_with_stats(program, chunk_cells).output
+    }
+
+    fn execute_continuations_with_stats(
+        program: &ContinuationProgram,
+        chunk_cells: usize,
+    ) -> RunResult {
         let source = lower_continuations_with_config(program, AbiConfig::new(chunk_cells).unwrap())
             .unwrap()
             .to_source();
-        run(source.as_bytes(), b"").unwrap()
+        run_with_stats(source.as_bytes(), b"").unwrap()
     }
 
     fn recursive_countdown_program() -> ContinuationProgram {
@@ -4500,8 +4632,119 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, vec![function], continuations).unwrap();
 
+        let d8 = execute_continuations_with_stats(&program, 8);
+        let d16 = execute_continuations_with_stats(&program, 16);
+        assert_eq!(d8.output, b"Q", "D=8");
+        assert_eq!(d16.output, b"Q", "D=16");
+        assert!(
+            d16.stats.optimization.executed_native_operations * 10
+                < d8.stats.optimization.executed_native_operations,
+            "D=16 fixed-distance jumps should remain substantially cheaper than the D=8 compatibility walk"
+        );
+    }
+
+    #[test]
+    fn jumping_global_portal_restores_intermediate_payload_chunks() {
+        let main = FunctionId::new(0);
+        let global = crate::GlobalId::new(0);
+        let low = FrameSlot::new(0);
+        let high = FrameSlot::new(1);
+        let value = FrameSlot::new(2);
+        let destination = FrameSlot::new(3);
+        let function = FunctionDescriptor::new(main, vec![], 4, ValueType::Void, id(1));
+        let region = AggregateRegion::Global(global);
+        let offset = LogicalOffset::new(Address::Frame(low), Address::Frame(high));
+        let sentinels = [(0, b'A'), (15, b'B'), (16, b'C'), (255, b'D'), (4095, b'E')];
+        let mut setup = sentinels
+            .into_iter()
+            .map(|(index, value)| FrameInstruction::Set {
+                dst: Address::ArrayElement {
+                    array: region,
+                    index,
+                },
+                value,
+            })
+            .collect::<Vec<_>>();
+        setup.extend([
+            FrameInstruction::Set {
+                dst: Address::Frame(low),
+                value: 255,
+            },
+            FrameInstruction::Set {
+                dst: Address::Frame(high),
+                value: 31,
+            },
+            FrameInstruction::Set {
+                dst: Address::Frame(value),
+                value: b'Q',
+            },
+        ]);
+        let continuations = vec![
+            Continuation::new(
+                id(1),
+                main,
+                setup,
+                Terminator::AggregateStore {
+                    destination: region,
+                    offset,
+                    source: ValueOperand::Cell(Address::Frame(value)),
+                    cells: 1,
+                    return_to: id(2),
+                },
+            ),
+            Continuation::new(
+                id(2),
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: Address::Frame(low),
+                        value: 255,
+                    },
+                    FrameInstruction::Set {
+                        dst: Address::Frame(high),
+                        value: 31,
+                    },
+                ],
+                Terminator::AggregateLoad {
+                    source: region,
+                    offset,
+                    destination: ValueOperand::Cell(Address::Frame(destination)),
+                    cells: 1,
+                    return_to: id(3),
+                },
+            ),
+            Continuation::new(
+                id(3),
+                main,
+                sentinels
+                    .into_iter()
+                    .map(|(index, _)| FrameInstruction::Output {
+                        src: Address::ArrayElement {
+                            array: region,
+                            index,
+                        },
+                    })
+                    .chain(std::iter::once(FrameInstruction::Output {
+                        src: Address::Frame(destination),
+                    }))
+                    .collect(),
+                Terminator::Halt,
+            ),
+        ];
+        let program = ContinuationProgram::new_with_globals(
+            main,
+            vec![crate::GlobalDescriptor::aggregate(global, 8192)],
+            vec![function],
+            continuations,
+        )
+        .unwrap();
+
         for chunk_cells in [8, 16] {
-            assert_eq!(execute_continuations(&program, chunk_cells), b"Q");
+            assert_eq!(
+                execute_continuations(&program, chunk_cells),
+                b"ABCDEQ",
+                "D={chunk_cells}"
+            );
         }
     }
 

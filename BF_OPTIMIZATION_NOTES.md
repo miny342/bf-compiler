@@ -527,6 +527,37 @@ windowを戻す時点ではquotientを消費済みの`Scratch1`, `Scratch2`も�
 D=8/16の全回帰、selfhostによる`hello.bfc`生成物のbyte一致、生成BFの`A!\n`出力を確認した。
 生成量と実行量がともに改善するため採用する。
 
+### D=16 portal windowの固定距離nibble jump
+
+184,330-byteのproduction compilerをfull self-host samplingしたところ、1,980秒で入力42,552 byteまで
+進んだ時点でもBF出力は始まらず、`abi.portal.window.right/left`が約99万sample中約64万、約65%を
+占めた。従来のwindowは16-bit offsetから求めたchunk quotientを1ずつ消費し、D=16 portal chunkと
+隣接payload chunkを右へswapする。access後は同じ回数だけ左へswapするため、最大4,095 chunkの距離が
+そのまま実行回数になる。arenaの使用位置が増えるほど入力処理が遅くなった原因とも一致する。
+
+D=16ではchunk quotientの12 bitを3個のnibbleとして保持し、1、16、256 chunk離れたpayload chunkとの
+固定距離swapを各nibble値の回数だけ行うようにした。途中のpayload chunkは動かさず、portalが通った
+位置だけが一時的に入れ替わる。payload access後に256、16、1の逆順で同じswapを行うと全配置が復元する。
+移動回数は片道最大4,095回から`15 + 15 + 15 = 45`回になる。nibbleと帰路用copyは既存protocol fieldへ
+置き、portal/frame layoutは増やさない。D=8は従来の隣接rotationを互換経路として残す。
+
+offset `0x1fff`の回帰では、D=8の隣接walkが390,769 native operations、D=16の固定距離jumpが
+20,989 operationsだった。さらに8,192-cell global aggregateの遠端へstore/loadし、途中の複数payload
+sentinelが往復後も元の位置に残ることをD=8/16双方で確認した。
+
+停止したfull runと同じ145,210-byte CIRからcompiler BFを再生成し、`stage7_globals.bfc`をコンパイルした。
+executeはwarm実行3回の中央値、sample比率は別の2 ms sampling 1回である。
+
+| 指標 | 隣接window walk | 固定距離nibble jump | 変化 |
+| --- | ---: | ---: | ---: |
+| full compiler BF bytes | 870,811,840 | 872,412,134 | +0.18% |
+| fast IR native operations | 1,576,874,455 | 1,250,982,489 | -20.67% |
+| execute wall time | 7.055 s | 5.919 s | -16.10% |
+| window sample比率 | 17.49% | 2.80% | -14.69 points |
+
+生成したtarget BFは変更前後でbyte一致した。full self-hostは再実行していないが、生成量を約1.6 MBだけ
+増やして、停止runの最大bottleneckだったoffset比例のwindow往復をnibble値比例へ制限できるため採用する。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を
