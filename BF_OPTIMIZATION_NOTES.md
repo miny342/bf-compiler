@@ -379,6 +379,29 @@ hidden PC反転版をbaselineとして、full compilerをsamplingなしで10秒�
 `abi.portal.offset`はtop 10から消えた。生成量とmemoryを実質維持して改善したため採用する。次のportal候補は、
 別々に実行しているwindow right/access/window leftの移動回数削減である。
 
+### D=16 portal windowのzero-lane swap省略
+
+D=16では16-cell portalが1 chunkに収まり、window移動はportal chunkと隣接payload chunkのlaneごとのswapになる。
+従来は全laneについて`payload -> temporary`, `portal -> payload`, `temporary -> portal`の3 transfersを行っていた。
+offset計算後も`PcLow`, `PcHigh`, `NextPcLow`, `NextPcHigh`, `Branch`, `Scratch0`, `Scratch3`は必ずzeroである。
+これらのlaneでは隣接payloadをzero portal laneへ直接moveすれば、移動先の新portal laneもzeroになるため1 transferで済む。
+windowを戻す時点ではquotientを消費済みの`Scratch1`, `Scratch2`も同じ扱いにする。D=8の2-chunk portalは
+一般のrotationを維持する。
+
+固定D divmod版をbaselineとして、full compilerをsamplingなしで各10秒に制限した結果は次のとおり。
+
+| 指標 | 全lane swap | zero-lane省略 | 変化 |
+| --- | ---: | ---: | ---: |
+| BF source bytes | 870,818,392 | 870,811,840 | -6,552 bytes |
+| `hello.bfc` compile execute | 389 ms | 370 ms | -4.87% |
+| full入力bytes（6秒） | 2,242 | 2,283 | +1.83% |
+| native operations（6秒） | 1,241,180,675 | 1,196,466,300 | -3.60% |
+| RLE換算命令（6秒） | 19,977,492,486 | 17,661,462,712 | -11.59% |
+| interpreter RSS | 1,133,936 KiB | 1,133,624 KiB | 実質同じ |
+
+D=8/16の全回帰、selfhostによる`hello.bfc`生成物のbyte一致、生成BFの`A!\n`出力を確認した。
+生成量と実行量がともに改善するため採用する。
+
 主な調査元は、angel_p_57氏の
 [Brainf**k記事一覧](https://zenn.dev/angel_p_57/articles/40838978dcaf7b)である。記事中の
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を

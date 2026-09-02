@@ -2220,6 +2220,26 @@ impl<'a> AbiEmitter<'a> {
         let cell = |chunk: isize, lane: usize| chunk * stride + 1 + lane as isize;
 
         for lane in 0..self.config.chunk_cells() {
+            // With D=16 the complete portal is one chunk. These protocol
+            // lanes are known zero while the window moves, so swapping a
+            // payload cell through a temporary is unnecessary: moving the
+            // adjacent payload into the zero portal lane also leaves the new
+            // portal lane zero. The consumed quotient lanes join this set on
+            // the return trip. D=8 keeps the general two-chunk rotation.
+            let always_zero = lane == AbiField::PcLow.index()
+                || lane == AbiField::PcHigh.index()
+                || lane == AbiField::NextPcLow.index()
+                || lane == AbiField::NextPcHigh.index()
+                || lane == AbiField::Branch.index()
+                || lane == AbiField::Scratch0.index()
+                || lane == AbiField::Scratch3.index();
+            let consumed_quotient = !right
+                && (lane == AbiField::Scratch1.index() || lane == AbiField::Scratch2.index());
+            if self.config.chunk_cells() == 16 && (always_zero || consumed_quotient) {
+                let adjacent = if right { portal_chunks } else { -1 };
+                self.move_value(cell(adjacent, lane), cell(0, lane));
+                continue;
+            }
             let temporary = if lane < primary_lane {
                 primary
             } else if lane == primary_lane {
