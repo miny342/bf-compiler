@@ -373,3 +373,154 @@ pub(crate) fn constant_cell_value(expression: &HirExpression) -> Option<u8> {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CallSite {
+    caller: FunctionId,
+    callee: FunctionId,
+}
+
+struct CallGraph {
+    calls: Vec<CallSite>,
+    incoming: Vec<Vec<usize>>,
+    outgoing: Vec<Vec<usize>>,
+    reachable: Vec<bool>,
+}
+
+fn collect_callsite_from_expr(calls: &mut Vec<CallSite>, hir: &HirProgram, caller: FunctionId, expr: &HirExpression) {
+    match &expr.kind {
+        HirExpressionKind::Literal(_) => {},
+        HirExpressionKind::EnumVariant(_) => {},
+        HirExpressionKind::StringLiteral(items) => {},
+        HirExpressionKind::Place(hir_place) => {},
+        HirExpressionKind::Project { base, projections } => collect_callsite_from_expr(calls, hir, caller, &base),
+        HirExpressionKind::Input => {},
+        HirExpressionKind::Unary { operator, operand } => collect_callsite_from_expr(calls, hir, caller, &operand),
+        HirExpressionKind::Binary { operator, left, right } => {
+            collect_callsite_from_expr(calls, hir, caller, &left);
+            collect_callsite_from_expr(calls, hir, caller, &right);
+        },
+        HirExpressionKind::Call { function, arguments } => {
+            let callsite = CallSite { caller, callee: *function };
+
+            // 呼び出しが再帰している
+            if calls.iter().find(|&&v| v == callsite).is_some() {
+                return;
+            }
+
+            calls.push(callsite);
+            for arg in arguments {
+                collect_callsite_from_expr(calls, hir, caller, &arg);
+            }
+            collect_callsite_from_function(calls, hir, *function);
+        },
+    }
+
+}
+
+fn collect_callsite_from_stmt(calls: &mut Vec<CallSite>, hir: &HirProgram, caller: FunctionId, stmt: &HirStatement) {
+    match &stmt.kind {
+        HirStatementKind::Empty => {},
+        HirStatementKind::Block(hir_statements) => {
+            for s in hir_statements.iter() {
+                collect_callsite_from_stmt(calls, hir, caller, &s);
+            }
+        }
+        HirStatementKind::Declaration { local, initializer } => {
+            let Some(expr) = initializer else {
+                return;
+            };
+            collect_callsite_from_expr(calls, hir, caller, &expr);
+        },
+        HirStatementKind::Assignment { value, target, operator } => {
+            collect_callsite_from_expr(calls, hir, caller, &value);
+        },
+        HirStatementKind::Output(hir_expression) => {
+            collect_callsite_from_expr(calls, hir, caller, &hir_expression);
+        },
+        HirStatementKind::Call { function, arguments } => {
+            let callsite = CallSite { caller, callee: function.clone() };
+
+            // 呼び出しが再帰している
+            if calls.iter().find(|&&v| v == callsite).is_some() {
+                return;
+            }
+
+            calls.push(callsite);
+            for arg in arguments {
+                collect_callsite_from_expr(calls, hir, caller, &arg);
+            }
+            collect_callsite_from_function(calls, hir, function.clone());
+        },
+        HirStatementKind::Abort => {},
+        HirStatementKind::Return(hir_expression) => {
+            let Some(expr) = hir_expression else {
+                return;
+            };
+            collect_callsite_from_expr(calls, hir, caller, &expr);
+        },
+        HirStatementKind::If { condition, then_branch, else_branch } => {
+            collect_callsite_from_expr(calls, hir, caller, &condition);
+            collect_callsite_from_stmt(calls, hir, caller, &then_branch);
+            let Some(else_stmt) = else_branch else {
+                return;
+            };
+            collect_callsite_from_stmt(calls, hir, caller, &else_stmt);
+        },
+        HirStatementKind::While { condition, body } => {
+            collect_callsite_from_expr(calls, hir, caller, condition);
+            collect_callsite_from_stmt(calls, hir, caller, body);
+        },
+    }
+}
+
+fn collect_callsite_from_function(calls: &mut Vec<CallSite>, hir: &HirProgram, caller: FunctionId) {
+    let idx = caller.index();
+    let func = &hir.functions[idx];
+    let stmt = &func.body;
+    collect_callsite_from_stmt(calls, hir, caller, stmt);
+}
+
+pub(crate) fn optimize_hir(hir: &HirProgram) -> HirProgram {
+    let mut calls = Vec::new();
+    collect_callsite_from_function(&mut calls, hir, hir.entry);
+    for call in calls.iter() {
+        eprintln!("{} {}", &hir.functions[call.caller.index()].name, &hir.functions[call.callee.index()].name);
+    }
+
+    let mut called_count = vec![0; hir.functions.len()];
+    for call in calls.iter() {
+        called_count[call.callee.index()] += 1;
+    }
+    for i in 0..hir.functions.len() {
+        eprintln!("{}: {}", &hir.functions[i].name, called_count[i]);
+    }
+
+    hir.clone()
+}
+
+#[cfg(test)]
+mod test {
+    use super::collect_callsite_from_function;
+    use super::HirProgram;
+
+    fn compile(source: &str) -> HirProgram {
+        let tokens = crate::lexer::lex(source).unwrap();
+        let ast = crate::parser::parse(tokens).unwrap();
+        let ast = crate::macro_expansion::expand(ast).unwrap();
+        return crate::semantic::analyze(&ast).unwrap();
+    }
+
+    #[test]
+    fn check_call() {
+        let s = compile(r"void main() { if (fn0()) {}; {fn1();} fn5(); if (0) {} else { fn7(); } } cell fn0() { return 0; } void fn1() {} void fn2() { fn3(); } void fn3() { fn2(); } void fn5() { fn5(); } void fn6() { fn5(); } void fn7() { fn8(); } void fn8() { fn7(); }");
+
+        let mut calls = Vec::new();
+        collect_callsite_from_function(&mut calls, &s, s.entry);
+        eprintln!("{:?}", s);
+        for call in calls.iter() {
+            eprintln!("{} {}", &s.functions[call.caller.index()].name, &s.functions[call.callee.index()].name);
+        }
+        assert_eq!(calls.len(), 7);
+    }
+}

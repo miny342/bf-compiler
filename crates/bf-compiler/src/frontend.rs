@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::continuation_lowering::lower_hir;
 use crate::lexer::{Token, TokenKind};
-use crate::{AbiCodegenError, ContinuationProgram, compile_continuations, lexer, parser, semantic};
+use crate::{AbiCodegenError, ContinuationProgram, compile_continuations, lexer, parser, semantic, hir};
 
 /// A named BFC source file that belongs to a compilation unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +206,8 @@ fn lower_tokens(tokens: Vec<Token>) -> Result<ContinuationProgram, FrontendError
     let ast = parser::parse(tokens)?;
     let ast = crate::macro_expansion::expand(ast)?;
     let hir = semantic::analyze(&ast)?;
-    lower_hir(&hir).map_err(|error| FrontendError::without_offset(error.to_string()))
+    let optimized_hir = hir::optimize_hir(&hir);
+    lower_hir(&optimized_hir).map_err(|error| FrontendError::without_offset(error.to_string()))
 }
 
 fn annotate_error(error: FrontendError, ranges: &[(SourceFile<'_>, usize)]) -> FrontendError {
