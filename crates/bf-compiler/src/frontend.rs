@@ -206,7 +206,7 @@ fn lower_tokens(tokens: Vec<Token>) -> Result<ContinuationProgram, FrontendError
     let ast = parser::parse(tokens)?;
     let ast = crate::macro_expansion::expand(ast)?;
     let hir = semantic::analyze(&ast)?;
-    let hir = hir::optimize_hir(&hir);
+    let hir = hir::optimize_hir(hir);
     lower_hir(&hir).map_err(|error| FrontendError::without_offset(error.to_string()))
 }
 
