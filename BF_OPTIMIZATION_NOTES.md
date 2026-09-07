@@ -18,6 +18,14 @@ lowering手法は未採用であり、実装時には生成BFの長さ、実行s
 - `[->>>++>+<<<<]`のように元のcellを1ずつ消費し、pointerが元へ戻るlinear loopを
   複数targetへのwrapping transferへ変換する。
 
+2026-09-08: `abi.navigation.global`で使う一定strideのscanは、確保済みtape内を最大1,024回
+まとめて走査し、進捗確認とcounter更新をbatchごとに行う。境界では通常のpointer移動に戻し、
+tape拡張とsource offset付きエラーを保持する。profileなし・sample・counters・exactで利用する。
+探索量は引き続き距離に比例するが、各stepの管理処理を減らす。
+stride 17、nonzero flag 1,500個を65,025往復するrelease版の人工benchmarkでは、3回の中央値が
+0.712秒から0.0477秒へ短縮した（約14.9倍）。raw/RLE命令数と全optimization counterは一致した。
+これはscan単体の測定であり、`full.metrics`のセルフホスト処理全体の高速化率は未測定。
+
 fast IRはraw BF命令数と1反復あたりのRLE group数をmetadataとして保持する。このため、実行は
 まとめても`RunStats::executed_instructions`と`executed_rle_instructions`には従来VMと同じ値を
 加算する。移動runには元source offsetも保持し、tape underflow/overflowの診断位置を変えない。

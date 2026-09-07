@@ -1233,11 +1233,18 @@ impl<'a> Machine<'a> {
                 self.add_counts_unprofiled(1, 1);
                 while self.tape[self.pointer] != 0 {
                     self.observe_progress(site)?;
-                    self.optimization.scan_steps += 1;
-                    self.optimization.rle_operations += 1;
-                    self.add_counts_unprofiled(source_offsets.len() as u64, 1);
-                    self.move_pointer(*amount, source_offsets)?;
-                    self.add_counts_unprofiled(1, 1);
+                    let steps = self.scan_batch(*amount);
+                    if steps == 0 {
+                        // Preserve growth and the exact source offset on boundary errors.
+                        self.move_pointer(*amount, source_offsets)?;
+                    }
+                    let steps = steps.max(1);
+                    self.optimization.scan_steps += steps;
+                    self.optimization.rle_operations += steps;
+                    self.add_counts_unprofiled(
+                        steps * (source_offsets.len() as u64 + 1),
+                        2 * steps,
+                    );
                 }
                 Ok(())
             }
@@ -1438,13 +1445,16 @@ impl<'a> Machine<'a> {
                 let mut iterations = 0_u64;
                 while self.tape[self.pointer] != 0 {
                     self.observe_progress(site)?;
-                    iterations += 1;
-                    self.optimization.scan_steps += 1;
-                    self.optimization.rle_operations += 1;
-                    self.add_counts(site, source_offsets.len() as u64, 1);
-                    self.move_pointer(*amount, source_offsets)?;
+                    let steps = self.scan_batch(*amount);
+                    if steps == 0 {
+                        self.move_pointer(*amount, source_offsets)?;
+                    }
+                    let steps = steps.max(1);
+                    iterations += steps;
+                    self.optimization.scan_steps += steps;
+                    self.optimization.rle_operations += steps;
                     self.record_maximum_pointer(site);
-                    self.add_counts(site, 1, 1);
+                    self.add_counts(site, steps * (source_offsets.len() as u64 + 1), 2 * steps);
                 }
                 if let Some(profile) = &mut self.profile {
                     let counters = &mut profile.site_mut(site).counters;
@@ -1549,6 +1559,31 @@ impl<'a> Machine<'a> {
             profile.site_mut(site).counters.loop_iterations += iterations;
         }
         Ok(nested_time)
+    }
+
+    /// Scan only within allocated tape, amortizing bookkeeping over bounded batches.
+    /// The caller handles the next move at a boundary with normal BF error/growth semantics.
+    fn scan_batch(&mut self, amount: isize) -> u64 {
+        let stride = amount.unsigned_abs();
+        if stride == 0 {
+            return 0;
+        }
+        let available = if amount > 0 {
+            (self.tape.len() - 1 - self.pointer) / stride
+        } else {
+            self.pointer / stride
+        };
+        // Return regularly to the progress hook even for very long scans.
+        let limit = available.min(1024);
+        let mut pointer = self.pointer;
+        let mut steps = 0;
+        while steps < limit && self.tape[pointer] != 0 {
+            pointer = pointer.wrapping_add_signed(amount);
+            steps += 1;
+        }
+        self.pointer = pointer;
+        self.max_pointer = self.max_pointer.max(pointer);
+        steps as u64
     }
 
     fn offset_is_valid(&self, offset: isize) -> bool {
@@ -1970,6 +2005,58 @@ mod tests {
             b"",
         );
         assert!(wrapping_rle.stats.optimization.rle_operations >= 4);
+    }
+
+    #[test]
+    fn batched_scans_preserve_stride_stops_counts_and_boundaries() {
+        for stride in [1, 3, 17] {
+            for cells in [0, 1, 1023, 1024, 1025, 1500] {
+                let right = ">".repeat(stride);
+                let left = "<".repeat(stride);
+                // Scan both directions across multiple batch boundaries.
+                let mut source = right.clone();
+                source.push_str(&format!("+{right}").repeat(cells));
+                source.push_str(&left.repeat(cells));
+                source.push_str(&format!("[{right}].{left}[{left}]."));
+                let baseline = assert_matches_reference(source.as_bytes(), b"");
+                let map = test_profile_map(
+                    source.as_bytes(),
+                    vec![ProfileRange {
+                        start: 0,
+                        end: bf_identity(source.as_bytes()).instruction_count,
+                        site: ProfileSiteId(1),
+                    }],
+                );
+                let profiled = run_with_options(
+                    source.as_bytes(),
+                    b"",
+                    RunOptions {
+                        collect_stats: true,
+                        profile: Some(ProfileOptions {
+                            map,
+                            mode: ProfileMode::Counters,
+                        }),
+                        ..RunOptions::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(profiled.output, baseline.output);
+                assert_eq!(profiled.stats, baseline.stats);
+            }
+        }
+        for source in [b"+ [< ignored <<]".to_vec(), {
+            let mut source = vec![b'>'; TAPE_LEN - 2];
+            source.extend_from_slice(b"+[> ignored >>]");
+            source
+        }] {
+            assert_eq!(run_with_stats(&source, b""), run_reference(&source, b""));
+        }
+        let mut source = vec![b'>'; TAPE_LEN - 2];
+        source.extend_from_slice(b"+[>>>].");
+        let result = run_unbounded_with_stats(&source, b"").unwrap();
+        assert_eq!(result.output, vec![0]);
+        assert_eq!(result.stats.max_pointer, TAPE_LEN + 1);
+        assert_eq!(result.stats.optimization.scan_steps, 1);
     }
 
     #[test]
