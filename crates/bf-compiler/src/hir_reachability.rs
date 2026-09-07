@@ -7,127 +7,119 @@ use crate::hir::{
 
 pub(crate) struct ReachableFunctions {
     reachable: Vec<bool>,
-    pending: Vec<FunctionId>,
 }
 
 impl ReachableFunctions {
-    /// Analyze semantically validated HIR. Global initializers execute before
-    /// main, so their callees are roots too. Both sides of branches are kept:
-    /// this pass only eliminates functions, not unreachable statements.
+    /// Global initializers and main are roots. Both sides of branches are kept.
     pub(crate) fn analyze(program: &HirProgram) -> Self {
-        let mut analysis = Self {
-            reachable: vec![false; program.functions.len()],
-            pending: Vec::new(),
-        };
-        analysis.visit_function(program.entry);
+        let mut reachable = vec![false; program.functions.len()];
+        let mut pending = vec![program.entry];
         for global in &program.globals {
             if let Some(initializer) = &global.initializer {
-                analysis.visit_expression(initializer);
+                visit_expression_calls(initializer, &mut |function| pending.push(function));
             }
         }
-        // A worklist handles recursion and long call chains without recursively
-        // walking function bodies on the Rust stack.
-        while let Some(function) = analysis.pending.pop() {
-            analysis.visit_statement(&program.functions[function.index()].body);
+        while let Some(function) = pending.pop() {
+            if std::mem::replace(&mut reachable[function.index()], true) {
+                continue;
+            }
+            visit_statement_calls(&program.functions[function.index()].body, &mut |callee| {
+                pending.push(callee)
+            });
         }
-        analysis
+        Self { reachable }
     }
-
     pub(crate) fn contains(&self, function: FunctionId) -> bool {
         self.reachable[function.index()]
     }
-
     pub(crate) fn len(&self) -> usize {
         self.reachable.iter().filter(|&&live| live).count()
     }
+}
 
-    fn visit_function(&mut self, function: FunctionId) {
-        if !self.reachable[function.index()] {
-            self.reachable[function.index()] = true;
-            self.pending.push(function);
+fn visit_projections(projections: &[Projection], visit: &mut impl FnMut(FunctionId)) {
+    for projection in projections {
+        if let Projection::Index {
+            index: ArrayIndex::Dynamic(index),
+            ..
+        } = projection
+        {
+            visit_expression_calls(index, visit);
         }
     }
-
-    fn visit_projections(&mut self, projections: &[Projection]) {
-        for projection in projections {
-            if let Projection::Index {
-                index: ArrayIndex::Dynamic(index),
-                ..
-            } = projection
-            {
-                self.visit_expression(index);
+}
+fn visit_call(
+    function: FunctionId,
+    arguments: &[HirExpression],
+    visit: &mut impl FnMut(FunctionId),
+) {
+    visit(function);
+    for argument in arguments {
+        visit_expression_calls(argument, visit);
+    }
+}
+pub(crate) fn visit_expression_calls(
+    expression: &HirExpression,
+    visit: &mut impl FnMut(FunctionId),
+) {
+    match &expression.kind {
+        HirExpressionKind::Literal(_)
+        | HirExpressionKind::EnumVariant(_)
+        | HirExpressionKind::StringLiteral(_)
+        | HirExpressionKind::Input => {}
+        HirExpressionKind::Place(place) => visit_projections(&place.projections, visit),
+        HirExpressionKind::Project { base, projections } => {
+            visit_expression_calls(base, visit);
+            visit_projections(projections, visit);
+        }
+        HirExpressionKind::Unary { operand, .. } => visit_expression_calls(operand, visit),
+        HirExpressionKind::Binary { left, right, .. } => {
+            visit_expression_calls(left, visit);
+            visit_expression_calls(right, visit);
+        }
+        HirExpressionKind::Call {
+            function,
+            arguments,
+        } => visit_call(*function, arguments, visit),
+    }
+}
+pub(crate) fn visit_statement_calls(statement: &HirStatement, visit: &mut impl FnMut(FunctionId)) {
+    match &statement.kind {
+        HirStatementKind::Empty | HirStatementKind::Abort => {}
+        HirStatementKind::Block(statements) => {
+            for statement in statements {
+                visit_statement_calls(statement, visit);
             }
         }
-    }
-
-    fn visit_call(&mut self, function: FunctionId, arguments: &[HirExpression]) {
-        self.visit_function(function);
-        for argument in arguments {
-            self.visit_expression(argument);
+        HirStatementKind::Declaration { initializer, .. }
+        | HirStatementKind::Return(initializer) => {
+            if let Some(expression) = initializer {
+                visit_expression_calls(expression, visit);
+            }
         }
-    }
-
-    fn visit_expression(&mut self, expression: &HirExpression) {
-        match &expression.kind {
-            HirExpressionKind::Literal(_)
-            | HirExpressionKind::EnumVariant(_)
-            | HirExpressionKind::StringLiteral(_)
-            | HirExpressionKind::Input => {}
-            HirExpressionKind::Place(place) => self.visit_projections(&place.projections),
-            HirExpressionKind::Project { base, projections } => {
-                self.visit_expression(base);
-                self.visit_projections(projections);
-            }
-            HirExpressionKind::Unary { operand, .. } => self.visit_expression(operand),
-            HirExpressionKind::Binary { left, right, .. } => {
-                self.visit_expression(left);
-                self.visit_expression(right);
-            }
-            HirExpressionKind::Call {
-                function,
-                arguments,
-            } => self.visit_call(*function, arguments),
+        HirStatementKind::Assignment { value, target, .. } => {
+            visit_expression_calls(value, visit);
+            visit_projections(&target.projections, visit);
         }
-    }
-
-    fn visit_statement(&mut self, statement: &HirStatement) {
-        match &statement.kind {
-            HirStatementKind::Empty | HirStatementKind::Abort => {}
-            HirStatementKind::Block(statements) => {
-                for statement in statements {
-                    self.visit_statement(statement);
-                }
+        HirStatementKind::Output(expression) => visit_expression_calls(expression, visit),
+        HirStatementKind::Call {
+            function,
+            arguments,
+        } => visit_call(*function, arguments, visit),
+        HirStatementKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            visit_expression_calls(condition, visit);
+            visit_statement_calls(then_branch, visit);
+            if let Some(branch) = else_branch {
+                visit_statement_calls(branch, visit);
             }
-            HirStatementKind::Declaration { initializer, .. }
-            | HirStatementKind::Return(initializer) => {
-                if let Some(expression) = initializer {
-                    self.visit_expression(expression);
-                }
-            }
-            HirStatementKind::Assignment { value, target, .. } => {
-                self.visit_expression(value);
-                self.visit_projections(&target.projections);
-            }
-            HirStatementKind::Output(expression) => self.visit_expression(expression),
-            HirStatementKind::Call {
-                function,
-                arguments,
-            } => self.visit_call(*function, arguments),
-            HirStatementKind::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                self.visit_expression(condition);
-                self.visit_statement(then_branch);
-                if let Some(branch) = else_branch {
-                    self.visit_statement(branch);
-                }
-            }
-            HirStatementKind::While { condition, body } => {
-                self.visit_expression(condition);
-                self.visit_statement(body);
-            }
+        }
+        HirStatementKind::While { condition, body } => {
+            visit_expression_calls(condition, visit);
+            visit_statement_calls(body, visit);
         }
     }
 }

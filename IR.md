@@ -17,8 +17,8 @@ source/CLIの本線:
     → tokens
     → AST
     → macro expansion
-    → typed HIR
-    → Continuation IR
+    → typed HIR / frame-aware single-use inlining
+    → Continuation IR / liveness-based frame allocation
     → ABI layout / portal planning / BF template selection
     → BF IR（内部ではprovenance付きvariantも使用）
     → BF peephole optimization
@@ -188,7 +188,9 @@ sourceのenumやstructというnominal型は消え、`ValueType::Cell`またはc
 - BFへ構造的にloweringできる`Loop`と、条件を消費する`Branch`
 
 temporary cellはsource localと同じ`FrameSlot`として表される。現行lowererはlocal storageを先に割り当て、
-式評価で必要になるtemporary cellとaggregate regionを単調に追加する。生存期間に基づく再利用はまだ行わない。
+式評価で必要になるvirtual temporary cellとaggregate regionを単調に追加する。その後、
+`frame_allocation`がCFG上の生存期間を解析し、scalar slotと同じサイズのaggregate regionを再利用する。
+source localとtemporaryを区別せず、同時に必要な値が同じ領域へ割り当てられないようにする。
 
 ### TerminatorとCFG
 
@@ -210,8 +212,12 @@ HIRからのloweringは、sourceの`if`、`while`、短絡論理演算、call、
 
 ### 現在の最適化pass
 
-現行実装には`ContinuationProgram → ContinuationProgram`の独立したoptimizer passはない。
-Continuation lowering中の定数条件除去を除けば、`ContinuationProgram`は生成直後にABI backendへ渡る。
+source frontendでは、HIRの単一呼び出しvoid関数を、再帰・途中return・caller frameの増加がない場合に
+inline化する。mainとglobal initializerから到達しない関数はloweringで除去する。
+各関数をContinuationへloweringした後に`frame_allocation`を実行し、再利用後のdescriptorと命令列を
+`ContinuationProgram` constructorで検証する。これはsource frontend内のpassであり、公開APIで手動構築した
+Continuation IRや`--cir-input`のalias-preserving flat frameには自動適用しない。
+詳細と計測結果は[FRAME_ALLOCATION.md](FRAME_ALLOCATION.md)に記録する。
 
 開発時は`bfc --run-ir source.bfc`で、ABI backendとBrainfuckへの展開を行わず
 `ContinuationProgram`をRust上で直接実行できる。この経路はcellのmod 256演算、frame、call/return、
@@ -248,19 +254,16 @@ BF templateを選ぶbackend最適化である。同様に、連続するaggregat
 4. 解析で定数と証明できるterminator `Branch`の簡約。
 5. 全参照を更新した後の密なID再採番。
 
-初版は全`FunctionDescriptor::entry`を到達可能性のrootにして、function内の到達不能continuationだけを
-除去する。将来unused functionも除去する場合はmain entryだけをrootにし、`Call::callee`からcalleeの
-function entryへのcall graph edgeを必ず辿る。
+提案するCFG passの初版は全`FunctionDescriptor::entry`をrootにして、function内の到達不能continuationだけを
+除去する。現行のunused function除去はHIR側でmainとglobal initializerをrootに行っている。
 
 function entry、callの`return_to`、aggregate portalの`return_to`はaddress-takenとして保守的に扱う。
 これらをthreadingまたは結合する場合は、backendが期待するcontextとresume protocolを保つことを
 個別に証明する。passの前後で`ContinuationProgram`のvalidationを行い、ID境界、再帰、portalを含む
 differential testを置く。
 
-temporaryの削減も新しい汎用IRを必要としない。まずlowering内でscopeごとにtemporaryを再利用するか、
-Continuation CFG上でlivenessを計算して`FrameSlot`をrenameする、独立したslot allocation passとして
-試す。ただし現在はsource localとtemporaryの区別をIRに残さないため、後者を行うならcompiler-owned
-temporaryというmetadataを追加する。
+temporaryの削減は現行の`frame_allocation`がContinuation CFG上のlivenessと干渉グラフで実装する。
+localとtemporaryの両方を対象にするため、compiler-owned temporaryという追加metadataは必要ない。
 
 ### SSAは現時点では追加しない
 

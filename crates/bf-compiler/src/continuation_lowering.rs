@@ -74,6 +74,20 @@ struct LoweredFunction {
 pub(crate) fn lower_hir(
     program: &HirProgram,
 ) -> Result<ContinuationProgram, ContinuationLoweringError> {
+    lower_hir_with_slot_reuse(program, true)
+}
+
+#[cfg(test)]
+pub(crate) fn lower_hir_without_slot_reuse(
+    program: &HirProgram,
+) -> Result<ContinuationProgram, ContinuationLoweringError> {
+    lower_hir_with_slot_reuse(program, false)
+}
+
+fn lower_hir_with_slot_reuse(
+    program: &HirProgram,
+    reuse_slots: bool,
+) -> Result<ContinuationProgram, ContinuationLoweringError> {
     validate_program_shape(program)?;
 
     let reachable = crate::hir_reachability::ReachableFunctions::analyze(program);
@@ -121,12 +135,81 @@ pub(crate) fn lower_hir(
             &mut ids,
         )?;
         lowerer.lower()?;
-        functions.push(lowerer.descriptor(lowered.entry)?);
-        continuations.extend(lowerer.continuations);
+        let descriptor = lowerer.descriptor(lowered.entry)?;
+        let (descriptor, allocated) = if reuse_slots {
+            crate::frame_allocation::allocate(descriptor, lowerer.continuations)
+        } else {
+            (descriptor, lowerer.continuations)
+        };
+        functions.push(descriptor);
+        continuations.extend(allocated);
     }
     let entry = function_map[program.entry.index()].expect("main must be reachable");
     ContinuationProgram::new_with_globals(entry.id, globals, functions, continuations)
         .map_err(Into::into)
+}
+
+/// Estimate a candidate's persistent frame after slot reuse, including the
+/// backend's branch and portal scratch. Compare both supported geometries.
+pub(crate) fn allocated_frame_chunks(
+    program: &HirProgram,
+    function: hir::FunctionId,
+) -> Result<[usize; 2], ContinuationLoweringError> {
+    let function_map = (0..program.functions.len())
+        .map(|index| {
+            Ok(Some(LoweredFunction {
+                id: ContinuationFunctionId::new(index),
+                entry: continuation_id(index + 1)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, ContinuationLoweringError>>()?;
+    let mut ids = IdAllocator::with_reserved_entries(program.functions.len())?;
+    let lowered = function_map[function.index()].unwrap();
+    let mut lowerer = FunctionLowerer::new(
+        program,
+        &program.functions[function.index()],
+        lowered.id,
+        lowered.entry,
+        &function_map,
+        &mut ids,
+    )?;
+    lowerer.lower()?;
+    let (descriptor, continuations) = crate::frame_allocation::allocate(
+        lowerer.descriptor(lowered.entry)?,
+        lowerer.continuations,
+    );
+    let branch_cells = continuations
+        .iter()
+        .map(|continuation| crate::abi_codegen::maximum_branch_depth(continuation.body()))
+        .max()
+        .unwrap_or(0);
+    let portal_cells = continuations
+        .iter()
+        .filter_map(|continuation| match continuation.terminator() {
+            Terminator::AggregateLoad { cells, .. } | Terminator::AggregateStore { cells, .. } => {
+                Some(*cells)
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let value_cells = descriptor
+        .frame_slots()
+        .checked_add(branch_cells)
+        .and_then(|cells| cells.checked_add(portal_cells))
+        .ok_or_else(|| invalid_hir(Some(function), "frame size overflow"))?;
+    let mut chunks = [0; 2];
+    for (index, chunk_cells) in [8, 16].into_iter().enumerate() {
+        let layout = crate::FrameLayout::with_aggregates(
+            crate::AbiConfig::new(chunk_cells).unwrap(),
+            value_cells,
+            descriptor.frame_aggregates(),
+            descriptor.outbox_cells(),
+        )
+        .map_err(|error| invalid_hir(Some(function), error.to_string()))?;
+        chunks[index] = layout.frame_chunks();
+    }
+    Ok(chunks)
 }
 
 fn continuation_id(value: usize) -> Result<ContinuationId, ContinuationLoweringError> {

@@ -128,7 +128,7 @@ fn unused_functions_are_removed_and_live_calls_are_remapped() {
         cell global = initialize();
         cell initialize() { return 'A'; }
         void unused_between() {}
-        void main() { emit(global); }
+        void main() { emit(global); emit(global); }
         void unused_after() { unused_before(); }
         void emit(cell value) { output(value); output(next(value)); }
         cell next(cell value) { return value + 1; }
@@ -144,7 +144,7 @@ fn unused_functions_are_removed_and_live_calls_are_remapped() {
     let brainfuck = compile_continuations(&program).unwrap();
     assert_eq!(
         bf_interpreter::run(brainfuck.as_bytes(), b"").unwrap(),
-        b"AB"
+        b"ABAB"
     );
 }
 

@@ -601,7 +601,7 @@ fn allocate_hidden_id(used: &mut HashSet<u16>) -> Result<ContinuationId, AbiCode
     Err(AbiCodegenError::ContinuationIdsExhausted)
 }
 
-fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
+pub(crate) fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
     instructions
         .iter()
         .map(|instruction| match instruction {

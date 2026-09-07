@@ -205,7 +205,8 @@ pub fn lower_sources(sources: &[SourceFile<'_>]) -> Result<ContinuationProgram, 
 fn lower_tokens(tokens: Vec<Token>) -> Result<ContinuationProgram, FrontendError> {
     let ast = parser::parse(tokens)?;
     let ast = crate::macro_expansion::expand(ast)?;
-    let hir = semantic::analyze(&ast)?;
+    let mut hir = semantic::analyze(&ast)?;
+    crate::hir_inline::inline_single_use_functions(&mut hir);
     lower_hir(&hir).map_err(|error| FrontendError::without_offset(error.to_string()))
 }
 
