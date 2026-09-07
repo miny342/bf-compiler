@@ -12,7 +12,7 @@ fn continuation_id(value: u16) -> ContinuationId {
 
 #[test]
 fn profile_artifact_has_the_same_brainfuck_as_normal_compilation() {
-    let program = lower_source("void helper() {} void main() { helper(); output('x'); }").unwrap();
+    let program = lower_source("void helper() {} void main() { helper(); helper(); output('x'); }").unwrap();
     let normal = compile_continuations(&program).unwrap();
     for granularity in [
         ProfileGranularity::Abi,

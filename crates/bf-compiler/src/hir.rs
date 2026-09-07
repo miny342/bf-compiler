@@ -505,15 +505,15 @@ fn collect_callsite_from_globals(visited: &mut Vec<bool>, calls: &mut Vec<CallSi
 }
 
 #[derive(Debug, Clone)]
-struct CallGraph {
+pub struct CallGraph {
     calls: Vec<CallSite>,
     incoming: Vec<Vec<usize>>,
     outgoing: Vec<Vec<usize>>,
-    reachable: Vec<bool>,
+    pub reachable: Vec<bool>,
 }
 
 impl CallGraph {
-    fn build(hir: &HirProgram) -> Self {
+    pub fn build(hir: &HirProgram) -> Self {
         let mut calls = Vec::new();
         let mut visited = vec![false; hir.functions.len()];
         collect_callsite_from_function(&mut visited, &mut calls, hir, hir.entry);
@@ -821,23 +821,23 @@ fn inline_function(hir: &mut HirProgram, graph: &CallGraph, f: FunctionId) -> bo
     false
 }
 
-pub(crate) fn optimize_hir(mut hir: HirProgram) -> HirProgram {
-    let mut inlinable = true;
-    while inlinable {
-        inlinable = false;
-        let graph = CallGraph::build(&hir);
-        let funcs = hir.functions.clone();
-        let mut ff = funcs.iter();
-        let mut val = ff.next();
-        while let Some(f) = val {
-            let ok = inline_function(&mut hir, &graph, f.id);
-            if ok {
-                inlinable = true;
-                break;
-            }
-            val = ff.next();
-        }
-    }
+pub(crate) fn optimize_hir(mut hir: HirProgram) -> (HirProgram, CallGraph) {
+    // let mut inlinable = true;
+    // while inlinable {
+    //     inlinable = false;
+    //     let graph = CallGraph::build(&hir);
+    //     let funcs = hir.functions.clone();
+    //     let mut ff = funcs.iter();
+    //     let mut val = ff.next();
+    //     while let Some(f) = val {
+    //         let ok = inline_function(&mut hir, &graph, f.id);
+    //         if ok {
+    //             inlinable = true;
+    //             break;
+    //         }
+    //         val = ff.next();
+    //     }
+    // }
 
     let graph = CallGraph::build(&hir);
 
@@ -858,7 +858,7 @@ pub(crate) fn optimize_hir(mut hir: HirProgram) -> HirProgram {
     }
 
     // new_hir
-    hir
+    (hir, graph)
 }
 
 #[cfg(test)]
