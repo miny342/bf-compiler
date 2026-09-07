@@ -713,3 +713,123 @@ code sizeとstep数のPareto frontierを残し、特定処理系にだけ速いv
 
 最適化templateは、入力cellのlive/dead、必要な初期zero cell、破壊されるcell、各経路の終了pointer
 位置を型またはmetadataとして宣言する。文字列断片だけを登録する方式にはしない。
+
+
+## 2026-09-07: dense continuationのdispatchページ幅を均衡化
+
+`logs/full-selfhost-20260902-233738/` と `logs/full-selfhost-20260907-184903/` の
+`stage2-compiler.cir`、`stage2-compiler.bf`、自己入力の `stage2-compiler.bfc` は
+それぞれSHA-256が一致した。
+BFのhashは `fd2f2b68854f8b50e5eae622a2dc6ddc27aec71af671eeeed735a928ead24619`。
+runbookのBFC frontend → CIR入力の経路には、Rust HIRのinline化・frame再利用が適用されない。
+この2本の時間差は生成コードの退行を示さない。
+
+今回の変更は共通Rust ABI backendの `DispatchEncoding` に入れた。
+hidden portal entryを含むIDが `1..=N` に密で、N > 256なら、portal entryを先に、
+通常の継続を後に、それぞれ論理ID順に並べる。そのrankをページ幅
+`ceil(sqrt(N + 1))` で2 byteへ分ける。論理ID・CIR形式は変更しない。
+既存のhidden entryを優先する低位byte反転も、新しいページ単位で適用する。
+疎な公開IRと256 entry以下のprogramは元の配置を使う。
+
+countdownは高位・低位とも線形なので、従来の約 `N/256 + 256` 段を
+約 `2*sqrt(N)` 段へ均衡化できる。これは実行頻度に依存しない探索段数の改善であり、
+各継続の頻度を使った最適配置ではない。高位ページのcountdownが増える継続もある。
+production compilerのページ幅は256から77になる。frame layoutや追加scratchは変更しない。
+portal PCの高位byteはglobal/frame間を値の回数だけ移動して転送する（低位は既存の
+nibble転送を使う）。dispatch距離だけでなくPCのbyte値もcostになるため、portal entryを
+先に置き、とくに高位byteを小さくして転送costを抑える。
+
+分岐統合も調査した。元CIRをadapterへ通した5,854継続には1,108分岐があり、
+両枝が直ちに同じGoto先へ戻り、枝へのincoming edgeが各1本の形は22個だった。
+単一predecessorのGoto先は188個。これだけで構造化可能な分岐の総数は判断できないが、
+単純なdiamond統合だけで大幅な継続削減ができるという根拠は得られなかった。
+この変更では分岐統合は行わない。
+
+測定は `logs/dispatch-balance-20260907/` に保存。
+短いselfhost入力は同じCIRから生成した変更前後のcompiler BFを使い、
+同じinterpreterでbaseline → balancedを3回交互に実行した。
+時間はJSONのexecute phaseのみ（BFの読込・parseを含まない）の中央値。
+
+`balanced` はページ幅のみ、`portal-first` はさらにportal entryを先に配置した版。
+`portal-first` も同じ3入力を各3回実行し、baselineの出力とbyte一致した。
+
+| selfhost入力 | 変更前(s) | balanced(s) | portal-first(s) | 最終版の短縮 |
+|---|---:|---:|---:|---:|
+| hello | 0.4458 | 0.3296 | 0.1952 | 56.2% |
+| stage8_aggregates | 6.0712 | 4.5475 | 2.7685 | 54.4% |
+| stage11_dynamic_projection | 4.8932 | 3.5993 | 2.2502 | 54.0% |
+
+いずれも生成BFが変更前後でbyte一致した。3入力の生成BFも実行し、既存の期待出力を確認した。
+集計と全runの時間は `short-comparison.json`、BF/mapのhashとsizeは `artifacts.json`。
+
+追加テストはD=8/16で全1,024 entryをページ横断して実行する場合、再帰call/return、
+global portalとhidden resumeのPCを確認する。ページ幅の切替境界と65,535 IDまでの
+encodingの一意性も検証する。`cargo test --workspace` は全件成功。
+
+`balanced` はhelloでnative operationsが82,745,550 → 37,452,998へ減った一方、
+scan stepsが25,499,264 → 42,741,284へ増えた。production compilerの自己入力を
+各310秒（読込・parse込み）走らせた300秒snapshotでは入力27,556 → 28,122 byte、
+両方output 0 byteで、進捗差は約2%に留まった。この中間版のBFは872,432,553 byte。
+`full-baseline.metrics` と `full-balanced.metrics` に途中経過を保存している。
+これは序盤の診断であり、full selfhost完走のspeedupではない。
+
+`portal-first` のproduction compiler BFは872,430,369 byte（元より+18,235 byte、+0.00209%）。
+helloのnative operationsは31,443,036、scan stepsは16,036,804となり、両方とも元より減った。
+最大pointerは3版とも1,117,330。aggregateと動的projectionでも最大pointerは変わらない。
+
+最終版のfull自己入力も同じ310秒枠で実行した。300秒時点の入力byte数は以下。
+
+| 版 | input bytes | output bytes |
+|---|---:|---:|
+| baseline | 27,556 | 0 |
+| balanced | 28,122 | 0 |
+| portal-first | 36,267 | 0 |
+
+最終版は同じ時間で入力処理が31.6%多く進んだ。最大pointerは3版とも1,121,308。
+`full-portal-first.metrics` の最後はSIGINTによるsnapshotで、execute 305.4秒時点。
+正常完走ではないためfullのJSON profileやstage3生成物は得られていない。
+後半の出力生成phaseへの効果は、この比較からは判断できない。
+
+
+selfhostテスト全体も同じsource
+`logs/full-selfhost-20260907-013902/stage2-compiler-test.bfc` で比較した。
+これはRust frontend → BFの経路。baseline artifactは
+`logs/frame-allocation-20260907/guarded-inline.bf` を使い、interpreterを今回再実行した。
+各版1回のexecute時間で、すべて出力は `ok\n`。
+
+| 版 | execute(s) | native operations | scan steps | 最大pointer |
+|---|---:|---:|---:|---:|
+| baseline | 25.8004 | 3,101,218,536 | 3,617,018,080 | 1,126,888 |
+| balanced | 27.0606 | 1,541,334,069 | 5,696,692,218 | 1,126,888 |
+| portal-first | 13.8374 | 1,601,221,450 | 2,090,427,578 | 1,126,888 |
+
+最終版の短縮は46.4%。RLE換算instructionも23,130,084,079 → 16,463,384,797へ減った。
+ページ幅のみではnative operationsが減っても実行時間が悪化するため、portal PCの配置を
+含む版を採用した。短いselfhostとtest全体の両経路で改善し、frame膨張もない。
+
+helloだけを追加で `--profile-mode counters` でも実行し、stable keyを全context横断で合算した。
+`abi.navigation.global` のscan stepsは25,499,264 → 42,741,284 → 16,036,804で、
+上記のscan増減がglobal navigationによるものと確認した。counters測定の時間は表に使わない。
+全数値は `comparison.json`、集計処理は `summarize.py`、実行手順は
+`run-long-comparison.py` と `run-portal-first.py` に残した。workspaceは245テスト成功。
+さらに、再帰fixtureを別々のページの低位byte=0へ配置してcall/returnを確認した。
+
+再測定では新しいdirectoryを作り、runbookのBF生成で同じ保存済みCIRを入力する。
+例えば最終版のhello比較は以下。baselineには上記full-selfhost directoryのBF/mapを使う。
+
+```sh
+mkdir -p logs/dispatch-rerun
+target/release/bfc --cir-input logs/full-selfhost-20260907-184903/stage2-compiler.cir \
+  --unlimited-tape --profile-granularity continuation \
+  --profile-map-output logs/dispatch-rerun/compiler.bfmap.json \
+  > logs/dispatch-rerun/compiler.bf
+target/release/bf-interpreter --unlimited-tape \
+  --profile-map logs/dispatch-rerun/compiler.bfmap.json \
+  --profile-mode sample --profile-format json \
+  --profile-output logs/dispatch-rerun/hello.profile.json \
+  logs/dispatch-rerun/compiler.bf < selfhost/stage2/examples/hello.bfc \
+  > logs/dispatch-rerun/hello.bf
+```
+
+selfhostテスト全体の生成・実行は `FRAME_ALLOCATION.md` の再実行手順と同じ。
+測定前に `cargo build --release -p bf-compiler -p bf-interpreter` を実行する。

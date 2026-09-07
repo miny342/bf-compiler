@@ -388,36 +388,65 @@ impl DispatchEntry<'_> {
 }
 
 /// Maps stable logical continuation IDs to the bytes stored in ABI PC fields.
-/// Portal entries are allocated after user continuations and therefore tend
-/// to occupy the expensive end of the final low-byte page. Reverse only pages
-/// where doing so lowers the aggregate countdown distance of hidden entries.
-#[derive(Debug, Default)]
+/// Dense programs balance the two countdown levels instead of filling 256-entry
+/// low-byte pages first. Sparse public IR retains its original page geometry.
+/// Portal entries receive the first dense ranks to reduce PC transport costs.
+/// Reverse pages where it further lowers their aggregate countdown distance.
+#[derive(Debug)]
 struct DispatchEncoding {
     reversed_low_pages: HashMap<u8, (u8, u8)>,
+    page_width: u16,
+    dense_ranks: Vec<u16>,
 }
 
 impl DispatchEncoding {
     fn new(program: &ContinuationProgram, portal: &PortalPlan) -> Self {
+        let mut entries = program
+            .continuations()
+            .iter()
+            .map(|c| (c.id(), false))
+            .chain(portal.accessors.iter().map(|a| (a.id, true)))
+            .chain(portal.ordered_sites.iter().map(|s| (s.resume, true)))
+            .chain(portal.routers.iter().map(|r| (r.id, true)))
+            .collect::<Vec<_>>();
+        let count = entries.len();
+        let maximum = entries.iter().map(|(id, _)| id.get()).max().unwrap_or(1);
+        // IDs are nonzero and unique, including hidden portal IDs. Equality
+        // therefore proves that 1..=maximum is dense. Balancing p + n/p
+        // bounds both linear countdown levels by approximately sqrt(n).
+        // Include the unused zero code when choosing the width so that both
+        // encoded bytes fit, even for a program with all 65,535 IDs occupied.
+        let dense = count == usize::from(maximum) && count > 256;
+        let page_width = if dense {
+            (1_u16..=256)
+                .find(|&width| usize::from(width).pow(2) > count)
+                .unwrap_or(256)
+        } else {
+            256
+        };
+        let mut dense_ranks = Vec::new();
+        if dense {
+            // Portal PCs cross global/frame boundaries by value. Keep their
+            // byte values small to reduce navigation while transferring them,
+            // as well as the countdown needed to dispatch them.
+            entries.sort_unstable_by_key(|&(id, hidden)| (!hidden, id.get()));
+            dense_ranks.resize(count + 1, 0);
+            for (index, &(id, _)) in entries.iter().enumerate() {
+                dense_ranks[usize::from(id.get())] = (index + 1) as u16;
+            }
+        }
         let mut pages = BTreeMap::<u8, (Vec<u8>, Vec<u8>)>::new();
-        let mut record = |id: ContinuationId, hidden: bool| {
-            let value = id.get();
+        for (id, hidden) in entries {
+            let rank = dense_ranks
+                .get(usize::from(id.get()))
+                .copied()
+                .unwrap_or(id.get());
+            let value = (rank / page_width) * 256 + rank % page_width;
             let page = pages.entry((value >> 8) as u8).or_default();
             page.0.push(value as u8);
             if hidden {
                 page.1.push(value as u8);
             }
-        };
-        for continuation in program.continuations() {
-            record(continuation.id(), false);
-        }
-        for &accessor in &portal.accessors {
-            record(accessor.id, true);
-        }
-        for &site in &portal.ordered_sites {
-            record(site.resume, true);
-        }
-        for &router in &portal.routers {
-            record(router.id, true);
         }
 
         let reversed_low_pages = pages
@@ -439,11 +468,20 @@ impl DispatchEncoding {
                 (descending_cost < ascending_cost).then_some((high, (minimum, maximum)))
             })
             .collect();
-        Self { reversed_low_pages }
+        Self {
+            reversed_low_pages,
+            page_width,
+            dense_ranks,
+        }
     }
 
     fn encode(&self, id: ContinuationId) -> u16 {
-        let value = id.get();
+        let rank = self
+            .dense_ranks
+            .get(usize::from(id.get()))
+            .copied()
+            .unwrap_or(id.get());
+        let value = (rank / self.page_width) * 256 + rank % self.page_width;
         let high = (value >> 8) as u8;
         let low = value as u8;
         let encoded_low = self
@@ -3521,6 +3559,136 @@ mod tests {
     }
 
     #[test]
+    fn balanced_dispatch_visits_every_dense_entry_across_pages() {
+        let main = FunctionId::new(0);
+        let cell = Address::Frame(FrameSlot::new(0));
+        let order = (1..=512_u16)
+            .flat_map(|i| [i, 1025 - i])
+            .collect::<Vec<_>>();
+        let continuations = order
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| {
+                Continuation::new(
+                    id(value),
+                    main,
+                    vec![
+                        FrameInstruction::Set {
+                            dst: cell,
+                            value: (value % 251) as u8,
+                        },
+                        FrameInstruction::Output { src: cell },
+                    ],
+                    order
+                        .get(index + 1)
+                        .map_or(Terminator::Halt, |&next| Terminator::Goto {
+                            target: id(next),
+                        }),
+                )
+            })
+            .collect();
+        let program = ContinuationProgram::new(
+            main,
+            vec![FunctionDescriptor::new(
+                main,
+                vec![],
+                1,
+                ValueType::Void,
+                id(1),
+            )],
+            continuations,
+        )
+        .unwrap();
+        let encoding = DispatchEncoding::new(&program, &PortalPlan::new(&program).unwrap());
+        assert_eq!(encoding.page_width, 33);
+        let expected = order.iter().map(|v| (v % 251) as u8).collect::<Vec<_>>();
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), expected);
+        }
+    }
+
+    #[test]
+    fn balanced_encoding_is_injective_at_width_and_id_limits() {
+        let main = FunctionId::new(0);
+        for count in [256, 257, 288, 289, 65025, 65535] {
+            let program = ContinuationProgram::new(
+                main,
+                vec![FunctionDescriptor::new(
+                    main,
+                    vec![],
+                    0,
+                    ValueType::Void,
+                    id(1),
+                )],
+                (1..=count)
+                    .map(|value| Continuation::new(id(value), main, vec![], Terminator::Halt))
+                    .collect(),
+            )
+            .unwrap();
+            let encoding = DispatchEncoding::new(&program, &PortalPlan::new(&program).unwrap());
+            let encoded = (1..=count)
+                .map(|value| encoding.encode(id(value)))
+                .collect::<HashSet<_>>();
+            assert_eq!(encoded.len(), usize::from(count));
+            assert!(!encoded.contains(&0));
+        }
+    }
+
+    #[test]
+    fn balanced_dispatch_preserves_recursive_call_and_return() {
+        let original = recursive_countdown_program();
+        // Width 33 makes every live entry xx00 on a different page. Calls
+        // and returns must migrate contexts without selecting a second case.
+        let remap = |value: ContinuationId| id(value.get() * 33);
+        let functions = original
+            .functions()
+            .iter()
+            .map(|f| {
+                FunctionDescriptor::new(
+                    f.id(),
+                    f.parameters().to_vec(),
+                    f.frame_slots(),
+                    f.return_type(),
+                    remap(f.entry()),
+                )
+            })
+            .collect();
+        let mut continuations = original
+            .continuations()
+            .iter()
+            .map(|c| {
+                let mut terminator = c.terminator().clone();
+                match &mut terminator {
+                    Terminator::Call { return_to, .. } => *return_to = remap(*return_to),
+                    Terminator::Branch {
+                        then_target,
+                        else_target,
+                        ..
+                    } => {
+                        *then_target = remap(*then_target);
+                        *else_target = remap(*else_target);
+                    }
+                    Terminator::Return { .. } | Terminator::Halt => (),
+                    _ => panic!("unexpected recursive fixture terminator"),
+                }
+                Continuation::new(remap(c.id()), c.function(), c.body().to_vec(), terminator)
+            })
+            .collect::<Vec<_>>();
+        let live = continuations.iter().map(|c| c.id()).collect::<HashSet<_>>();
+        continuations.extend(
+            (1..=1024)
+                .filter(|&value| !live.contains(&id(value)))
+                .map(|value| {
+                    Continuation::new(id(value), original.main(), vec![], Terminator::Halt)
+                }),
+        );
+        let program = ContinuationProgram::new(original.main(), functions, continuations).unwrap();
+        for chunk_cells in [8, 16] {
+            assert_eq!(execute_continuations(&program, chunk_cells), b"\x04L");
+        }
+    }
+
+    #[test]
     fn dispatcher_does_not_run_low_zero_after_call_migrates_context() {
         let main = FunctionId::new(0);
         let helper = FunctionId::new(1);
@@ -4803,6 +4971,19 @@ mod tests {
             let layouts = build_layouts(&program, AbiConfig::new(chunk_cells).unwrap()).unwrap();
             assert_eq!(layouts[&main].frame.route_chunks(), 1, "D={chunk_cells}");
             assert_eq!(execute_continuations(&program, chunk_cells), b"Z");
+            let mut dense = program.continuations().to_vec();
+            dense.extend(
+                (3..=1024)
+                    .map(|value| Continuation::new(id(value), main, vec![], Terminator::Halt)),
+            );
+            let dense = ContinuationProgram::new_with_globals(
+                main,
+                program.globals().to_vec(),
+                program.functions().to_vec(),
+                dense,
+            )
+            .unwrap();
+            assert_eq!(execute_continuations(&dense, chunk_cells), b"Z");
         }
     }
 
