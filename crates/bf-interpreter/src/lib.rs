@@ -423,6 +423,11 @@ fn parse(source: &[u8]) -> Result<Vec<Instruction>, Error> {
 
 #[derive(Debug, Clone)]
 enum FastInstruction {
+    Countdown {
+        site: ResolvedProfileSite,
+        mixed: bool,
+        chain: Box<CountdownChain>,
+    },
     Move {
         site: ResolvedProfileSite,
         mixed: bool,
@@ -454,7 +459,8 @@ enum FastInstruction {
 impl FastInstruction {
     const fn site(&self) -> ResolvedProfileSite {
         match self {
-            Self::Move { site, .. }
+            Self::Countdown { site, .. }
+            | Self::Move { site, .. }
             | Self::Add { site, .. }
             | Self::Input { site, .. }
             | Self::Output { site, .. }
@@ -464,13 +470,92 @@ impl FastInstruction {
 
     const fn mixed_provenance(&self) -> bool {
         match self {
-            Self::Move { mixed, .. }
+            Self::Countdown { mixed, .. }
+            | Self::Move { mixed, .. }
             | Self::Add { mixed, .. }
             | Self::Input { mixed, .. }
             | Self::Output { mixed, .. }
             | Self::Loop { mixed, .. } => *mixed,
         }
     }
+}
+
+/// Nested `[- CHILD tail]` loops, stored innermost first. Only the initial
+/// decrements are folded: tails and subsequent loop conditions remain dynamic.
+#[derive(Debug, Clone)]
+struct CountdownChain {
+    levels: Vec<CountdownLevel>,
+    leaf: Box<FastInstruction>,
+}
+
+#[derive(Debug, Clone)]
+struct CountdownLevel {
+    tail: Vec<FastInstruction>,
+    /// Sum of raw decrement counts from the innermost level through this level.
+    decrement_prefix: u64,
+}
+
+fn fold_countdown(instruction: FastInstruction) -> FastInstruction {
+    let FastInstruction::Loop {
+        site,
+        mixed,
+        body,
+        optimization: None,
+    } = &instruction
+    else {
+        return instruction;
+    };
+    let [
+        FastInstruction::Add {
+            site: add_site,
+            amount: 255,
+            raw_count,
+            mixed: false,
+        },
+        child,
+        ..,
+    ] = body.as_slice()
+    else {
+        return instruction;
+    };
+    if add_site.id != site.id
+        || !matches!(
+            child,
+            FastInstruction::Loop { .. } | FastInstruction::Countdown { .. }
+        )
+    {
+        return instruction;
+    }
+    let site = *site;
+    let mixed = *mixed;
+    let raw_count = *raw_count;
+    let FastInstruction::Loop { body, .. } = instruction else {
+        unreachable!()
+    };
+    let mut body = body.into_iter();
+    body.next();
+    let child = body.next().unwrap();
+    let mut chain = match child {
+        FastInstruction::Countdown {
+            site: child_site,
+            mixed: false,
+            chain,
+        } if child_site.id == site.id => chain,
+        child => Box::new(CountdownChain {
+            levels: Vec::new(),
+            leaf: Box::new(child),
+        }),
+    };
+    let decrement_prefix = chain
+        .levels
+        .last()
+        .map_or(0, |level| level.decrement_prefix)
+        + raw_count;
+    chain.levels.push(CountdownLevel {
+        tail: body.collect(),
+        decrement_prefix,
+    });
+    FastInstruction::Countdown { site, mixed, chain }
 }
 
 #[derive(Debug, Clone)]
@@ -685,12 +770,12 @@ fn parse_optimized(
                 blocks
                     .last_mut()
                     .unwrap()
-                    .push_non_rle(FastInstruction::Loop {
+                    .push_non_rle(fold_countdown(FastInstruction::Loop {
                         site: loop_site,
                         mixed,
                         body,
                         optimization,
-                    });
+                    }));
             }
             _ => {}
         }
@@ -845,7 +930,8 @@ fn recognize_fast_loop(body: &[FastInstruction]) -> Option<LoopOptimization> {
                 let value = updates.entry(pointer).or_default();
                 *value = value.wrapping_add(*amount);
             }
-            FastInstruction::Input { .. }
+            FastInstruction::Countdown { .. }
+            | FastInstruction::Input { .. }
             | FastInstruction::Output { .. }
             | FastInstruction::Loop { .. } => return None,
         }
@@ -1166,6 +1252,9 @@ impl<'a> Machine<'a> {
             }
             self.optimization.executed_native_operations += 1;
             match instruction {
+                FastInstruction::Countdown { site, chain, .. } => {
+                    self.execute_countdown::<false, SAMPLE>(*site, chain)?;
+                }
                 FastInstruction::Move {
                     amount,
                     source_offsets,
@@ -1202,6 +1291,102 @@ impl<'a> Machine<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Descend directly to the first zero condition, then unwind the original
+    /// tails. A tail may change the guard or pointer, so re-entry is evaluated
+    /// at its actual runtime location, without assuming any compiler ABI.
+    fn execute_countdown<const PROFILE: bool, const SAMPLE: bool>(
+        &mut self,
+        site: ResolvedProfileSite,
+        chain: &CountdownChain,
+    ) -> Result<Duration, Error> {
+        let mut remaining = chain.levels.len();
+        let mut reentry = false;
+        let mut nested_time = Duration::ZERO;
+        loop {
+            self.observe_progress(site)?;
+            if SAMPLE {
+                self.publish_sample_site(site);
+            }
+            let entered = usize::from(self.tape[self.pointer]).min(remaining);
+            let skipped = remaining - entered;
+            let decrement_raw = chain.levels[remaining - 1].decrement_prefix
+                - if skipped == 0 {
+                    0
+                } else {
+                    chain.levels[skipped - 1].decrement_prefix
+                };
+            let opens = entered as u64 + u64::from(skipped != 0) - u64::from(reentry);
+            self.countdown_counts::<PROFILE>(site, decrement_raw + opens, entered as u64 + opens);
+            self.optimization.rle_operations += entered as u64;
+            if PROFILE && let Some(profile) = &mut self.profile {
+                let counters = &mut profile.site_mut(site).counters;
+                counters.loop_entries += opens;
+                counters.loop_iterations += entered as u64;
+                counters.rle_operations += entered as u64;
+            }
+            self.tape[self.pointer] -= entered as u8;
+            if skipped == 0 {
+                nested_time += self.execute_countdown_block::<PROFILE, SAMPLE>(
+                    std::slice::from_ref(chain.leaf.as_ref()),
+                )?;
+            }
+            let mut level = skipped;
+            // A skipped level has no tail to execute. Its parent does.
+            loop {
+                if level == chain.levels.len() {
+                    return Ok(nested_time);
+                }
+                nested_time +=
+                    self.execute_countdown_block::<PROFILE, SAMPLE>(&chain.levels[level].tail)?;
+                if SAMPLE {
+                    self.publish_sample_site(site);
+                }
+                self.countdown_counts::<PROFILE>(site, 1, 1);
+                if self.tape[self.pointer] != 0 {
+                    remaining = level + 1;
+                    reentry = true;
+                    break;
+                }
+                level += 1;
+            }
+        }
+    }
+
+    fn countdown_counts<const PROFILE: bool>(
+        &mut self,
+        site: ResolvedProfileSite,
+        raw: u64,
+        rle: u64,
+    ) {
+        if PROFILE {
+            self.add_counts(site, raw, rle);
+        } else {
+            self.add_counts_unprofiled(raw, rle);
+        }
+    }
+
+    fn execute_countdown_block<const PROFILE: bool, const SAMPLE: bool>(
+        &mut self,
+        body: &[FastInstruction],
+    ) -> Result<Duration, Error> {
+        let exact = PROFILE && self.profile.as_ref().is_some_and(|profile| profile.exact);
+        let started = exact.then(|| {
+            self.clock_reads += 1;
+            Instant::now()
+        });
+        if PROFILE {
+            self.execute_block_profiled(body)?;
+        } else {
+            self.execute_block_light::<SAMPLE>(body)?;
+        }
+        Ok(if let Some(started) = started {
+            self.clock_reads += 1;
+            started.elapsed()
+        } else {
+            Duration::ZERO
+        })
     }
 
     fn execute_loop_light<const SAMPLE: bool>(
@@ -1341,6 +1526,9 @@ impl<'a> Machine<'a> {
                 site_profile.profile_block_executions += 1;
             }
             let nested_time = match instruction {
+                FastInstruction::Countdown { chain, .. } => {
+                    self.execute_countdown::<true, false>(site, chain)?
+                }
                 FastInstruction::Move {
                     amount,
                     source_offsets,
@@ -2057,6 +2245,136 @@ mod tests {
         assert_eq!(result.output, vec![0]);
         assert_eq!(result.stats.max_pointer, TAPE_LEN + 1);
         assert_eq!(result.stats.optimization.scan_steps, 1);
+    }
+
+    fn countdown_test_program(depth: usize) -> String {
+        let mut dispatch = "[[-]>[-]<]".to_owned();
+        for level in (0..depth).rev() {
+            dispatch = format!("[-{dispatch}>[->{}.<]<]", "+".repeat(level + 1));
+        }
+        format!(">+<,{dispatch}>.>.")
+    }
+
+    #[test]
+    fn countdown_chains_match_reference_for_every_guard_value() {
+        for depth in [1, 2, 7, 79, 255, 256] {
+            let source = countdown_test_program(depth);
+            for initial in 0..=255_u8 {
+                assert_matches_reference(source.as_bytes(), &[initial]);
+            }
+            let parsed = parse_optimized(source.as_bytes(), None).unwrap();
+            assert!(parsed.iter().any(|instruction| matches!(instruction,
+                FastInstruction::Countdown { chain, .. } if chain.levels.len() == depth)));
+        }
+    }
+
+    #[test]
+    fn countdown_reentry_uses_current_guard_and_pointer() {
+        for (source, input) in [
+            (b"++[-[-],].".as_slice(), &[3, 1, 0][..]),
+            (b"++>+++<[-[-]>].".as_slice(), &[][..]),
+            (b"+++[-[-[-],],].".as_slice(), &[4, 2, 0, 3, 0, 0][..]),
+            (b"++[--[-]].".as_slice(), &[][..]),
+            (b"++[- >[-]<].".as_slice(), &[][..]),
+        ] {
+            assert_matches_reference(source, input);
+        }
+        // RLE's modulo-256 delta, rather than the spelling or run length,
+        // determines whether the prefix is a decrement.
+        for decrement in ["-".repeat(257), "+".repeat(255)] {
+            let source = format!("+++[{decrement}[-]].");
+            assert_matches_reference(source.as_bytes(), b"");
+        }
+        let source = b"++[-[-]<]";
+        assert_eq!(run_with_stats(source, b""), run_reference(source, b""));
+        let mut source = vec![b'>'; TAPE_LEN - 1];
+        source.extend_from_slice(b"++[-[-]>].");
+        assert_eq!(run_with_stats(&source, b""), run_reference(&source, b""));
+        let grown = run_unbounded_with_stats(&source, b"").unwrap();
+        assert_eq!(grown.output, vec![0]);
+        assert_eq!(grown.stats.max_pointer, TAPE_LEN);
+    }
+
+    #[test]
+    fn countdown_profiles_preserve_counts_and_case_attribution() {
+        let source = countdown_test_program(7);
+        // Give each output its own site, leaving the chain on site one.
+        let ranges = source
+            .bytes()
+            .enumerate()
+            .map(|(index, byte)| ProfileRange {
+                start: index as u64,
+                end: index as u64 + 1,
+                site: ProfileSiteId(if byte == b'.' { 2 } else { 1 }),
+            })
+            .collect();
+        let map = test_profile_map(source.as_bytes(), ranges);
+        for initial in [0, 1, 3, 7, 8, 255] {
+            let baseline = run_with_stats(source.as_bytes(), &[initial]).unwrap();
+            for mode in [
+                ProfileMode::Counters,
+                ProfileMode::Exact,
+                ProfileMode::Sample {
+                    interval: Duration::from_millis(1),
+                },
+            ] {
+                let result = run_with_options(
+                    source.as_bytes(),
+                    &[initial],
+                    RunOptions {
+                        collect_stats: true,
+                        profile: Some(ProfileOptions {
+                            map: map.clone(),
+                            mode,
+                        }),
+                        ..RunOptions::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.output, baseline.output);
+                assert_eq!(result.stats, baseline.stats);
+                let profile = result.profile.unwrap();
+                if !matches!(mode, ProfileMode::Sample { .. }) {
+                    assert_eq!(
+                        profile
+                            .sites
+                            .iter()
+                            .map(|s| s.counters.raw_bf_instructions)
+                            .sum::<u64>(),
+                        baseline.stats.executed_instructions
+                    );
+                    assert_eq!(
+                        profile
+                            .sites
+                            .iter()
+                            .map(|s| s.counters.rle_instructions)
+                            .sum::<u64>(),
+                        baseline.stats.executed_rle_instructions
+                    );
+                    assert_eq!(
+                        profile
+                            .sites
+                            .iter()
+                            .map(|s| s.counters.rle_operations)
+                            .sum::<u64>(),
+                        baseline.stats.optimization.rle_operations
+                    );
+                    assert_eq!(
+                        profile
+                            .sites
+                            .iter()
+                            .map(|s| s.counters.fast_operations)
+                            .sum::<u64>(),
+                        baseline.stats.optimization.executed_native_operations
+                    );
+                    assert_eq!(profile.sites[1].counters.output_operations, 0);
+                    assert_eq!(
+                        profile.sites[2].counters.output_operations,
+                        baseline.output.len() as u64
+                    );
+                }
+            }
+        }
     }
 
     #[test]

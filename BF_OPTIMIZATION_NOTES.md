@@ -17,6 +17,8 @@ lowering手法は未採用であり、実装時には生成BFの長さ、実行s
 - `[>>>]`や`[<<<]`をzero cellまで進むnative scanへ変換する。
 - `[->>>++>+<<<<]`のように元のcellを1ずつ消費し、pointerが元へ戻るlinear loopを
   複数targetへのwrapping transferへ変換する。
+- `[-[-…]…]`の連続したcountdownを平坦化し、現在のcell値から進入する深さと減算量を
+  一括計算する。case本体と各loop末尾の条件判定は通常どおり実行する。
 
 2026-09-08: `abi.navigation.global`で使う一定strideのscanは、確保済みtape内を最大1,024回
 まとめて走査し、進捗確認とcounter更新をbatchごとに行う。境界では通常のpointer移動に戻し、
@@ -26,10 +28,41 @@ stride 17、nonzero flag 1,500個を65,025往復するrelease版の人工benchma
 0.712秒から0.0477秒へ短縮した（約14.9倍）。raw/RLE命令数と全optimization counterは一致した。
 これはscan単体の測定であり、`full.metrics`のセルフホスト処理全体の高速化率は未測定。
 
+2026-09-08追記: Scan改善後の`full2.metrics`では`abi.dispatch.pages.countdown`と
+`abi.dispatch.page.countdown`が上位になった。実際の`tmp.bf`には79段程度の`[-[-…`があり、
+連続減算を同一profile siteの範囲でまとめるCountdown命令を追加した。raw減算数の累積和から
+進入部分の命令数を復元し、sampleではcase本体のsiteへ切り替え、counters/exactでも帰属を保持する。
+この認識はprofile keyやABI定数を使わず、BF命令列の意味だけに基づく。
+末尾がguardやpointerを変更した場合は、その時点のcellで再入場を判断する。
+進入はまとめられるが、戻り側のcase guard確認は引き続き深さに比例する。
+
+人工benchmarkは79段のchain（leafは`[[-]>[-]<]`、各段は`[-CHILD>[-]<]`）に値74と
+branch flag 1を与え、650,250回実行する。比較対象はScan改善済みの`c547c34`。
+release版の実行時間は3回の中央値で0.819秒から0.554秒へ短縮した（約1.48倍）。
+raw命令346,064,585、RLE命令294,694,833、最大pointer、既存のRLE/loop counterは一致し、
+native operation数だけが245,210,553から148,973,553へ減った。
+
+同じ`tmp.bf`とmapで、`scripts/concat-stage2-compiler.sh main`の184,330 byteを入力し、
+sample interval 2ms、progress interval 60sで実行した。最初のperiodic snapshot直後にSIGINTで
+停止した比較は次のとおり（各1回、実行時間のみ。source読み込み・parse時間は含まない）。
+
+| 実行60秒時点 | Scan改善版 | Countdown追加版 |
+|---|---:|---:|
+| RLE換算実行命令数 | 159,197,346,544 | 185,694,940,087 |
+| 入力消費byte | 24,433 | 25,522 |
+| site 26447のpage countdown samples | 6,229 | 4,253 |
+| site 3のpages countdown samples | 2,855 | 2,192 |
+
+RLE換算の進みは約17%増えた。ただし入力位置によって処理負荷は変わるため、完走時間の
+高速化率を表す測定ではない。短い`hello.bfc`のコンパイルでは出力BFがbyte単位で一致し、
+raw/RLE命令数も一致した。全workspace testに加えて、全256 guard値、深さ256までのchain、
+guardの再設定、pointer移動、境界エラー、tape拡張、各profile modeを参照VMと比較した。
+次の候補は戻り側の未選択case確認の省略、および比重が上がったportal offset/window処理。
+
 fast IRはraw BF命令数と1反復あたりのRLE group数をmetadataとして保持する。このため、実行は
 まとめても`RunStats::executed_instructions`と`executed_rle_instructions`には従来VMと同じ値を
 加算する。移動runには元source offsetも保持し、tape underflow/overflowの診断位置を変えない。
-最適化できないnested loop、I/Oを含むloop、境界を越えうるlinear transferは通常実行へfallbackする。
+最適化できないnested loopやI/Oは通常実行し、境界を越えうるlinear transferも通常実行へfallbackする。
 
 2026-08-27時点のstage 2 production compiler BFでは、1,115,639個のBF命令に対しleaf loopは
 28,905個あり、clear 22,897個、linear transfer 4,442個、scan 1,566個だった。これら3形で
