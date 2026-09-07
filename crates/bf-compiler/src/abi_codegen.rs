@@ -4820,12 +4820,12 @@ mod tests {
                 lower_continuations_with_config(&program, AbiConfig::new(chunk_cells).unwrap())
                     .unwrap()
                     .to_source();
-            eprintln!(
+            assert!(
+                generated.len() < 5_000_000,
                 "D={chunk_cells}: {} bytes, {} portal leaves",
                 generated.len(),
                 plan.ordered_sites.len()
             );
-            assert!(generated.len() < 5_000_000);
         }
     }
 

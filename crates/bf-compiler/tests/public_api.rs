@@ -12,7 +12,8 @@ fn continuation_id(value: u16) -> ContinuationId {
 
 #[test]
 fn profile_artifact_has_the_same_brainfuck_as_normal_compilation() {
-    let program = lower_source("void helper() {} void main() { helper(); helper(); output('x'); }").unwrap();
+    let program =
+        lower_source("void helper() {} void main() { helper(); helper(); output('x'); }").unwrap();
     let normal = compile_continuations(&program).unwrap();
     for granularity in [
         ProfileGranularity::Abi,
@@ -117,6 +118,34 @@ fn source_lowering_exposes_validated_continuation_ir() {
 
     assert_eq!(program.main(), FunctionId::new(0));
     assert_eq!(program.functions().len(), 1);
+}
+
+#[test]
+fn unused_functions_are_removed_and_live_calls_are_remapped() {
+    let program = lower_source(
+        r"
+        void unused_before() { unused_after(); }
+        cell global = initialize();
+        cell initialize() { return 'A'; }
+        void unused_between() {}
+        void main() { emit(global); }
+        void unused_after() { unused_before(); }
+        void emit(cell value) { output(value); output(next(value)); }
+        cell next(cell value) { return value + 1; }
+        ",
+    )
+    .unwrap();
+
+    assert_eq!(program.main(), FunctionId::new(1));
+    assert_eq!(program.functions().len(), 4);
+    for (index, function) in program.functions().iter().enumerate() {
+        assert_eq!(function.id(), FunctionId::new(index));
+    }
+    let brainfuck = compile_continuations(&program).unwrap();
+    assert_eq!(
+        bf_interpreter::run(brainfuck.as_bytes(), b"").unwrap(),
+        b"AB"
+    );
 }
 
 #[test]

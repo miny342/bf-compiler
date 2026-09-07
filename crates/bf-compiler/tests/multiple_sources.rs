@@ -42,6 +42,11 @@ fn cli_compiles_multiple_sources_in_argument_order() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(run(&output.stdout, b"").unwrap(), b"B");
+    assert!(
+        output.stderr.is_empty(),
+        "successful compilation emitted diagnostics: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

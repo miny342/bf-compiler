@@ -73,32 +73,25 @@ struct LoweredFunction {
 
 pub(crate) fn lower_hir(
     program: &HirProgram,
-    graph: &hir::CallGraph,
 ) -> Result<ContinuationProgram, ContinuationLoweringError> {
     validate_program_shape(program)?;
 
-    if graph.reachable.len() != program.functions.len() {
-        return Err(invalid_hir(None, "call graph does not match HIR"));
-    }
-
-    let live_count = graph.reachable.iter().filter(|&&live| live).count();
+    let reachable = crate::hir_reachability::ReachableFunctions::analyze(program);
+    let live_count = reachable.len();
 
     let mut ids = IdAllocator::with_reserved_entries(live_count)?;
 
     let mut function_map = vec![None; program.functions.len()];
-    let mut next_function = 0;
-
-    for f in program.functions.iter() {
-        if !graph.reachable[f.id.index()] {
-            continue;
-        }
-
+    for (next_function, function) in program
+        .functions
+        .iter()
+        .filter(|function| reachable.contains(function.id))
+        .enumerate()
+    {
         let id = ContinuationFunctionId::new(next_function);
         let entry = continuation_id(next_function + 1)?;
 
-        function_map[f.id.index()] = Some(LoweredFunction { id, entry });
-
-        next_function += 1;
+        function_map[function.id.index()] = Some(LoweredFunction { id, entry });
     }
 
     let globals = program
@@ -114,25 +107,26 @@ pub(crate) fn lower_hir(
 
     let mut functions = Vec::with_capacity(live_count);
     let mut continuations = Vec::new();
-    for function in program.functions.iter() {
+    for function in &program.functions {
         let Some(lowered) = function_map[function.id.index()] else {
             continue;
         };
 
-        let mut lowerer =
-            FunctionLowerer::new(program, function, lowered.id, lowered.entry, &function_map, &mut ids)?;
+        let mut lowerer = FunctionLowerer::new(
+            program,
+            function,
+            lowered.id,
+            lowered.entry,
+            &function_map,
+            &mut ids,
+        )?;
         lowerer.lower()?;
         functions.push(lowerer.descriptor(lowered.entry)?);
         continuations.extend(lowerer.continuations);
     }
     let entry = function_map[program.entry.index()].expect("main must be reachable");
-    ContinuationProgram::new_with_globals(
-        entry.id,
-        globals,
-        functions,
-        continuations,
-    )
-    .map_err(Into::into)
+    ContinuationProgram::new_with_globals(entry.id, globals, functions, continuations)
+        .map_err(Into::into)
 }
 
 fn continuation_id(value: usize) -> Result<ContinuationId, ContinuationLoweringError> {
@@ -1641,13 +1635,12 @@ fn less_than_instructions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{lexer, parser, semantic, hir};
+    use crate::{lexer, parser, semantic};
 
     fn lower(source: &str) -> ContinuationProgram {
         let ast = parser::parse(lexer::lex(source).unwrap()).unwrap();
         let hir = semantic::analyze(&ast).unwrap();
-        let graph = hir::CallGraph::build(&hir);
-        lower_hir(&hir, &graph).unwrap()
+        lower_hir(&hir).unwrap()
     }
 
     fn contains_branch(instructions: &[FrameInstruction]) -> bool {

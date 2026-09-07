@@ -16,6 +16,7 @@ mod continuation_vm;
 mod frame_layout;
 mod frontend;
 mod hir;
+mod hir_reachability;
 mod ir;
 mod lexer;
 mod macro_expansion;

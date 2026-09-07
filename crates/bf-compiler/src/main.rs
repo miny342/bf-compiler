@@ -116,6 +116,11 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let profile_granularity = profile_granularity.or_else(|| {
+        (profile_map_output.is_some() || embed_profile)
+            .then_some(bf_compiler::ProfileGranularity::Continuation)
+    });
+
     if let Some(path) = cir_input {
         let bytes = if path == "-" {
             let mut bytes = Vec::new();
@@ -173,29 +178,16 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             memory_metrics(),
         );
         let compile_started = Instant::now();
-        let profile_granularity = profile_granularity
-            .or_else(|| {
-                profile_map_output
-                    .as_ref()
-                    .map(|_| bf_compiler::ProfileGranularity::Continuation)
-            })
-            .or_else(|| embed_profile.then_some(bf_compiler::ProfileGranularity::Continuation));
         let stdout = io::stdout();
         let mut output = BufWriter::with_capacity(1024 * 1024, stdout.lock());
         if let Some(granularity) = profile_granularity {
-            let artifact = if unlimited_tape {
-                bf_compiler::compile_continuations_unbounded_with_profile(&program, granularity)?
-            } else {
-                bf_compiler::compile_continuations_with_profile(&program, granularity)?
-            };
-            if let Some(path) = profile_map_output {
-                fs::write(path, artifact.map.to_json_pretty()?)?;
-            }
-            let source = if embed_profile {
-                artifact.embedded_source()?
-            } else {
-                artifact.source
-            };
+            let source = compile_profiled(
+                &program,
+                unlimited_tape,
+                granularity,
+                profile_map_output.as_deref().map(Path::new),
+                embed_profile,
+            )?;
             eprintln!(
                 "bfc-cir phase=compile status=finished elapsed_ms={} output_bytes={} profiled=true {}",
                 compile_started.elapsed().as_millis(),
@@ -312,28 +304,15 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    let profile_granularity = profile_granularity
-        .or_else(|| {
-            profile_map_output
-                .as_ref()
-                .map(|_| bf_compiler::ProfileGranularity::Continuation)
-        })
-        .or_else(|| embed_profile.then_some(bf_compiler::ProfileGranularity::Continuation));
     let brainfuck = if let Some(granularity) = profile_granularity {
         let program = bf_compiler::lower_sources(&source_files)?;
-        let artifact = if unlimited_tape {
-            bf_compiler::compile_continuations_unbounded_with_profile(&program, granularity)?
-        } else {
-            bf_compiler::compile_continuations_with_profile(&program, granularity)?
-        };
-        if let Some(path) = profile_map_output {
-            fs::write(path, artifact.map.to_json_pretty()?)?;
-        }
-        if embed_profile {
-            artifact.embedded_source()?
-        } else {
-            artifact.source
-        }
+        compile_profiled(
+            &program,
+            unlimited_tape,
+            granularity,
+            profile_map_output.as_deref().map(Path::new),
+            embed_profile,
+        )?
     } else if unlimited_tape {
         let program = bf_compiler::lower_sources(&source_files)?;
         bf_compiler::compile_continuations_unbounded(&program)?
@@ -342,6 +321,29 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     };
     io::stdout().write_all(brainfuck.as_bytes())?;
     Ok(())
+}
+
+/// Keep profile artifacts and embedded output identical for source and CIR input.
+fn compile_profiled(
+    program: &bf_compiler::ContinuationProgram,
+    unlimited_tape: bool,
+    granularity: bf_compiler::ProfileGranularity,
+    map_output: Option<&Path>,
+    embed_profile: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let artifact = if unlimited_tape {
+        bf_compiler::compile_continuations_unbounded_with_profile(program, granularity)?
+    } else {
+        bf_compiler::compile_continuations_with_profile(program, granularity)?
+    };
+    if let Some(path) = map_output {
+        fs::write(path, artifact.map.to_json_pretty()?)?;
+    }
+    if embed_profile {
+        Ok(artifact.embedded_source()?)
+    } else {
+        Ok(artifact.source)
+    }
 }
 
 fn parse_granularity(
