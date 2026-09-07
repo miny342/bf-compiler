@@ -7,6 +7,40 @@ BF IR peephole最適化とcontinuation dispatcherの二段countdownは採用済�
 lowering手法は未採用であり、実装時には生成BFの長さ、実行step、追加cell数を現在のloweringと
 比較してから選ぶ。
 
+## D=16 portal offset の直接 nibble 分解
+
+2026-09-08: `full3.metrics`の最終periodic snapshot（2,520秒、完走結果ではない）では、
+page countdown、pages countdownに続き、`abi.portal.offset`が94,714 samplesで上位にある。
+D=16のoffset計算を、8 bitへの分解と再結合から、byteを消費しながら直接上下nibbleを作る
+bounded countdownへ変更した。最大255段の各段で下位nibbleを進め、16の倍数では下位を15から
+0へ戻し、上位を1増やす。sourceが0になった後は外側のloopも0を確認して抜けるため、戻り側の
+case判定やcarry用scratchは不要。既存interpreterの変更は必要ない。D=8は従来方式を維持する。
+
+全256 byte値について、非zeroの出力先を上書きして`[value % 16, value / 16, 0]`を得ることと、
+従来のbinary分解との一致を確認する回帰testを追加した。同testの集計native operation数は
+493,184 → 172,155（65.1%減）。入出力・初期化を含むtest BFは579 → 5,140 byteへ増える。
+この展開は共有portal accessorのoffset計算だけに限定し、長距離global transportには適用しない。
+
+`scripts/concat-stage2-compiler.sh main`をRust frontendから`bfc --unlimited-tape`でコンパイルした
+production compiler BFに、`selfhost/stage2/examples/hello.bfc`を入力した比較は次のとおり。
+同じrelease interpreterを用い、profileなし、`--stats --no-progress --unlimited-tape`で測定した。
+これは`full3.metrics`のCIR経由artifactによるfull self-inputとは別のsmoke benchmarkである。
+
+| 指標 | 変更前 | 変更後 |
+|---|---:|---:|
+| production compiler BF bytes | 5,949,366,615 | 5,949,379,055 |
+| native operations | 30,798,375 | 29,370,131 |
+| RLE換算命令数 | 240,984,207 | 238,721,767 |
+| raw換算命令数 | 90,195,710,315 | 90,193,010,191 |
+| 最大pointer | 1,119,023 | 1,119,023 |
+| process wall time（各1回、parse込み） | 22.94 s | 22.82 s |
+
+compiler BFの増加は12,440 byte（約0.00021%）、helloコンパイルのnative operationは4.64%減。
+出力BFはbyte単位で一致し、実行結果も`A!`と改行で一致した。process wall timeには巨大BFの
+読み込み・parseが含まれるため、この数値から実行部分の速度向上率は推定しない。
+full self-hostの完走時間の改善率は未測定。workspace全test、D=8/D=16のportal境界・移動復元・
+高位offset回帰も通過した。dispatcherとportal window/navigationは引き続き改善候補である。
+
 ## Repository interpreterのfast IR
 
 セルフホスト開発中はcompilerが生成するBF自体を変更せず、`bf-interpreter`側で別のfast IRへ

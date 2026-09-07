@@ -2162,42 +2162,8 @@ impl<'a> AbiEmitter<'a> {
         self.move_abi_field(AbiField::Index, AbiField::PcLow);
         self.move_abi_field(AbiField::Scratch0, AbiField::PcHigh);
 
-        let low_bits = self.abi_field_offsets([
-            AbiField::Index,
-            AbiField::Condition,
-            AbiField::Restore,
-            AbiField::Scratch0,
-            AbiField::Scratch1,
-            AbiField::Scratch2,
-            AbiField::Scratch3,
-            AbiField::NextPcLow,
-        ])?;
-        let temporary = self.current_abi_offset(AbiField::Branch)?;
-        self.decompose_abi_byte(AbiField::PcLow, &low_bits, temporary)?;
-        for index in 1..4 {
-            self.move_static_value(low_bits[index], low_bits[0], 1_u8 << index);
-        }
-        for index in 5..8 {
-            self.move_static_value(low_bits[index], low_bits[4], 1_u8 << (index - 4));
-        }
-
-        let high_bits = self.abi_field_offsets([
-            AbiField::PcLow,
-            AbiField::Condition,
-            AbiField::Restore,
-            AbiField::Scratch0,
-            AbiField::Scratch2,
-            AbiField::Scratch3,
-            AbiField::NextPcLow,
-            AbiField::NextPcHigh,
-        ])?;
-        self.decompose_abi_byte(AbiField::PcHigh, &high_bits, temporary)?;
-        for index in 1..4 {
-            self.move_static_value(high_bits[index], high_bits[0], 1_u8 << index);
-        }
-        for index in 5..8 {
-            self.move_static_value(high_bits[index], high_bits[4], 1_u8 << (index - 4));
-        }
+        self.split_abi_nibbles(AbiField::PcLow, AbiField::Index, AbiField::Scratch1)?;
+        self.split_abi_nibbles(AbiField::PcHigh, AbiField::PcLow, AbiField::Scratch2)?;
 
         let scratch = self.current_abi_offset(AbiField::Scratch0)?;
         self.copy(
@@ -2245,6 +2211,45 @@ impl<'a> AbiEmitter<'a> {
         self.emit_loop(body);
         self.move_to(0);
         Ok(())
+    }
+
+    /// Consume a byte with a bounded countdown. Each entered level updates
+    /// the result directly; after the source reaches zero, all enclosing
+    /// loops exit without touching it. No binary carry scratch cells are needed.
+    fn split_abi_nibbles(
+        &mut self,
+        source: AbiField,
+        low: AbiField,
+        high: AbiField,
+    ) -> Result<(), AbiCodegenError> {
+        let source = self.current_abi_offset(source)?;
+        let low = self.current_abi_offset(low)?;
+        let high = self.current_abi_offset(high)?;
+        self.clear(low);
+        self.clear(high);
+        self.split_nibble_level(source, low, high, 1);
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn split_nibble_level(&mut self, source: isize, low: isize, high: isize, level: u8) {
+        self.move_to(source);
+        let body = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(low);
+            if level % 16 == 0 {
+                emitter.adjust(0_u8.wrapping_sub(15));
+                emitter.move_to(high);
+                emitter.adjust(1);
+            } else {
+                emitter.adjust(1);
+            }
+            if level < u8::MAX {
+                emitter.split_nibble_level(source, low, high, level + 1);
+            }
+            emitter.move_to(source);
+        });
+        self.emit_loop(body);
     }
 
     fn shift_portal_by_offset(&mut self, right: bool) -> Result<(), AbiCodegenError> {
@@ -4742,6 +4747,83 @@ mod tests {
                 &[10, 10, 10, 20, 30]
             );
         }
+    }
+
+    #[test]
+    fn nibble_countdown_matches_binary_decomposition_for_every_byte() {
+        let program = adapt_flat_program(&Program::new(1, vec![]).unwrap()).unwrap();
+        let config = AbiConfig::new(16).unwrap();
+        let layouts = build_layouts(&program, config).unwrap();
+        let static_layout = StaticLayout::new(config, program.globals()).unwrap();
+        let portal = PortalPlan::new(&program).unwrap();
+        let make_source = |countdown| {
+            let mut emitter = AbiEmitter::new(
+                &program,
+                &layouts,
+                &static_layout,
+                &portal,
+                config,
+                ProfileGranularity::Abi,
+            );
+            let bits = emitter
+                .abi_field_offsets([
+                    AbiField::Index,
+                    AbiField::Condition,
+                    AbiField::Restore,
+                    AbiField::Scratch0,
+                    AbiField::Scratch1,
+                    AbiField::Scratch2,
+                    AbiField::Scratch3,
+                    AbiField::NextPcLow,
+                ])
+                .unwrap();
+            // Dirty destinations check that the operation replaces prior values.
+            emitter.set_abi_field(AbiField::Index, 173).unwrap();
+            emitter.set_abi_field(AbiField::Scratch1, 219).unwrap();
+            let source = emitter.current_abi_offset(AbiField::PcLow).unwrap();
+            emitter.move_to(source);
+            emitter.emit_operation(AnnotatedBfOperation::Input);
+            if countdown {
+                emitter
+                    .split_abi_nibbles(AbiField::PcLow, AbiField::Index, AbiField::Scratch1)
+                    .unwrap();
+            } else {
+                let temporary = emitter.current_abi_offset(AbiField::Branch).unwrap();
+                emitter
+                    .decompose_abi_byte(AbiField::PcLow, &bits, temporary)
+                    .unwrap();
+                for index in 1..4 {
+                    emitter.move_static_value(bits[index], bits[0], 1 << index);
+                }
+                for index in 5..8 {
+                    emitter.move_static_value(bits[index], bits[4], 1 << (index - 4));
+                }
+            }
+            for offset in [bits[0], bits[4], source] {
+                emitter.move_to(offset);
+                emitter.emit_operation(AnnotatedBfOperation::Output);
+            }
+            optimize_annotated_bf(&AnnotatedBfProgram::new(emitter.output, emitter.sites))
+                .to_source()
+        };
+        let old = make_source(false);
+        let new = make_source(true);
+        let mut before = 0;
+        let mut after = 0;
+        for value in 0..=u8::MAX {
+            let reference = run_with_stats(old.as_bytes(), &[value]).unwrap();
+            let actual = run_with_stats(new.as_bytes(), &[value]).unwrap();
+            assert_eq!(actual.output, [value % 16, value / 16, 0], "{value}");
+            assert_eq!(actual.output, reference.output);
+            before += reference.stats.optimization.executed_native_operations;
+            after += actual.stats.optimization.executed_native_operations;
+        }
+        eprintln!(
+            "nibble split: native operations {before} -> {after}; BF bytes {} -> {}",
+            old.len(),
+            new.len()
+        );
+        assert!(after * 2 < before);
     }
 
     #[test]
