@@ -249,6 +249,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             &mut output,
             bf_compiler::ContinuationRunOptions {
                 progress_interval: Some(ir_progress_interval),
+                collect_transitions: true,
             },
             |progress| {
                 eprintln!(
@@ -300,6 +301,14 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
                 "bfc-ir hot_continuation rank={} continuation={} dispatches={count}",
                 rank + 1,
                 continuation.get(),
+            );
+        }
+        for (rank, (from, to, count)) in stats.hottest_transitions(10).into_iter().enumerate() {
+            eprintln!(
+                "bfc-ir hot_transition rank={} from={} to={} transitions={count}",
+                rank + 1,
+                from.get(),
+                to.get(),
             );
         }
         return Ok(());

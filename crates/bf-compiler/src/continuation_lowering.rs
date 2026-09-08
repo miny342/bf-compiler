@@ -74,7 +74,10 @@ struct LoweredFunction {
 pub(crate) fn lower_hir(
     program: &HirProgram,
 ) -> Result<ContinuationProgram, ContinuationLoweringError> {
-    lower_hir_with_slot_reuse(program, true)
+    let lowered = lower_hir_with_slot_reuse(program, true)?;
+    crate::continuation_optimizer::optimize_continuations(&lowered)
+        .map(|(optimized, _)| optimized)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ mod codegen;
 mod continuation_adapter;
 mod continuation_ir;
 mod continuation_lowering;
+mod continuation_optimizer;
 mod continuation_vm;
 mod frame_allocation;
 mod frame_layout;
@@ -50,6 +51,7 @@ pub use continuation_ir::{
     GlobalDescriptor, GlobalId, LogicalOffset, ParameterLocation, Terminator, ValueOperand,
     ValueType,
 };
+pub use continuation_optimizer::{ContinuationOptimizationStats, optimize_continuations};
 pub use continuation_vm::{
     ContinuationRunOptions, ContinuationRunProgress, ContinuationRunStats, ContinuationVmError,
     run_continuations_with_io,

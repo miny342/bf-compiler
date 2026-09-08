@@ -4,6 +4,7 @@
 //! semantics of the Brainfuck ABI without first expanding them into a very
 //! large Brainfuck program, and writes output through a bounded buffer.
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -23,6 +24,8 @@ const PROGRESS_CHECK_MASK: u64 = (1 << 20) - 1;
 pub struct ContinuationRunOptions {
     /// Minimum wall-clock interval between progress callbacks.
     pub progress_interval: Option<Duration>,
+    /// Collect dynamic continuation-to-continuation transitions.
+    pub collect_transitions: bool,
 }
 
 /// Cumulative counters from a direct continuation-IR run.
@@ -44,6 +47,7 @@ pub struct ContinuationRunStats {
     pub final_continuation: Option<ContinuationId>,
     pub final_function_stack: Vec<FunctionId>,
     continuation_counts: Vec<u64>,
+    transition_counts: HashMap<(ContinuationId, ContinuationId), u64>,
 }
 
 impl ContinuationRunStats {
@@ -62,6 +66,18 @@ impl ContinuationRunStats {
         counts.sort_unstable_by_key(|&(id, count)| (std::cmp::Reverse(count), id));
         counts.truncate(limit);
         counts
+    }
+
+    /// Continuation transitions ordered from most to least frequently.
+    pub fn hottest_transitions(&self, limit: usize) -> Vec<(ContinuationId, ContinuationId, u64)> {
+        let mut transitions = self
+            .transition_counts
+            .iter()
+            .map(|(&(from, to), &count)| (from, to, count))
+            .collect::<Vec<_>>();
+        transitions.sort_unstable_by_key(|&(from, to, count)| (std::cmp::Reverse(count), from, to));
+        transitions.truncate(limit);
+        transitions
     }
 }
 
@@ -164,6 +180,7 @@ struct Machine<'a, R, W> {
     started: Instant,
     last_progress: Instant,
     progress_interval: Option<Duration>,
+    collect_transitions: bool,
 }
 
 impl<'a, R: Read, W: Write> Machine<'a, R, W> {
@@ -222,11 +239,13 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
             stats: ContinuationRunStats {
                 max_call_depth: 1,
                 continuation_counts: vec![0; continuations_len],
+                transition_counts: HashMap::new(),
                 ..ContinuationRunStats::default()
             },
             started,
             last_progress: started,
             progress_interval: options.progress_interval,
+            collect_transitions: options.collect_transitions,
         })
     }
 
@@ -339,6 +358,7 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
 
     /// Return true to continue dispatching.
     fn execute_terminator(&mut self, terminator: &Terminator) -> Result<bool, ContinuationVmError> {
+        let from = self.current;
         match terminator {
             Terminator::Goto { target } => self.current = *target,
             Terminator::Branch {
@@ -479,6 +499,13 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
                 self.record_termination();
                 return Ok(false);
             }
+        }
+        if self.collect_transitions {
+            *self
+                .stats
+                .transition_counts
+                .entry((from, self.current))
+                .or_default() += 1;
         }
         Ok(true)
     }
@@ -858,5 +885,28 @@ mod tests {
         let (output, stats) = execute("void main() { output(input()); output(input()); }", &[]);
         assert_eq!(output, [0, 0]);
         assert_eq!(stats.input_operations, 2);
+    }
+
+    #[test]
+    fn optionally_collects_hot_continuation_transitions() {
+        let program = crate::lower_source(
+            "void main() { cell value = input(); while (value != 0) { output(value); value = value - 1; } }",
+        )
+        .unwrap();
+        let mut input = &[2][..];
+        let mut output = Vec::new();
+        let stats = run_continuations_with_io(
+            &program,
+            &mut input,
+            &mut output,
+            ContinuationRunOptions {
+                progress_interval: None,
+                collect_transitions: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(output, [2, 1]);
+        assert!(!stats.hottest_transitions(10).is_empty());
     }
 }

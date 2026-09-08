@@ -446,6 +446,11 @@ impl FunctionDescriptor {
     pub const fn entry(&self) -> ContinuationId {
         self.entry
     }
+
+    pub(crate) fn with_entry(mut self, entry: ContinuationId) -> Self {
+        self.entry = entry;
+        self
+    }
 }
 
 /// Control flow performed after a continuation's body.

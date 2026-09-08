@@ -131,12 +131,13 @@ pub fn lower_selfhost_cir(
         )?;
     }
 
-    Ok(ContinuationProgram::new_with_globals(
+    let lowered = ContinuationProgram::new_with_globals(
         FunctionId::new(usize::from(source.main_function)),
         globals.descriptors,
         functions,
         continuations,
-    )?)
+    )?;
+    Ok(crate::continuation_optimizer::optimize_continuations(&lowered)?.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -821,6 +822,7 @@ mod tests {
             &mut output,
             ContinuationRunOptions {
                 progress_interval: Some(Duration::ZERO),
+                collect_transitions: false,
             },
             |_| {},
         )
