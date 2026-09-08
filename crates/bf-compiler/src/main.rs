@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn main() -> ExitCode {
     match main_result() {
@@ -29,6 +29,8 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut enable_2c = true;
     let mut ir_metrics_output = None;
     let mut collect_ir_transitions = true;
+    let mut ir_phase_config = None;
+    let mut ir_artifact_id = None;
     let mut cir_input = None;
     let mut ir_progress_interval = Duration::from_secs(10);
     let mut source_paths = Vec::new();
@@ -60,6 +62,10 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             collect_ir_transitions = true;
         } else if argument == "--no-ir-transitions" {
             collect_ir_transitions = false;
+        } else if argument == "--ir-phase-config" {
+            ir_phase_config = Some(arguments.next().ok_or("--ir-phase-config requires PATH")?);
+        } else if argument == "--ir-artifact-id" {
+            ir_artifact_id = Some(arguments.next().ok_or("--ir-artifact-id requires ID")?);
         } else if argument == "--cir-input" {
             cir_input = Some(arguments.next().ok_or("--cir-input requires PATH or -")?);
         } else if argument == "--ir-progress-interval" {
@@ -74,7 +80,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     }
     if source_paths.is_empty() && cir_input.is_none() {
         return Err(format!(
-            "usage: {} [--run-ir] [--ir-metrics PATH] [--no-ir-transitions] [--enable-2c|--disable-2c] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--ir-metrics PATH] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
+            "usage: {} [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
             executable.to_string_lossy(),
             executable.to_string_lossy()
         )
@@ -85,6 +91,15 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     }
     if ir_metrics_output.is_some() && !run_ir {
         return Err("--ir-metrics requires --run-ir".into());
+    }
+    if ir_phase_config.is_some() != ir_artifact_id.is_some() {
+        return Err("--ir-phase-config and --ir-artifact-id must be provided together".into());
+    }
+    if ir_phase_config.is_some() && !run_ir {
+        return Err("--ir-phase-config requires --run-ir".into());
+    }
+    if ir_phase_config.is_some() && ir_metrics_output.is_none() {
+        return Err("--ir-phase-config requires --ir-metrics".into());
     }
     if profile_granularity.is_some() && profile_map_output.is_none() && !embed_profile {
         return Err(
@@ -177,6 +192,17 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             memory_metrics(),
         );
         if run_ir {
+            let phase_config = ir_phase_config
+                .as_deref()
+                .map(|path| {
+                    load_phase_config(
+                        path,
+                        "cir",
+                        ir_artifact_id.as_deref().expect("validated artifact ID"),
+                        &program,
+                    )
+                })
+                .transpose()?;
             run_ir_program(
                 &program,
                 optimization_stats,
@@ -184,6 +210,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
                 ir_metrics_output.as_deref(),
                 ir_progress_interval,
                 collect_ir_transitions,
+                phase_config.as_ref(),
             )?;
             return Ok(());
         }
@@ -251,6 +278,17 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             memory_metrics(),
         );
 
+        let phase_config = ir_phase_config
+            .as_deref()
+            .map(|path| {
+                load_phase_config(
+                    path,
+                    "source",
+                    ir_artifact_id.as_deref().expect("validated artifact ID"),
+                    &program,
+                )
+            })
+            .transpose()?;
         run_ir_program(
             &program,
             optimization_stats,
@@ -258,6 +296,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             ir_metrics_output.as_deref(),
             ir_progress_interval,
             collect_ir_transitions,
+            phase_config.as_ref(),
         )?;
         return Ok(());
     }
@@ -310,6 +349,11 @@ fn compile_profiled(
     }
 }
 
+struct LoadedPhaseConfig {
+    raw: Value,
+    runtime: bf_compiler::ContinuationPhaseConfig,
+}
+
 fn run_ir_program(
     program: &bf_compiler::ContinuationProgram,
     optimization_stats: bf_compiler::ContinuationOptimizationStats,
@@ -317,6 +361,7 @@ fn run_ir_program(
     metrics_path: Option<&std::ffi::OsStr>,
     progress_interval: Duration,
     collect_transitions: bool,
+    phase_config: Option<&LoadedPhaseConfig>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -331,6 +376,7 @@ fn run_ir_program(
         bf_compiler::ContinuationRunOptions {
             progress_interval: Some(progress_interval),
             collect_transitions,
+            phase_config: phase_config.map(|config| config.runtime.clone()),
         },
         |progress| {
             eprintln!(
@@ -394,14 +440,150 @@ fn run_ir_program(
         );
     }
     if let Some(path) = metrics_path {
-        write_ir_metrics(path, source_kind, program, optimization_stats, &stats)?;
+        write_ir_metrics(
+            path,
+            source_kind,
+            phase_config.map(|config| &config.raw),
+            phase_config.map(|config| config.runtime.artifact_id.as_str()),
+            program,
+            optimization_stats,
+            &stats,
+        )?;
     }
     Ok(())
+}
+
+fn load_phase_config(
+    path: &std::ffi::OsStr,
+    source_kind: &str,
+    artifact_id: &std::ffi::OsStr,
+    program: &bf_compiler::ContinuationProgram,
+) -> Result<LoadedPhaseConfig, Box<dyn std::error::Error>> {
+    let raw: Value = serde_json::from_str(
+        &fs::read_to_string(Path::new(path))
+            .map_err(|error| format!("failed to read phase config: {error}"))?,
+    )?;
+    let object = raw
+        .as_object()
+        .ok_or("phase config root must be a JSON object")?;
+    if object.get("format").and_then(Value::as_str) != Some("bfc-ir-phase-config-v1") {
+        return Err("phase config format must be bfc-ir-phase-config-v1".into());
+    }
+    let artifact = object
+        .get("artifact")
+        .and_then(Value::as_object)
+        .ok_or("phase config requires artifact object")?;
+    let configured_kind = artifact
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or("phase config artifact.kind must be a string")?;
+    if configured_kind != source_kind {
+        return Err(format!(
+            "phase config artifact kind {configured_kind:?} does not match {source_kind:?}"
+        )
+        .into());
+    }
+    let configured_id = artifact
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("phase config artifact.id must be a string")?;
+    let artifact_id = artifact_id
+        .to_str()
+        .ok_or("--ir-artifact-id must be UTF-8")?;
+    if configured_id != artifact_id {
+        return Err(format!(
+            "phase config artifact id {configured_id:?} does not match --ir-artifact-id"
+        )
+        .into());
+    }
+    let chunk_cells = object
+        .get("chunk_cells")
+        .and_then(Value::as_array)
+        .ok_or("phase config requires chunk_cells array")?
+        .iter()
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or("phase config chunk_cells must contain integers")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut expected_chunks = chunk_cells.clone();
+    expected_chunks.sort_unstable();
+    expected_chunks.dedup();
+    if expected_chunks != [8, 16] {
+        return Err("phase config chunk_cells must contain exactly 8 and 16".into());
+    }
+    let phase_entries = object
+        .get("phases")
+        .and_then(Value::as_array)
+        .ok_or("phase config requires phases array")?;
+    if phase_entries.is_empty() {
+        return Err("phase config phases array must not be empty".into());
+    }
+    let mut boundaries = Vec::with_capacity(phase_entries.len());
+    for entry in phase_entries {
+        let entry = entry
+            .as_object()
+            .ok_or("phase config phase entry must be an object")?;
+        let phase = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("phase config phase.name must be a string")?;
+        let function_id = if source_kind == "source" {
+            if entry.get("function_id").is_some() {
+                return Err("source phase entries must use function_name".into());
+            }
+            let function_name = entry
+                .get("function_name")
+                .and_then(Value::as_str)
+                .ok_or("source phase entry requires function_name")?;
+            let mut matches = program
+                .functions()
+                .iter()
+                .filter(|function| function.name() == Some(function_name));
+            let function = matches
+                .next()
+                .ok_or_else(|| format!("unknown source phase function {function_name:?}"))?;
+            if matches.next().is_some() {
+                return Err(
+                    format!("source phase function name {function_name:?} is ambiguous").into(),
+                );
+            }
+            function.id()
+        } else {
+            if entry.get("function_name").is_some() {
+                return Err("CIR phase entries must use function_id".into());
+            }
+            let function_id = entry
+                .get("function_id")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or("CIR phase entry requires integer function_id")?;
+            let function = program
+                .function(bf_compiler::FunctionId::new(function_id))
+                .ok_or_else(|| format!("unknown CIR phase function {function_id}"))?;
+            function.id()
+        };
+        boundaries.push(bf_compiler::ContinuationPhaseBoundary {
+            phase: phase.to_owned(),
+            function: function_id,
+        });
+    }
+    let runtime = bf_compiler::ContinuationPhaseConfig {
+        artifact_kind: source_kind.to_owned(),
+        artifact_id: artifact_id.to_owned(),
+        boundaries,
+        chunk_cells,
+    };
+    Ok(LoadedPhaseConfig { raw, runtime })
 }
 
 fn write_ir_metrics(
     path: &std::ffi::OsStr,
     source_kind: &str,
+    phase_config: Option<&Value>,
+    artifact_id: Option<&str>,
     program: &bf_compiler::ContinuationProgram,
     optimization: bf_compiler::ContinuationOptimizationStats,
     run: &bf_compiler::ContinuationRunStats,
@@ -491,8 +673,19 @@ fn write_ir_metrics(
         Err(error) => json!({"ok": false, "error": error}),
     };
     let report = json!({
-        "format": "bfc-continuation-ir-metrics-v1",
+        "format": if phase_config.is_some() {
+            "bfc-continuation-ir-metrics-v2"
+        } else {
+            "bfc-continuation-ir-metrics-v1"
+        },
         "source_kind": source_kind,
+        "artifact_identity": artifact_id,
+        "phase_config": phase_config,
+        "measurement_options": {
+            "transition_collection": run.transitions_collected(),
+            "phase_portal_collection": phase_config.is_some(),
+            "phase_chunk_cells": phase_config.and_then(|config| config.get("chunk_cells")),
+        },
         "functions": functions,
         "continuations": continuation_rows,
         "optimization": {
@@ -528,6 +721,7 @@ fn write_ir_metrics(
         },
         "transitions": transitions,
         "terminals": terminals,
+        "phase_metrics": run.phase_metrics_json(program),
         "accounting": accounting,
     });
     fs::write(Path::new(path), serde_json::to_vec_pretty(&report)?)?;

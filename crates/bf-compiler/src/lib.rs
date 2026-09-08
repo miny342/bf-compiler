@@ -56,8 +56,9 @@ pub use continuation_optimizer::{
     optimize_continuations_with_options,
 };
 pub use continuation_vm::{
-    ContinuationRunOptions, ContinuationRunProgress, ContinuationRunStats,
-    ContinuationTerminatorKind, ContinuationVmError, run_continuations_with_io,
+    ContinuationPhaseBoundary, ContinuationPhaseConfig, ContinuationRunOptions,
+    ContinuationRunProgress, ContinuationRunStats, ContinuationTerminatorKind, ContinuationVmError,
+    run_continuations_with_io,
 };
 pub use frame_layout::{
     AbiConfig, AbiField, DEFAULT_CHUNK_CELLS, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,

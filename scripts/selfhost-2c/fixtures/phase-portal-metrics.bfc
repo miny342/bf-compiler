@@ -1,0 +1,21 @@
+cell[4] shared;
+
+cell[4] recurse(cell depth, cell[4] value) {
+    value[depth] = depth + 10;
+    shared = value;
+    output(shared[depth]);
+    output(shared[depth]);
+    if (depth == 0) {
+        return value;
+    }
+    return recurse(depth - 1, value);
+}
+
+void main() {
+    cell[4] local;
+    local[0] = 1;
+    local[1] = 2;
+    cell[4] result = recurse(2, local);
+    output(result[0]);
+    output(shared[0]);
+}

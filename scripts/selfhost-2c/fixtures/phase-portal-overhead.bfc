@@ -1,0 +1,18 @@
+cell[4] shared;
+
+void main() {
+    cell[4] value;
+    cell index = input();
+    cell outer = 16;
+    while (outer != 0) {
+        cell inner = 255;
+        while (inner != 0) {
+            value[0] = inner;
+            shared = value;
+            output(shared[index]);
+            output(shared[index]);
+            inner -= 1;
+        }
+        outer -= 1;
+    }
+}

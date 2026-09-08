@@ -6,6 +6,7 @@ use bf_compiler::{
     SelfhostCirContinuation, SelfhostCirFunction, SelfhostCirInstruction, SelfhostCirProgram,
     SelfhostCirReturnType, SelfhostCirTerminator,
 };
+use serde_json::Value;
 
 fn run_bfc(root: &Path, arguments: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bfc"))
@@ -154,6 +155,169 @@ fn ir_metrics_rejects_source_and_cir_input_collisions_without_overwriting() {
             .contains("bfc-continuation-ir-metrics-v1")
     );
     assert_eq!(fs::read(&cir).unwrap(), cir_before);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../tmp/ir-metrics-phase-portal-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("input.bfc"),
+        include_str!("../../../scripts/selfhost-2c/fixtures/phase-portal-metrics.bfc"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("phase-config.json"),
+        include_str!("../../../scripts/selfhost-2c/fixtures/phase-portal-metrics-source.json"),
+    )
+    .unwrap();
+
+    let result = run_bfc(
+        &root,
+        &[
+            "--run-ir",
+            "--ir-metrics",
+            "metrics.json",
+            "--ir-phase-config",
+            "phase-config.json",
+            "--ir-artifact-id",
+            "fixture-source",
+            "--ir-progress-interval",
+            "86400s",
+            "input.bfc",
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout.len(), 8);
+
+    let report: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("metrics.json")).unwrap()).unwrap();
+    assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
+    assert_eq!(report["artifact_identity"], "fixture-source");
+    assert_eq!(report["phase_config"]["artifact"]["kind"], "source");
+    assert_eq!(report["accounting"]["ok"], true);
+    assert!(report["run"]["aggregate_loads"].as_u64().unwrap() > 0);
+    assert!(report["run"]["aggregate_stores"].as_u64().unwrap() > 0);
+    assert_eq!(
+        report["phase_metrics"]["portal"]["total_requests"],
+        report["run"]["array_loads"].as_u64().unwrap()
+            + report["run"]["array_stores"].as_u64().unwrap()
+            + report["run"]["aggregate_loads"].as_u64().unwrap()
+            + report["run"]["aggregate_stores"].as_u64().unwrap()
+    );
+
+    let phase_metrics = &report["phase_metrics"];
+    assert!(
+        phase_metrics["phase_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| phase == "unknown")
+    );
+    assert!(
+        phase_metrics["phase_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| phase == "recursive")
+    );
+    let requests = phase_metrics["portal"]["requests"].as_array().unwrap();
+    assert!(!requests.is_empty());
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["function_name"].is_string())
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request["region"]["kind"] == "global")
+    );
+    let recursive_frame_activations = requests
+        .iter()
+        .filter(|request| request["phase"] == "recursive" && request["region"]["kind"] == "frame")
+        .filter_map(|request| request["region"]["activation_id"].as_u64())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(recursive_frame_activations.len() >= 2);
+    assert!(
+        phase_metrics["portal"]["by_phase"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| {
+                phase["start_chunk_revisits"]["8"]["requests"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > 0
+            })
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cir_phase_metrics_require_and_preserve_explicit_function_ids() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../tmp/ir-metrics-cir-phase-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("input.cir"), cir_fixture()).unwrap();
+    fs::write(
+        root.join("phase-config.json"),
+        include_str!("../../../scripts/selfhost-2c/fixtures/phase-portal-metrics-cir.json"),
+    )
+    .unwrap();
+
+    let result = run_bfc(
+        &root,
+        &[
+            "--cir-input",
+            "input.cir",
+            "--run-ir",
+            "--ir-metrics",
+            "metrics.json",
+            "--ir-phase-config",
+            "phase-config.json",
+            "--ir-artifact-id",
+            "fixture-cir",
+            "--ir-progress-interval",
+            "86400s",
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"A");
+    let report: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("metrics.json")).unwrap()).unwrap();
+    assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
+    assert_eq!(report["source_kind"], "cir");
+    assert_eq!(report["phase_config"]["artifact"]["id"], "fixture-cir");
+    assert_eq!(
+        report["phase_metrics"]["phase_boundaries"][0]["function_name"],
+        Value::Null
+    );
+    assert!(
+        report["phase_metrics"]["continuations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["phase"] == "cir_main")
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

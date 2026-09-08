@@ -18,13 +18,21 @@
   end-to-end・full selfhost改善は未確認。3入力・source/CIR両経路の10ペア比較は完了。
 - IR遷移収集overheadは専用benchmarkで約25.7%。BF側の性能比較には混ぜない。
 - arena算術化は試作後に撤回。局所if/whileのFrameInstruction構造化は未実装。
-- 実験1は部分完了。phase別集計、portalアクセス列、BF hidden dispatch eventは未実装。
-  実験3〜5も未着手。
+- 実験1のphase別集計・portal要求集計を完了。source/CIRのidentity-bound設定、
+  phase/transition/terminal、region/offset/連続性、D=8/D=16開始chunk再訪を
+  オプトインJSONへ保存し、3入力の直接IR runner測定まで記録した。
+- CIRは関数名を保持しないため、source名を流用せず固定CIRの明示function IDで集計した。
+  BF hidden dispatch eventは未実装。実験3〜5も未着手。
 
-## 次の作業：実験1のphase・portal集計
+## 次の作業（完了）：実験1のphase・portal集計
 
 新規セッションは`gpt-5.6-luna`を使用する。本節の実装・検証・小規模計測・記録までを
-今回の完了範囲とする。次の最適化そのものや長時間full selfhost実行は開始しない。
+今回の完了範囲とした。次の最適化そのものや長時間full selfhost実行は開始していない。
+
+2026-09-09に、開始commit `98932d2` から専用branchで本節を完了した。計測コード、
+回帰テスト、設定fixture、再実行script、3入力のsource/CIR集計、追加計測overheadを
+commit対象へまとめ、実測値と制約は`SELFHOST_OPTIMIZATION_EXPERIMENTS_EVALUATION.md`
+へ追記した。
 
 ### 作業条件
 

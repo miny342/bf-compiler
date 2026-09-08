@@ -189,3 +189,96 @@ python3 scripts/selfhost-2c/write_manifest.py \
 source生成は`bfc --unlimited-tape --profile-map-output MAP --profile-granularity continuation stage2-compiler.bfc > ARTIFACT`、CIR生成は`bfc-baseline --run-ir stage2-cir-compiler.bfc < stage2-compiler.bfc > stage2-compiler.cir`、CIR backendは`bfc --cir-input stage2-compiler.cir --unlimited-tape --profile-map-output MAP --profile-granularity continuation > ARTIFACT`である。時間測定は各artifact/inputにwarm-upを1回置き、`bf-interpreter --unlimited-tape --no-progress --stats --timings ARTIFACT < INPUT`をAB/BA交互10ペアで`/usr/bin/time -v`に包んだ。
 
 今回のレビュー修正で、評価文書と再実行scriptを追跡対象へ移した。scriptは`/home/a/git/bfcompiler/scripts/selfhost-2c/`にあり、artifact生成、baseline checkout、固定CIR生成、source/CIR計測、IR metrics、overhead、arena集計、profile、manifestを順に再現できる。各scriptは新しいrun rootを要求し、既存のruns.tsv・metrics・profileを既定では上書きしない。巨大BF/map、build、生ログはcommitせず、実行時の出力は指定した`./tmp`配下へ置く。既存の`tmp/next-2c-reeval/`に保存した元測定値は保持し、今回のprocess wall区間の転記だけを訂正した。
+
+## 2026-09-09: 実験1 phase・portal集計
+
+開始commit `98932d2` から専用branch `experiment/phase-portal-metrics` を作り、計画冒頭の
+phase/portal集計を実装・検証・小規模測定した。2c、arena、PC配置、portal ABI、frame
+allocationの意味は変更せず、phase/portal集計は`--ir-phase-config`と
+`--ir-artifact-id`を両方指定したときだけ有効になる。既存の`--ir-metrics`は設定なしでは
+v1のままで、source/CIRの入力・出力衝突検証も維持した。
+
+### 実装と検証
+
+- `ContinuationPhaseConfig`はartifact kind/id、phase境界、D=8/D=16のchunk幅を保持する。
+  sourceは保存済みfunction名、CIRは固定CIRで確認した明示function IDを使う。今回のCIR
+  設定は`lexer=16, parser=113, macro_expansion=127, semantic=161,
+  lowering=192, codegen=241`で、CIRのfunction名は捏造せず`null`として出力した。
+- phaseはcall/returnのframe stackで復帰し、再帰activationを区別する。未知の範囲は
+  `unknown`へ一度だけ帰属し、terminalと境界をまたぐ遷移の規則、portalのlogical offset、
+  frame/global/outbox region identity、隣接要求・offset差・開始chunk再訪の定義をJSONへ保存した。
+- ArrayLoad/StoreとAggregateLoad/Storeについて、要求元continuation/function、phase、region、
+  operation、offset、cell数を集計する。portal要求合計は既存の4種類のload/store counterと一致し、
+  phase continuation合計、およびphase transition+terminal合計も全体counterと一致した。
+- 小fixtureでphase境界からの復帰、再帰、abort、global/frame領域、load/store、8/16 cell、
+  offset境界、連続要求をテストした。`cargo test --workspace`は全テスト成功、追加のCLI
+  3 testsとVM phase testsも成功した。
+
+実行時の生成物・build・ログはすべて`tmp/phase-portal-metrics-20260909/`に保存した。
+production source identityは`9fdab34bc55be1329256fb93c360d8bfb7ce756e4888ce8d9eb972ac731838e6`、
+固定CIRは145,210 bytes、SHA-256は
+`c7ff5b09e53714b4e9a2278ee4aee36c8fc88d868f49138c5c1a632fcdb5c2bb`である。
+
+### 直接IR runnerの3入力測定
+
+同じ固定production compiler source/CIRを`hello`、`stage5_functions`、`stage8_aggregates`
+へ直接実行し、source/CIRを別artifactとして6件測定した。全件v2、accounting成功、phase/portal
+集計の整合性成功。3入力の出力SHA-256はsource/CIR間で一致し、それぞれ
+`acb48860c1ae3a117e0bee07af290638de1e4a7006794e43152670bfa90875ff`、
+`c49f795f133d8f4ba2a02d7d316e175ee0e08d7e8dc6439d46b86fc1a19567f8`、
+`59ace01f0ba73410072f2f0d80846a774be7061ab16e3cce093568e1041b26da`だった。
+
+| 経路/input | executed continuation | portal要求 | 最大portal phase（要求、同一region隣接率） | D=8 / D=16開始chunk再訪率 |
+|---|---:|---:|---|---:|
+| source/hello | 64,284 | 1,372 | parser (516, 0.850) | 0.938 / 0.969 |
+| source/stage5_functions | 532,821 | 10,138 | lowering (3,794, 1.000) | 0.902 / 0.949 |
+| source/stage8_aggregates | 826,243 | 15,907 | parser (5,749, 0.858) | 0.950 / 0.972 |
+| CIR/hello | 52,690 | 1,392 | parser (516, 0.850) | 0.938 / 0.969 |
+| CIR/stage5_functions | 435,945 | 10,206 | lowering (3,794, 1.000) | 0.902 / 0.949 |
+| CIR/stage8_aggregates | 681,695 | 16,097 | parser (5,771, 0.863) | 0.950 / 0.972 |
+
+sourceの上位phase/functionは、helloでは`semantic/arena_advance` 12,796、
+`parser/arena_advance` 11,954、stage5では`lowering/arena_advance` 117,417、
+stage8では`semantic/arena_advance` 177,023だった。CIRでは名前を付けず、対応する上位IDは
+それぞれsemantic/parser/loweringのfunction ID 49（helloは9,702/9,204/7,657、
+stage5は69,393/58,662/89,977、stage8は134,073/114,302/115,442）として記録した。
+portal regionはほぼglobalに集中し、frameはstage8のparserでsource 44、CIR 66要求だけだった。
+source/CIRの実行回数差はartifactのContinuation構造差によるもので、性能比やBF側の費用へ
+換算していない。
+
+### 追加計測overhead
+
+小fixtureで1 warm-up、AB/BA交互10ペアを高分解能`bfc-ir phase=execute elapsed_ns`で測定した。
+phase OFFでも既存のtransition収集はON、phase ONだけが新しいphase/portal集計を行う。
+通常counterと出力は全ペアで一致し、phase ONのportal要求はAggregateLoad 8,160件と一致した。
+出力SHA-256は`eb7af1084ad1a396a607af7291ae5bf1318048a75dc5a7992857e8c2afa3e597`だった。
+
+| 条件 | execute中央値 |
+|---|---:|
+| phase/portal OFF | 1,165,687 ns |
+| phase/portal ON | 2,620,598 ns |
+| 差分 | +1,454,911 ns (+124.81%) |
+| paired bootstrap 95% CI | +1,410,273.5〜+1,573,858.5 ns |
+
+これはIR計測追加の費用であり、BF実行性能の比較値ではない。既存transition収集の費用は
+含んだままなので、従来のtransition OFF/ON測定（約25.7%）とも混同しない。
+
+### 判断と残課題
+
+実測ではportal要求の同一region隣接率が0.850〜1.000、開始chunk再訪率がD=8で
+0.902〜0.950、D=16で0.938〜0.972と高く、まずはportal連続処理を次に試す根拠がある。
+同時に`arena_advance`のphase実行数も大きく、局所構造化の候補は残る。ただしこれはIRの
+要求・継続回数であり、BF hidden portalのdispatch/navigation回数や時間改善率ではない。
+したがって、次の最適化ではportal連続処理を先に小fixtureで検証し、局所構造化を別軸で
+比較するのが妥当である。CIRのsource function名対応、BF hidden dispatch event、巨大BFの
+再生成、長時間full selfhost、実験3〜5は今回の範囲外で未実施である。
+
+再実行は次のコマンドで行える。既存結果を上書きしないため、新しいrun rootを指定する。
+
+```sh
+scripts/selfhost-2c/build_artifacts.sh ./tmp/phase-portal-RUN /home/a/git/bfcompiler
+scripts/selfhost-2c/run_ir_phase_portal.sh ./tmp/phase-portal-RUN /home/a/git/bfcompiler
+python3 scripts/selfhost-2c/summarize_phase_portal.py ./tmp/phase-portal-RUN
+scripts/selfhost-2c/run_phase_portal_overhead.sh ./tmp/phase-portal-RUN /home/a/git/bfcompiler
+python3 scripts/selfhost-2c/summarize_phase_portal_overhead.py ./tmp/phase-portal-RUN
+```

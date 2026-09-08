@@ -835,6 +835,7 @@ mod tests {
             ContinuationRunOptions {
                 progress_interval: Some(Duration::ZERO),
                 collect_transitions: false,
+                ..ContinuationRunOptions::default()
             },
             |_| {},
         )

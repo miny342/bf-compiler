@@ -75,6 +75,8 @@ bash "$repo_root/scripts/selfhost-2c/make_arena_micro.sh" \
     "$run_root/baseline-checkout" "$run_root/source/arena_micro.bfc"
 cp "$repo_root/scripts/selfhost-2c/fixtures/ir-overhead.bfc" \
     "$run_root/source/ir-overhead.bfc"
+cp "$repo_root/scripts/selfhost-2c/fixtures/phase-portal-overhead.bfc" \
+    "$run_root/source/phase-portal-overhead.bfc"
 
 mkdir -p "$run_root/artifacts/arena"
 "$baseline_bfc" --run-ir "$run_root/source/stage2-cir-compiler.bfc" \
