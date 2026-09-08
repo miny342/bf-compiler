@@ -10,6 +10,9 @@ use crate::continuation_ir::{
     FrameTransferTarget, FunctionDescriptor, FunctionId, GlobalDescriptor, GlobalId, LogicalOffset,
     ParameterLocation, Terminator, ValueOperand, ValueType,
 };
+use crate::continuation_optimizer::{
+    ContinuationOptimizationOptions, ContinuationOptimizationStats,
+};
 use crate::selfhost_cir::{
     SelfhostCirArrayOp, SelfhostCirBinaryOp, SelfhostCirContinuation, SelfhostCirGlobalOp,
     SelfhostCirInstruction, SelfhostCirProgram, SelfhostCirReturnType, SelfhostCirStorage,
@@ -64,6 +67,15 @@ impl From<ContinuationIrError> for SelfhostCirLoweringError {
 pub fn lower_selfhost_cir(
     source: &SelfhostCirProgram,
 ) -> Result<ContinuationProgram, SelfhostCirLoweringError> {
+    lower_selfhost_cir_with_options(source, ContinuationOptimizationOptions::default())
+        .map(|(program, _)| program)
+}
+
+/// Convert flat selfhost CIR with explicitly selected continuation optimizations.
+pub fn lower_selfhost_cir_with_options(
+    source: &SelfhostCirProgram,
+    options: ContinuationOptimizationOptions,
+) -> Result<(ContinuationProgram, ContinuationOptimizationStats), SelfhostCirLoweringError> {
     source
         .validate()
         .map_err(|error| SelfhostCirLoweringError::Invalid(error.to_string()))?;
@@ -137,7 +149,7 @@ pub fn lower_selfhost_cir(
         functions,
         continuations,
     )?;
-    Ok(crate::continuation_optimizer::optimize_continuations(&lowered)?.0)
+    Ok(crate::continuation_optimizer::optimize_continuations_with_options(&lowered, options)?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

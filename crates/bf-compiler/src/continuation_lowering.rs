@@ -10,6 +10,9 @@ use crate::continuation_ir::{
     GlobalDescriptor, GlobalId as ContinuationGlobalId, LogicalOffset, ParameterLocation,
     Terminator, ValueOperand, ValueType,
 };
+use crate::continuation_optimizer::{
+    ContinuationOptimizationOptions, ContinuationOptimizationStats,
+};
 use crate::hir::{
     self, ArrayIndex, AssignmentOperator, BinaryOperator, HirExpression, HirExpressionKind,
     HirFunction, HirPlace, HirProgram, HirStatement, HirStatementKind, Projection, TypeId,
@@ -71,12 +74,20 @@ struct LoweredFunction {
     entry: ContinuationId,
 }
 
+#[cfg(test)]
 pub(crate) fn lower_hir(
     program: &HirProgram,
 ) -> Result<ContinuationProgram, ContinuationLoweringError> {
-    let lowered = lower_hir_with_slot_reuse(program, true)?;
-    crate::continuation_optimizer::optimize_continuations(&lowered)
+    lower_hir_with_options(program, ContinuationOptimizationOptions::default())
         .map(|(optimized, _)| optimized)
+}
+
+pub(crate) fn lower_hir_with_options(
+    program: &HirProgram,
+    options: ContinuationOptimizationOptions,
+) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationLoweringError> {
+    let lowered = lower_hir_with_slot_reuse(program, true)?;
+    crate::continuation_optimizer::optimize_continuations_with_options(&lowered, options)
         .map_err(Into::into)
 }
 
@@ -138,7 +149,9 @@ fn lower_hir_with_slot_reuse(
             &mut ids,
         )?;
         lowerer.lower()?;
-        let descriptor = lowerer.descriptor(lowered.entry)?;
+        let descriptor = lowerer
+            .descriptor(lowered.entry)?
+            .with_name(function.name.clone());
         let (descriptor, allocated) = if reuse_slots {
             crate::frame_allocation::allocate(descriptor, lowerer.continuations)
         } else {

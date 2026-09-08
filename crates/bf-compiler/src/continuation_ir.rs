@@ -318,6 +318,7 @@ pub struct FunctionDescriptor {
     outbox_cells: usize,
     return_type: ValueType,
     entry: ContinuationId,
+    name: Option<String>,
 }
 
 impl FunctionDescriptor {
@@ -342,6 +343,7 @@ impl FunctionDescriptor {
             outbox_cells: 0,
             return_type,
             entry,
+            name: None,
         }
     }
 
@@ -374,6 +376,7 @@ impl FunctionDescriptor {
             outbox_cells,
             return_type,
             entry,
+            name: None,
         }
     }
 
@@ -447,8 +450,19 @@ impl FunctionDescriptor {
         self.entry
     }
 
+    /// Source function name when the program came from the Rust source frontend.
+    /// Imported CIR programs intentionally leave this unset.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     pub(crate) fn with_entry(mut self, entry: ContinuationId) -> Self {
         self.entry = entry;
+        self
+    }
+
+    pub(crate) fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 }

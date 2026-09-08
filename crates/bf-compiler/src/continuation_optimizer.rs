@@ -13,6 +13,21 @@ use crate::continuation_ir::{
     FunctionId, Terminator,
 };
 
+/// Continuation CFG transformations applied after lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContinuationOptimizationOptions {
+    /// Inline a nonempty same-function Branch successor into a Goto source.
+    pub inline_branch_successors: bool,
+}
+
+impl Default for ContinuationOptimizationOptions {
+    fn default() -> Self {
+        Self {
+            inline_branch_successors: true,
+        }
+    }
+}
+
 /// Static measurements from the continuation CFG simplification pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ContinuationOptimizationStats {
@@ -21,6 +36,8 @@ pub struct ContinuationOptimizationStats {
     pub empty_gotos_before: usize,
     pub empty_gotos_after: usize,
     pub empty_gotos_threaded: usize,
+    pub branch_successors_inlined: usize,
+    pub frame_instructions_duplicated: usize,
     pub unreachable_continuations_removed: usize,
     pub successor_references_rewritten: usize,
     pub function_entries_rewritten: usize,
@@ -38,6 +55,14 @@ impl ContinuationOptimizationStats {
 /// blocks.  Surviving IDs are compacted in original order when needed.
 pub fn optimize_continuations(
     program: &ContinuationProgram,
+) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationIrError> {
+    optimize_continuations_with_options(program, ContinuationOptimizationOptions::default())
+}
+
+/// Apply continuation CFG simplification with explicitly selected experiments.
+pub fn optimize_continuations_with_options(
+    program: &ContinuationProgram,
+    options: ContinuationOptimizationOptions,
 ) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationIrError> {
     let continuations = program.continuations();
     let by_id = continuations
@@ -95,6 +120,13 @@ pub fn optimize_continuations(
         })
         .collect::<Vec<FunctionDescriptor>>();
 
+    let (rewritten, branch_successors_inlined, frame_instructions_duplicated) =
+        if options.inline_branch_successors {
+            inline_branch_successors(rewritten)
+        } else {
+            (rewritten, 0, 0)
+        };
+
     let function_entries = functions
         .iter()
         .map(|function| (function.id(), function.entry()))
@@ -131,6 +163,8 @@ pub fn optimize_continuations(
             .filter(|(source, target)| **source != **target)
             .filter(|(source, _)| empty_targets.contains_key(source))
             .count(),
+        branch_successors_inlined,
+        frame_instructions_duplicated,
         unreachable_continuations_removed: rewritten_count - optimized_continuations.len(),
         successor_references_rewritten,
         function_entries_rewritten,
@@ -144,6 +178,47 @@ pub fn optimize_continuations(
         optimized_continuations,
     )?;
     Ok((optimized, stats))
+}
+
+/// Inline a nonempty branch successor into a same-function `Goto` edge.  This
+/// folds the condition block into loop back-edges and straight-line entries,
+/// avoiding a dispatcher visit while keeping the original branch block for
+/// other predecessors.
+fn inline_branch_successors(continuations: Vec<Continuation>) -> (Vec<Continuation>, usize, usize) {
+    let by_id = continuations
+        .iter()
+        .map(|continuation| (continuation.id(), continuation.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut inlined = 0;
+    let mut duplicated = 0;
+    let rewritten = continuations
+        .into_iter()
+        .map(|continuation| {
+            let Terminator::Goto { target } = continuation.terminator() else {
+                return continuation;
+            };
+            let Some(successor) = by_id.get(target) else {
+                return continuation;
+            };
+            if successor.function() != continuation.function()
+                || successor.body().is_empty()
+                || !matches!(successor.terminator(), Terminator::Branch { .. })
+            {
+                return continuation;
+            }
+            let mut body = continuation.body().to_vec();
+            body.extend_from_slice(successor.body());
+            inlined += 1;
+            duplicated += successor.body().len();
+            Continuation::new(
+                continuation.id(),
+                continuation.function(),
+                body,
+                successor.terminator().clone(),
+            )
+        })
+        .collect();
+    (rewritten, inlined, duplicated)
 }
 
 fn compact_ids(functions: &mut [FunctionDescriptor], continuations: &mut [Continuation]) -> bool {
@@ -388,5 +463,74 @@ mod tests {
             &Terminator::Goto { target: id(1) }
         );
         assert_eq!(stats.empty_gotos_after, 1);
+    }
+
+    #[test]
+    fn branch_successor_inlining_is_opt_in_and_counts_duplication() {
+        let function = FunctionDescriptor::new(
+            FunctionId::new(0),
+            Vec::<FrameSlot>::new(),
+            2,
+            ValueType::Void,
+            id(1),
+        );
+        let program = ContinuationProgram::new(
+            FunctionId::new(0),
+            vec![function],
+            vec![
+                Continuation::new(
+                    id(1),
+                    FunctionId::new(0),
+                    vec![FrameInstruction::Set {
+                        dst: Address::Frame(FrameSlot::new(0)),
+                        value: 1,
+                    }],
+                    Terminator::Goto { target: id(2) },
+                ),
+                Continuation::new(
+                    id(2),
+                    FunctionId::new(0),
+                    vec![FrameInstruction::Set {
+                        dst: Address::Frame(FrameSlot::new(0)),
+                        value: 2,
+                    }],
+                    Terminator::Branch {
+                        condition: Address::Frame(FrameSlot::new(0)),
+                        then_target: id(3),
+                        else_target: id(4),
+                    },
+                ),
+                Continuation::new(id(3), FunctionId::new(0), Vec::new(), Terminator::Halt),
+                Continuation::new(id(4), FunctionId::new(0), Vec::new(), Terminator::Halt),
+            ],
+        )
+        .unwrap();
+
+        let (_, default_stats) = optimize_continuations(&program).unwrap();
+        assert_eq!(default_stats.branch_successors_inlined, 1);
+
+        let (_, disabled_stats) = optimize_continuations_with_options(
+            &program,
+            ContinuationOptimizationOptions {
+                inline_branch_successors: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(disabled_stats.branch_successors_inlined, 0);
+
+        let (optimized, stats) = optimize_continuations_with_options(
+            &program,
+            ContinuationOptimizationOptions {
+                inline_branch_successors: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.branch_successors_inlined, 1);
+        assert_eq!(stats.frame_instructions_duplicated, 1);
+        assert_eq!(optimized.continuations()[0].body().len(), 2);
+        assert!(matches!(
+            optimized.continuations()[0].terminator(),
+            Terminator::Branch { .. }
+        ));
     }
 }

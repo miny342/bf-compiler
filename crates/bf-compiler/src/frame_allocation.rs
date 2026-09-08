@@ -220,6 +220,10 @@ pub(crate) fn allocate(
         function.return_type(),
         function.entry(),
     );
+    let descriptor = match function.name() {
+        Some(name) => descriptor.with_name(name),
+        None => descriptor,
+    };
     let continuations = continuations
         .into_iter()
         .map(|continuation| {

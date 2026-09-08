@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::continuation_lowering::lower_hir;
+use crate::continuation_optimizer::{
+    ContinuationOptimizationOptions, ContinuationOptimizationStats,
+};
 use crate::lexer::{Token, TokenKind};
 use crate::{AbiCodegenError, ContinuationProgram, compile_continuations, lexer, parser, semantic};
 
@@ -158,8 +160,17 @@ impl From<AbiCodegenError> for SourceCompileError {
 
 /// Parse and lower BFC source to validated continuation IR.
 pub fn lower_source(source: &str) -> Result<ContinuationProgram, FrontendError> {
+    lower_source_with_options(source, ContinuationOptimizationOptions::default())
+        .map(|(program, _)| program)
+}
+
+/// Parse and lower source with explicitly selected continuation optimizations.
+pub fn lower_source_with_options(
+    source: &str,
+    options: ContinuationOptimizationOptions,
+) -> Result<(ContinuationProgram, ContinuationOptimizationStats), FrontendError> {
     let tokens = lexer::lex(source)?;
-    lower_tokens(tokens)
+    lower_tokens(tokens, options)
 }
 
 /// Parse and lower several named BFC files as one compilation unit.
@@ -167,6 +178,15 @@ pub fn lower_source(source: &str) -> Result<ContinuationProgram, FrontendError> 
 /// Files are processed in the given order. Lexical constructs cannot cross a
 /// file boundary, while top-level declarations are shared by the whole unit.
 pub fn lower_sources(sources: &[SourceFile<'_>]) -> Result<ContinuationProgram, FrontendError> {
+    lower_sources_with_options(sources, ContinuationOptimizationOptions::default())
+        .map(|(program, _)| program)
+}
+
+/// Parse and lower named sources with explicitly selected continuation optimizations.
+pub fn lower_sources_with_options(
+    sources: &[SourceFile<'_>],
+    options: ContinuationOptimizationOptions,
+) -> Result<(ContinuationProgram, ContinuationOptimizationStats), FrontendError> {
     let mut tokens = Vec::new();
     let mut ranges = Vec::with_capacity(sources.len());
     let mut next_offset = 0usize;
@@ -199,15 +219,19 @@ pub fn lower_sources(sources: &[SourceFile<'_>]) -> Result<ContinuationProgram, 
         offset: eof_offset,
     });
 
-    lower_tokens(tokens).map_err(|error| annotate_error(error, &ranges))
+    lower_tokens(tokens, options).map_err(|error| annotate_error(error, &ranges))
 }
 
-fn lower_tokens(tokens: Vec<Token>) -> Result<ContinuationProgram, FrontendError> {
+fn lower_tokens(
+    tokens: Vec<Token>,
+    options: ContinuationOptimizationOptions,
+) -> Result<(ContinuationProgram, ContinuationOptimizationStats), FrontendError> {
     let ast = parser::parse(tokens)?;
     let ast = crate::macro_expansion::expand(ast)?;
     let mut hir = semantic::analyze(&ast)?;
     crate::hir_inline::inline_single_use_functions(&mut hir);
-    lower_hir(&hir).map_err(|error| FrontendError::without_offset(error.to_string()))
+    crate::continuation_lowering::lower_hir_with_options(&hir, options)
+        .map_err(|error| FrontendError::without_offset(error.to_string()))
 }
 
 fn annotate_error(error: FrontendError, ranges: &[(SourceFile<'_>, usize)]) -> FrontendError {

@@ -28,6 +28,53 @@ pub struct ContinuationRunOptions {
     pub collect_transitions: bool,
 }
 
+/// Terminator categories used for dynamic continuation transition metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ContinuationTerminatorKind {
+    Goto,
+    Branch,
+    Call,
+    Return,
+    ArrayLoad,
+    ArrayStore,
+    AggregateLoad,
+    AggregateStore,
+    Halt,
+    Abort,
+}
+
+impl ContinuationTerminatorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Goto => "goto",
+            Self::Branch => "branch",
+            Self::Call => "call",
+            Self::Return => "return",
+            Self::ArrayLoad => "array_load",
+            Self::ArrayStore => "array_store",
+            Self::AggregateLoad => "aggregate_load",
+            Self::AggregateStore => "aggregate_store",
+            Self::Halt => "halt",
+            Self::Abort => "abort",
+        }
+    }
+
+    pub const fn from_terminator(terminator: &Terminator) -> Self {
+        match terminator {
+            Terminator::Goto { .. } => Self::Goto,
+            Terminator::Branch { .. } => Self::Branch,
+            Terminator::Call { .. } => Self::Call,
+            Terminator::Return { .. } => Self::Return,
+            Terminator::ArrayLoad { .. } => Self::ArrayLoad,
+            Terminator::ArrayStore { .. } => Self::ArrayStore,
+            Terminator::AggregateLoad { .. } => Self::AggregateLoad,
+            Terminator::AggregateStore { .. } => Self::AggregateStore,
+            Terminator::Halt => Self::Halt,
+            Terminator::Abort => Self::Abort,
+        }
+    }
+}
+
 /// Cumulative counters from a direct continuation-IR run.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ContinuationRunStats {
@@ -48,6 +95,8 @@ pub struct ContinuationRunStats {
     pub final_function_stack: Vec<FunctionId>,
     continuation_counts: Vec<u64>,
     transition_counts: HashMap<(ContinuationId, ContinuationId), u64>,
+    terminal_counts: HashMap<(ContinuationId, ContinuationTerminatorKind), u64>,
+    transitions_collected: bool,
 }
 
 impl ContinuationRunStats {
@@ -78,6 +127,86 @@ impl ContinuationRunStats {
         transitions.sort_unstable_by_key(|&(from, to, count)| (std::cmp::Reverse(count), from, to));
         transitions.truncate(limit);
         transitions
+    }
+
+    /// Return all collected dynamic transitions in deterministic order.
+    pub fn transition_counts(&self) -> Vec<(ContinuationId, ContinuationId, u64)> {
+        let mut transitions = self
+            .transition_counts
+            .iter()
+            .map(|(&(from, to), &count)| (from, to, count))
+            .collect::<Vec<_>>();
+        transitions.sort_unstable_by_key(|&(from, to, _)| (from, to));
+        transitions
+    }
+
+    /// Return all collected terminal events in deterministic order.
+    pub fn terminal_counts(&self) -> Vec<(ContinuationId, ContinuationTerminatorKind, u64)> {
+        let mut terminals = self
+            .terminal_counts
+            .iter()
+            .map(|(&(from, kind), &count)| (from, kind, count))
+            .collect::<Vec<_>>();
+        terminals.sort_unstable_by_key(|&(from, kind, _)| (from, kind));
+        terminals
+    }
+
+    pub fn continuation_count(&self, id: ContinuationId) -> u64 {
+        self.continuation_counts
+            .get(usize::from(id.get()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub const fn transitions_collected(&self) -> bool {
+        self.transitions_collected
+    }
+
+    /// Check dynamic in/out accounting for every continuation in the program.
+    pub fn validate_transition_accounting(
+        &self,
+        program: &ContinuationProgram,
+    ) -> Result<(), String> {
+        if !self.transitions_collected {
+            return Err("transition collection was disabled".into());
+        }
+        let mut incoming = HashMap::<ContinuationId, u64>::new();
+        let mut outgoing = HashMap::<ContinuationId, u64>::new();
+        for (from, to, count) in self.transition_counts() {
+            *incoming.entry(to).or_default() += count;
+            *outgoing.entry(from).or_default() += count;
+        }
+        for (from, _, count) in self.terminal_counts() {
+            *outgoing.entry(from).or_default() += count;
+        }
+        for continuation in program.continuations() {
+            let id = continuation.id();
+            let executed = self.continuation_count(id);
+            let expected_incoming = incoming.get(&id).copied().unwrap_or(0)
+                + u64::from(
+                    program
+                        .function(program.main())
+                        .is_some_and(|function| function.entry() == id),
+                );
+            let actual_outgoing = outgoing.get(&id).copied().unwrap_or(0);
+            if expected_incoming != executed || actual_outgoing != executed {
+                return Err(format!(
+                    "continuation {} accounting mismatch: executions={} incoming={} outgoing={}",
+                    id.get(),
+                    executed,
+                    expected_incoming,
+                    actual_outgoing
+                ));
+            }
+        }
+        let transition_total = self.transition_counts.values().copied().sum::<u64>();
+        if transition_total + 1 != self.executed_continuations {
+            return Err(format!(
+                "transition total mismatch: transitions={} executions={}",
+                transition_total, self.executed_continuations
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -240,6 +369,8 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
                 max_call_depth: 1,
                 continuation_counts: vec![0; continuations_len],
                 transition_counts: HashMap::new(),
+                terminal_counts: HashMap::new(),
+                transitions_collected: options.collect_transitions,
                 ..ContinuationRunStats::default()
             },
             started,
@@ -492,10 +623,16 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
             }
             Terminator::Abort => {
                 self.stats.aborted = true;
+                if self.collect_transitions {
+                    self.record_terminal(from, ContinuationTerminatorKind::Abort);
+                }
                 self.record_termination();
                 return Ok(false);
             }
             Terminator::Halt => {
+                if self.collect_transitions {
+                    self.record_terminal(from, ContinuationTerminatorKind::Halt);
+                }
                 self.record_termination();
                 return Ok(false);
             }
@@ -513,6 +650,10 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
     fn record_termination(&mut self) {
         self.stats.final_continuation = Some(self.current);
         self.stats.final_function_stack = self.stack.iter().map(|frame| frame.function).collect();
+    }
+
+    fn record_terminal(&mut self, from: ContinuationId, kind: ContinuationTerminatorKind) {
+        *self.stats.terminal_counts.entry((from, kind)).or_default() += 1;
     }
 
     fn read_address(&self, address: Address) -> Result<u8, ContinuationVmError> {
@@ -853,7 +994,10 @@ mod tests {
             &program,
             &mut input,
             &mut output,
-            ContinuationRunOptions::default(),
+            ContinuationRunOptions {
+                collect_transitions: true,
+                ..ContinuationRunOptions::default()
+            },
             |_| {},
         )
         .unwrap();
@@ -869,6 +1013,14 @@ mod tests {
         assert_eq!(stats.returns, 3);
         assert!(stats.executed_frame_instructions > 0);
         assert!(stats.max_call_depth >= 2);
+        let program = crate::lower_source(source).unwrap();
+        stats.validate_transition_accounting(&program).unwrap();
+        assert!(
+            stats
+                .terminal_counts()
+                .iter()
+                .any(|(_, kind, _)| *kind == ContinuationTerminatorKind::Halt)
+        );
     }
 
     #[test]
@@ -878,6 +1030,8 @@ mod tests {
         assert_eq!(output, b"OK");
         assert!(stats.aggregate_loads > 0);
         assert_eq!(stats.calls, 1);
+        let program = crate::lower_source(source).unwrap();
+        stats.validate_transition_accounting(&program).unwrap();
     }
 
     #[test]
@@ -908,5 +1062,91 @@ mod tests {
         .unwrap();
         assert_eq!(output, [2, 1]);
         assert!(!stats.hottest_transitions(10).is_empty());
+    }
+
+    #[test]
+    fn transition_collection_does_not_change_execution_counters() {
+        let source = "void main() { cell value = input(); while (value != 0) { output(value); value = value - 1; } }";
+        let program = crate::lower_source(source).unwrap();
+        let run = |collect_transitions| {
+            let mut input = &[2][..];
+            let mut output = Vec::new();
+            let stats = run_continuations_with_io(
+                &program,
+                &mut input,
+                &mut output,
+                ContinuationRunOptions {
+                    progress_interval: None,
+                    collect_transitions,
+                },
+                |_| {},
+            )
+            .unwrap();
+            (output, stats)
+        };
+        let (output_on, stats_on) = run(true);
+        let (output_off, stats_off) = run(false);
+        assert_eq!(output_on, output_off);
+        assert_eq!(
+            stats_on.executed_continuations,
+            stats_off.executed_continuations
+        );
+        assert_eq!(
+            stats_on.executed_frame_instructions,
+            stats_off.executed_frame_instructions
+        );
+        assert_eq!(stats_on.loop_iterations, stats_off.loop_iterations);
+        assert_eq!(stats_on.calls, stats_off.calls);
+        assert_eq!(stats_on.returns, stats_off.returns);
+        assert!(stats_on.transitions_collected());
+        assert!(!stats_off.transitions_collected());
+        assert!(!stats_on.transition_counts().is_empty());
+        stats_on.validate_transition_accounting(&program).unwrap();
+        assert!(stats_off.validate_transition_accounting(&program).is_err());
+    }
+
+    #[test]
+    fn transition_metrics_record_portals_and_abort_terminals() {
+        let source = "struct Pair { cell a; cell b; } Pair choose(Pair[2] values, cell index) { return values[index]; } void main() { Pair[2] values; values[1].a = 'O'; values[1].b = 'K'; Pair result = choose(values, input()); output(result.a); output(result.b); }";
+        let program = crate::lower_source(source).unwrap();
+        let mut input = &[1][..];
+        let mut output = Vec::new();
+        let stats = run_continuations_with_io(
+            &program,
+            &mut input,
+            &mut output,
+            ContinuationRunOptions {
+                progress_interval: None,
+                collect_transitions: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(output, b"OK");
+        assert!(stats.aggregate_loads > 0);
+        stats.validate_transition_accounting(&program).unwrap();
+
+        let program = crate::lower_source("void main() { abort(); }").unwrap();
+        let mut input = &[][..];
+        let mut output = Vec::new();
+        let stats = run_continuations_with_io(
+            &program,
+            &mut input,
+            &mut output,
+            ContinuationRunOptions {
+                progress_interval: None,
+                collect_transitions: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(stats.aborted);
+        assert!(
+            stats
+                .terminal_counts()
+                .iter()
+                .any(|(_, kind, _)| *kind == ContinuationTerminatorKind::Abort)
+        );
+        stats.validate_transition_accounting(&program).unwrap();
     }
 }

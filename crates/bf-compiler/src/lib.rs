@@ -51,10 +51,13 @@ pub use continuation_ir::{
     GlobalDescriptor, GlobalId, LogicalOffset, ParameterLocation, Terminator, ValueOperand,
     ValueType,
 };
-pub use continuation_optimizer::{ContinuationOptimizationStats, optimize_continuations};
+pub use continuation_optimizer::{
+    ContinuationOptimizationOptions, ContinuationOptimizationStats, optimize_continuations,
+    optimize_continuations_with_options,
+};
 pub use continuation_vm::{
-    ContinuationRunOptions, ContinuationRunProgress, ContinuationRunStats, ContinuationVmError,
-    run_continuations_with_io,
+    ContinuationRunOptions, ContinuationRunProgress, ContinuationRunStats,
+    ContinuationTerminatorKind, ContinuationVmError, run_continuations_with_io,
 };
 pub use frame_layout::{
     AbiConfig, AbiField, DEFAULT_CHUNK_CELLS, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,
@@ -62,7 +65,7 @@ pub use frame_layout::{
 };
 pub use frontend::{
     FrontendError, SourceCompileError, SourceFile, SourceLocation, compile_source, compile_sources,
-    lower_source, lower_sources,
+    lower_source, lower_source_with_options, lower_sources, lower_sources_with_options,
 };
 pub use ir::{CellId, Instruction, IrError, Program, TransferTarget};
 pub use selfhost_cir::{
@@ -71,5 +74,7 @@ pub use selfhost_cir::{
     SelfhostCirParameter, SelfhostCirProgram, SelfhostCirReturnType, SelfhostCirStorage,
     SelfhostCirTerminator, SelfhostCirUnaryOp,
 };
-pub use selfhost_cir_adapter::{SelfhostCirLoweringError, lower_selfhost_cir};
+pub use selfhost_cir_adapter::{
+    SelfhostCirLoweringError, lower_selfhost_cir, lower_selfhost_cir_with_options,
+};
 pub use static_layout::{StaticLayout, StaticLayoutError};
