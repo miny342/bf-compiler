@@ -100,37 +100,15 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--run-ir cannot be combined with Brainfuck code-generation options".into());
     }
     if let Some(output) = &profile_map_output {
-        if output == "-" {
-            return Err("--profile-map-output cannot be stdout".into());
-        }
-        if source_paths.iter().any(|source| source == output) {
-            return Err("--profile-map-output cannot overwrite an input source".into());
-        }
-        if cir_input
-            .as_ref()
-            .is_some_and(|input| input != "-" && input == output)
-        {
-            return Err("--profile-map-output cannot overwrite the CIR input".into());
-        }
-        let output_path = Path::new(output);
-        if output_path.exists() {
-            let output_path = fs::canonicalize(output_path)?;
-            if source_paths
-                .iter()
-                .filter_map(|source| fs::canonicalize(source).ok())
-                .any(|source| source == output_path)
-            {
-                return Err("--profile-map-output cannot overwrite an input source".into());
-            }
-            if cir_input
-                .as_ref()
-                .filter(|input| *input != "-")
-                .and_then(|input| fs::canonicalize(input).ok())
-                .is_some_and(|input| input == output_path)
-            {
-                return Err("--profile-map-output cannot overwrite the CIR input".into());
-            }
-        }
+        validate_output_path(
+            "--profile-map-output",
+            output,
+            &source_paths,
+            cir_input.as_ref(),
+        )?;
+    }
+    if let Some(output) = &ir_metrics_output {
+        validate_output_path("--ir-metrics", output, &source_paths, cir_input.as_ref())?;
     }
 
     let profile_granularity = profile_granularity.or_else(|| {
@@ -371,9 +349,11 @@ fn run_ir_program(
         },
     )?;
     output.flush()?;
+    let execute_elapsed = execute_started.elapsed();
     eprintln!(
-        "bfc-ir phase=execute status=finished elapsed_ms={} continuations={} frame_instructions={} loop_iterations={} calls={} returns={} array_loads={} array_stores={} aggregate_loads={} aggregate_stores={} input_operations={} output_bytes={} max_call_depth={} aborted={} final_continuation={} function_stack={} {}",
-        execute_started.elapsed().as_millis(),
+        "bfc-ir phase=execute status=finished elapsed_ns={} elapsed_ms={} continuations={} frame_instructions={} loop_iterations={} calls={} returns={} array_loads={} array_stores={} aggregate_loads={} aggregate_stores={} input_operations={} output_bytes={} max_call_depth={} aborted={} final_continuation={} function_stack={} {}",
+        execute_elapsed.as_nanos(),
+        execute_elapsed.as_millis(),
         stats.executed_continuations,
         stats.executed_frame_instructions,
         stats.loop_iterations,
@@ -552,6 +532,51 @@ fn write_ir_metrics(
     });
     fs::write(Path::new(path), serde_json::to_vec_pretty(&report)?)?;
     Ok(())
+}
+
+fn validate_output_path(
+    option: &str,
+    output: &std::ffi::OsStr,
+    source_paths: &[std::ffi::OsString],
+    cir_input: Option<&std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if output == "-" {
+        return Err(format!("{option} cannot be stdout").into());
+    }
+    let output_path = Path::new(output);
+    for source in source_paths {
+        if equivalent_path(output_path, Path::new(source))? {
+            return Err(format!("{option} cannot overwrite an input source").into());
+        }
+    }
+    if let Some(input) = cir_input.filter(|input| input.as_os_str() != "-") {
+        if equivalent_path(output_path, Path::new(input))? {
+            return Err(format!("{option} cannot overwrite the CIR input").into());
+        }
+    }
+    Ok(())
+}
+
+fn equivalent_path(left: &Path, right: &Path) -> io::Result<bool> {
+    if left == right {
+        return Ok(true);
+    }
+    Ok(canonicalize_for_comparison(left)? == canonicalize_for_comparison(right)?)
+}
+
+fn canonicalize_for_comparison(path: &Path) -> io::Result<std::path::PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let file_name = path.file_name().ok_or(error)?;
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            Ok(fs::canonicalize(parent)?.join(file_name))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn terminator_successors(terminator: &bf_compiler::Terminator) -> Vec<bf_compiler::ContinuationId> {

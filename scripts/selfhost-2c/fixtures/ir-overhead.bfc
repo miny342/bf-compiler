@@ -1,0 +1,19 @@
+// A small IR benchmark whose inner loops make the execution interval
+// measurable without making lowering or the process itself part of the loop.
+void main() {
+    cell outer = input();
+    cell middle;
+    cell inner;
+    while (outer != 0) {
+        middle = 0xff;
+        while (middle != 0) {
+            inner = 0xff;
+            while (inner != 0) {
+                inner -= 1;
+            }
+            middle -= 1;
+        }
+        outer -= 1;
+    }
+    output(outer);
+}
