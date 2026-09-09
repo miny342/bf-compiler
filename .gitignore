@@ -1,1 +1,5 @@
 /target/
+/logs/
+/new_logs/
+/fizzbuzz_logs/
+/tmp/
