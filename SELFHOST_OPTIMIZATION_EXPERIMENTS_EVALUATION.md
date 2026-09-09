@@ -282,3 +282,106 @@ python3 scripts/selfhost-2c/summarize_phase_portal.py ./tmp/phase-portal-RUN
 scripts/selfhost-2c/run_phase_portal_overhead.sh ./tmp/phase-portal-RUN /home/a/git/bfcompiler
 python3 scripts/selfhost-2c/summarize_phase_portal_overhead.py ./tmp/phase-portal-RUN
 ```
+
+## 2026-09-09: 5bdb6deレビュー修正と再評価
+
+`5bdb6de`を親とする専用branch `experiment/phase-portal-review-fixes`で、計画冒頭の4項目を
+修正した。既存の基本counter・6件の出力・IR overheadの意味は維持し、巨大BF再生成、
+長時間selfhost、新しい最適化、ABI変更は行っていない。最終run rootは
+`tmp/review-5bdb6de-fixes-20260909-final2/`である。
+
+### 1. phase設定入力の上書き防止
+
+IR実行前の`validate_output_path`へ`--ir-phase-config`を追加した。`--ir-metrics`と
+`--profile-map-output`の出力について、設定入力との同一性を相対path、絶対path、symlinkの
+canonical pathで判定し、拒否時は設定内容を保持する。正常な別出力先は従来どおり書き込む。
+CLI regression testで3表記の拒否と内容保持、正常なmetrics生成を確認した。
+
+### 2. phase境界でのportal隣接切断
+
+要求列の直前要求phase比較だけに頼らず、continuation dispatch時の有効phaseラベルを保持し、
+ラベルが変わった時点で前portal要求を破棄するようにした。これにより、Aで要求、Bへcall、
+Bではportalなし、returnしてAで要求という列は、Aの前半要求との隣接だけを数え、Bを跨ぐ
+要求とは数えない。unknownを含む異なるラベルも切断する。同じphaseラベルの再帰call/return
+はphase境界ではないが、frame region identityはactivationごとに異なるため、同一region隣接
+とは別に判定する。この規則をJSON definitionsへ保存した。
+
+phase boundary fixtureでは、実際に残る`main` callerを`phase_a`、`phase_b` calleeとして、
+phase_aのportal要求3件のうち同一phase内の1隣接だけが計上されることを確認した。offset差にも
+calleeを跨ぐ差分は現れない。既存の再帰fixtureで同一phaseのactivation区別も維持した。
+
+### 3. 実入力・optionsとのartifact identity照合
+
+`artifact_identity`を実際に読み込んだbyte列から計算する`bfc-ir-artifact-v1`へ変更した。
+sourceは順序どおりのraw-byte frameと明示的file countで境界を含め、CIRは読み込んだraw-byte
+frameを使う。どちらも`inline_branch_successors`（2c）をidentityへ含める。sourceのpath文字列
+自体はhashへ含めないため、同じordered input unitを別run rootへコピーしてもidentityは変わらない。
+metrics JSONの`artifact_identity_definition`と`measurement_options.lowering_options`に定義・値を
+保存し、phase configにもidentity versionとlowering optionsを保存する。
+
+CLIの`--ir-artifact-id`は実入力identityと一致しなければ拒否し、phase configのID・kind・
+identity version・lowering optionsも実行条件と照合する。CIRはdecode前にbyte列identityを照合する
+ため、改変CIRを古いIDで実行できない。stdin CIRも読み込んだ同じbyte列で照合する。source/CIRの
+改変、古い設定、正しい設定、stdinをCLI testで確認した。
+
+`ir_artifact_identity.py`を共通計算scriptとして追加し、`run_ir_phase_portal.sh`とoverhead
+runnerはrootをabsolute化して設定生成と実行の入力定義を一致させる。固定production CIRの
+function ID対応はraw SHA-256 `c7ff5b09e53714b4e9a2278ee4aee36c8fc88d868f49138c5c1a632fcdb5c2bb`
+に限定した。未知CIR hashは`write_phase_configs.py`が拒否し、任意の新hashへ既存IDを流用しない。
+最終runのartifact identityはsourceが`6de41e970ee68ca24fbefbfa3db9fc788281323425b8a518e6ab2dc539ebe923`、
+CIRが`59815e7731534f255d84f4f7507ef2a0effea017d1c3b058a960151dfebc1b14`だった。
+
+### 4. chunk再訪率の意味の訂正
+
+`start_chunk_revisits`の`revisit_rate`は、同一phaseの履歴内で既に現れた
+`(region, start offset / D)`を再び見た要求の割合であり、直前要求との距離でも隣接率でもない。
+JSONにこの定義を明示し、評価文書では隣接率と分離した。したがって高い再訪率・同一region率
+だけから一括処理の安全性や性能改善を主張しない。call、return、I/O、store、alias、再帰、
+global/frame境界を越えたbatch安全性は未評価であり、今回の結論は「portal連続処理の候補を
+調べる根拠」に限定する。修正作業中に次の最適化は実装していない。
+
+### 固定source/CIR直接IR再評価
+
+最終コードで固定production compiler source/CIRを`hello`、`stage5_functions`、
+`stage8_aggregates`へ直接実行した。6件すべてphase/portal accountingに成功し、source/CIRの
+出力SHA-256は各入力で一致した。
+
+| 経路/input | executed continuation | portal要求 | 最大portal phase（要求、同一region隣接率） |
+|---|---:|---:|---|
+| source/hello | 64,284 | 1,372 | parser (516, 0.850) |
+| source/stage5_functions | 532,821 | 10,138 | lowering (3,794, 1.000) |
+| source/stage8_aggregates | 826,243 | 15,907 | parser (5,749, 0.863) |
+| CIR/hello | 52,690 | 1,392 | parser (516, 0.850) |
+| CIR/stage5_functions | 435,945 | 10,206 | lowering (3,794, 1.000) |
+| CIR/stage8_aggregates | 681,695 | 16,097 | parser (5,771, 0.868) |
+
+D=8/D=16の開始chunk履歴再訪率は、6件を通じてそれぞれ約`0.902〜0.950`、
+`0.938〜0.972`だった。これは上記隣接率とは別の履歴指標である。出力SHA-256は
+hello=`acb48860c1ae3a117e0bee07af290638de1e4a7006794e43152670bfa90875ff`、
+stage5=`c49f795f133d8f4ba2a02d7d316e175ee0e08d7e8dc6439d46b86fc1a19567f8`、
+stage8=`59ace01f0ba73410072f2f0d80846a774be7061ab16e3cce093568e1041b26da`である。
+
+### 修正後の計測overhead
+
+小fixtureでwarm-up 1回、AB/BA交互10ペアを`bfc-ir phase=execute elapsed_ns`で再測定した。
+OFF側も既存transition収集はONで、新phase/portal集計だけをON側で追加した。通常counterと
+出力は一致し、phase ONのAggregateLoad 8,160件がportal要求合計と一致した。
+
+| 条件 | execute中央値 |
+|---|---:|
+| phase/portal OFF | 1,328,843.5 ns |
+| phase/portal ON | 3,000,282 ns |
+| 差分 | +1,671,438.5 ns (+125.78%) |
+| paired bootstrap 95% CI | +1,580,512〜+1,774,935 ns |
+
+出力SHA-256は`eb7af1084ad1a396a607af7291ae5bf1318048a75dc5a7992857e8c2afa3e597`だった。
+これはIR計測追加の費用であり、BF性能値ではない。実行環境の揺れを含むため、前回の
+`+124.81%`との差を性能改善・退行とは解釈しない。
+
+### 検証・残課題
+
+`cargo test -p bf-compiler --test ir_metrics_cli`の4件、artifact identity SHA-256/順序・境界
+unit test、`cargo test --workspace`を実行する。修正はphase設定、集計境界、identity検証、評価の
+意味に限定し、既存ユーザー変更はcommitしない。BF hidden dispatch/navigation event、CIRの
+source function名対応、portalのalias/call/I/Oを跨ぐ安全なbatch判定、巨大BF・full selfhost、
+実験3〜5は未実施である。

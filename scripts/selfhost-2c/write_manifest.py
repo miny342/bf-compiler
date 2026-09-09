@@ -67,6 +67,8 @@ manifest = {
         "summarize": "python3 scripts/selfhost-2c/summarize_measurements.py RUN_ROOT",
         "ir_metrics": "scripts/selfhost-2c/run_ir_metrics.sh RUN_ROOT REPOSITORY_ROOT",
         "ir_phase_portal": "scripts/selfhost-2c/run_ir_phase_portal.sh RUN_ROOT REPOSITORY_ROOT",
+        "ir_artifact_identity": "python3 scripts/selfhost-2c/ir_artifact_identity.py source|cir PATH...",
+        "write_phase_configs": "python3 scripts/selfhost-2c/write_phase_configs.py RUN_ROOT",
         "ir_phase_portal_summary": "python3 scripts/selfhost-2c/summarize_phase_portal.py RUN_ROOT",
         "ir_overhead": "scripts/selfhost-2c/run_ir_overhead.sh RUN_ROOT REPOSITORY_ROOT",
         "phase_portal_overhead": "scripts/selfhost-2c/run_phase_portal_overhead.sh RUN_ROOT REPOSITORY_ROOT",

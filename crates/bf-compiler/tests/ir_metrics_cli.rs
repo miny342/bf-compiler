@@ -1,12 +1,13 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use bf_compiler::{
     SelfhostCirContinuation, SelfhostCirFunction, SelfhostCirInstruction, SelfhostCirProgram,
     SelfhostCirReturnType, SelfhostCirTerminator,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn run_bfc(root: &Path, arguments: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bfc"))
@@ -14,6 +15,19 @@ fn run_bfc(root: &Path, arguments: &[&str]) -> std::process::Output {
         .args(arguments)
         .output()
         .expect("failed to execute bfc")
+}
+
+fn run_bfc_with_stdin(root: &Path, arguments: &[&str], input: &[u8]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bfc"))
+        .current_dir(root)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to execute bfc");
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
 }
 
 fn test_root() -> PathBuf {
@@ -85,6 +99,66 @@ fn ir_metrics_rejects_source_and_cir_input_collisions_without_overwriting() {
     );
     assert!(!rejected_absolute.status.success());
     assert_eq!(fs::read(&source).unwrap(), source_before);
+
+    let phase_config = root.join("phase-config-input.json");
+    fs::write(&phase_config, b"config sentinel").unwrap();
+    let phase_config_before = fs::read(&phase_config).unwrap();
+    let rejected_config_relative = run_bfc(
+        &root,
+        &[
+            "--run-ir",
+            "--ir-metrics",
+            "phase-config-input.json",
+            "--ir-phase-config",
+            "phase-config-input.json",
+            "--ir-artifact-id",
+            "stale",
+            "input.bfc",
+        ],
+    );
+    assert!(!rejected_config_relative.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected_config_relative.stderr)
+            .contains("--ir-metrics cannot overwrite the phase config input")
+    );
+    assert_eq!(fs::read(&phase_config).unwrap(), phase_config_before);
+
+    let phase_config_absolute = fs::canonicalize(&phase_config).unwrap();
+    let rejected_config_absolute = run_bfc(
+        &root,
+        &[
+            "--run-ir",
+            "--ir-metrics",
+            phase_config_absolute.to_str().unwrap(),
+            "--ir-phase-config",
+            "phase-config-input.json",
+            "--ir-artifact-id",
+            "stale",
+            "input.bfc",
+        ],
+    );
+    assert!(!rejected_config_absolute.status.success());
+    assert_eq!(fs::read(&phase_config).unwrap(), phase_config_before);
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&phase_config, root.join("phase-config-link.json")).unwrap();
+        let rejected_config_symlink = run_bfc(
+            &root,
+            &[
+                "--run-ir",
+                "--ir-metrics",
+                "phase-config-link.json",
+                "--ir-phase-config",
+                "phase-config-input.json",
+                "--ir-artifact-id",
+                "stale",
+                "input.bfc",
+            ],
+        );
+        assert!(!rejected_config_symlink.status.success());
+        assert_eq!(fs::read(&phase_config).unwrap(), phase_config_before);
+    }
 
     #[cfg(unix)]
     {
@@ -187,7 +261,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "fixture-source",
+            "344f0e38ac788601a4bcd84f2e66e5e33e323e6e4ae9ba3bd9f634f4743e08b3",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -203,7 +277,10 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
     let report: Value =
         serde_json::from_str(&fs::read_to_string(root.join("metrics.json")).unwrap()).unwrap();
     assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
-    assert_eq!(report["artifact_identity"], "fixture-source");
+    assert_eq!(
+        report["artifact_identity"],
+        "344f0e38ac788601a4bcd84f2e66e5e33e323e6e4ae9ba3bd9f634f4743e08b3"
+    );
     assert_eq!(report["phase_config"]["artifact"]["kind"], "source");
     assert_eq!(report["accounting"]["ok"], true);
     assert!(report["run"]["aggregate_loads"].as_u64().unwrap() > 0);
@@ -262,6 +339,33 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             })
     );
 
+    fs::OpenOptions::new()
+        .append(true)
+        .open(root.join("input.bfc"))
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let stale_source = run_bfc(
+        &root,
+        &[
+            "--run-ir",
+            "--ir-metrics",
+            "stale.json",
+            "--ir-phase-config",
+            "phase-config.json",
+            "--ir-artifact-id",
+            "344f0e38ac788601a4bcd84f2e66e5e33e323e6e4ae9ba3bd9f634f4743e08b3",
+            "--ir-progress-interval",
+            "86400s",
+            "input.bfc",
+        ],
+    );
+    assert!(!stale_source.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale_source.stderr)
+            .contains("does not match the actual artifact identity")
+    );
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -274,9 +378,30 @@ fn cir_phase_metrics_require_and_preserve_explicit_function_ids() {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("input.cir"), cir_fixture()).unwrap();
+    let identity_run = run_bfc(
+        &root,
+        &[
+            "--cir-input",
+            "input.cir",
+            "--run-ir",
+            "--ir-metrics",
+            "identity.json",
+            "--ir-progress-interval",
+            "86400s",
+        ],
+    );
+    assert!(identity_run.status.success());
+    let identity_report: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("identity.json")).unwrap()).unwrap();
+    let artifact_id = identity_report["artifact_identity"].as_str().unwrap();
+    let mut phase_config: Value = serde_json::from_str(include_str!(
+        "../../../scripts/selfhost-2c/fixtures/phase-portal-metrics-cir.json"
+    ))
+    .unwrap();
+    phase_config["artifact"]["id"] = Value::String(artifact_id.to_owned());
     fs::write(
         root.join("phase-config.json"),
-        include_str!("../../../scripts/selfhost-2c/fixtures/phase-portal-metrics-cir.json"),
+        serde_json::to_vec_pretty(&phase_config).unwrap(),
     )
     .unwrap();
 
@@ -291,7 +416,7 @@ fn cir_phase_metrics_require_and_preserve_explicit_function_ids() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "fixture-cir",
+            artifact_id,
             "--ir-progress-interval",
             "86400s",
         ],
@@ -306,7 +431,7 @@ fn cir_phase_metrics_require_and_preserve_explicit_function_ids() {
         serde_json::from_str(&fs::read_to_string(root.join("metrics.json")).unwrap()).unwrap();
     assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
     assert_eq!(report["source_kind"], "cir");
-    assert_eq!(report["phase_config"]["artifact"]["id"], "fixture-cir");
+    assert_eq!(report["phase_config"]["artifact"]["id"], artifact_id);
     assert_eq!(
         report["phase_metrics"]["phase_boundaries"][0]["function_name"],
         Value::Null
@@ -317,6 +442,148 @@ fn cir_phase_metrics_require_and_preserve_explicit_function_ids() {
             .unwrap()
             .iter()
             .any(|row| row["phase"] == "cir_main")
+    );
+
+    let mut wrong_options = phase_config.clone();
+    wrong_options["artifact"]["lowering_options"]["inline_branch_successors"] = Value::Bool(false);
+    fs::write(
+        root.join("wrong-options.json"),
+        serde_json::to_vec_pretty(&wrong_options).unwrap(),
+    )
+    .unwrap();
+    let wrong_options_result = run_bfc(
+        &root,
+        &[
+            "--cir-input",
+            "input.cir",
+            "--run-ir",
+            "--ir-metrics",
+            "wrong-options-metrics.json",
+            "--ir-phase-config",
+            "wrong-options.json",
+            "--ir-artifact-id",
+            artifact_id,
+            "--ir-progress-interval",
+            "86400s",
+        ],
+    );
+    assert!(!wrong_options_result.status.success());
+    assert!(
+        String::from_utf8_lossy(&wrong_options_result.stderr)
+            .contains("lowering_options do not match")
+    );
+
+    let stdin_result = run_bfc_with_stdin(
+        &root,
+        &[
+            "--cir-input",
+            "-",
+            "--run-ir",
+            "--ir-metrics",
+            "stdin-metrics.json",
+            "--ir-phase-config",
+            "phase-config.json",
+            "--ir-artifact-id",
+            artifact_id,
+            "--ir-progress-interval",
+            "86400s",
+        ],
+        &cir_fixture(),
+    );
+    assert!(stdin_result.status.success());
+    assert_eq!(stdin_result.stdout, b"A");
+
+    fs::write(root.join("input.cir"), [cir_fixture(), vec![0xff]].concat()).unwrap();
+    let stale_cir = run_bfc(
+        &root,
+        &[
+            "--cir-input",
+            "input.cir",
+            "--run-ir",
+            "--ir-metrics",
+            "stale.json",
+            "--ir-phase-config",
+            "phase-config.json",
+            "--ir-artifact-id",
+            artifact_id,
+            "--ir-progress-interval",
+            "86400s",
+        ],
+    );
+    assert!(!stale_cir.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale_cir.stderr)
+            .contains("does not match the actual artifact identity")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn phase_metrics_break_portal_adjacency_across_a_non_portal_phase() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../tmp/ir-metrics-phase-boundary-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("input.bfc"),
+        include_str!("../../../scripts/selfhost-2c/fixtures/phase-portal-phase-boundary.bfc"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("phase-config.json"),
+        include_str!(
+            "../../../scripts/selfhost-2c/fixtures/phase-portal-phase-boundary-source.json"
+        ),
+    )
+    .unwrap();
+
+    let result = run_bfc_with_stdin(
+        &root,
+        &[
+            "--run-ir",
+            "--ir-metrics",
+            "metrics.json",
+            "--ir-phase-config",
+            "phase-config.json",
+            "--ir-artifact-id",
+            "4bcd0b5850502e948925852a7da80105d29ef054ef284bd1f63bcbf7653c0135",
+            "--ir-progress-interval",
+            "86400s",
+            "input.bfc",
+        ],
+        &[0],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, &[0, 0, 0]);
+    let report: Value =
+        serde_json::from_str(&fs::read_to_string(root.join("metrics.json")).unwrap()).unwrap();
+    let phase_a = report["phase_metrics"]["portal"]["by_phase"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["phase"] == "phase_a")
+        .unwrap();
+    assert_eq!(phase_a["requests"], 3);
+    assert_eq!(phase_a["adjacent_pairs"], 1);
+    assert_eq!(phase_a["adjacent_same_region"], 1);
+    assert_eq!(phase_a["offset_delta_histogram"], json!({"0": 1}));
+    let definition = report["phase_metrics"]["portal"]["definitions"]["phase_change"]
+        .as_str()
+        .unwrap();
+    assert!(definition.contains("same phase label"));
+    assert!(
+        report["phase_metrics"]["phase_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| phase == "unknown")
     );
 
     fs::remove_dir_all(root).unwrap();

@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-experiment_root=${1:?experiment output directory}
-repo_root=${2:?repository root}
+experiment_root=$(cd "${1:?experiment output directory}" && pwd)
+repo_root=$(cd "${2:?repository root}" && pwd)
 out_root=$experiment_root/phase-portal-overhead
 bfc=$experiment_root/bin/bfc-candidate
 program=$experiment_root/source/phase-portal-overhead.bfc
 config=$experiment_root/source/phase-config-overhead.json
-artifact_id=$(sha256sum "$program" | awk '{print $1}')
 
 if [[ -e "$out_root" ]] && find "$out_root" -mindepth 1 -print -quit | grep -q .; then
     echo "refusing to overwrite phase/portal overhead results: $out_root" >&2
     exit 2
 fi
 mkdir -p "$out_root"
-python3 "$repo_root/scripts/selfhost-2c/write_overhead_phase_config.py" \
-    "$experiment_root" "$artifact_id"
+artifact_id=$(python3 "$repo_root/scripts/selfhost-2c/write_overhead_phase_config.py" \
+    "$experiment_root")
 
 printf 'variant\tpair\torder\tstarted\tended\tstatus\toutput\tlog\ttime\tmetrics\texecute_ns\n' \
     > "$out_root/runs.tsv"

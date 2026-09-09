@@ -23,8 +23,57 @@
   オプトインJSONへ保存し、3入力の直接IR runner測定まで記録した。
 - CIRは関数名を保持しないため、source名を流用せず固定CIRの明示function IDで集計した。
   BF hidden dispatch eventは未実装。実験3〜5も未着手。
+- 2026-09-09: `5bdb6de`のレビュー修正を完了。phase設定入力の衝突防止、phase遷移での
+  portal隣接切断、実入力・lowering optionsとのartifact identity照合、固定CIR mappingの
+  hash検証、chunk再訪率の意味の訂正を実装・再評価した。
 
-## 次の作業（完了）：実験1のphase・portal集計
+## 次の作業（完了）：5bdb6deのレビュー修正
+
+作業セッション`01a08208-197c-7350-a3ab-e8b9c0aae650`、model `gpt-5.6-luna`に依頼する。
+基本カウンタ・6件の出力・overhead中央値はレビューで整合を確認済みだった。
+以下の4項目を修正し、回帰テストと固定source/CIRの再評価まで完了した。
+
+1. **phase設定の上書き防止。** `--ir-metrics`と`--ir-phase-config`に同じファイルを
+   指定すると設定がmetrics JSONで上書きされる。IR実行前の出力先検証に設定入力も含め、
+   同一パス・相対/絶対表記・symlinkを拒否する。拒否時の内容保持と正常出力をCLIでテストする。
+2. **phase境界でportal隣接を切る。** 現在は直前portal要求のphaseとだけ比較するため、
+   Aで要求→Bへ移動（portalなし）→Aへ復帰→要求が同一phase内の隣接として数えられる。
+   有効phaseが変わった時点で前要求との隣接を切り、offset差にも反映する。
+   call/return・ネスト・unknownを含む回帰例を追加する。同じphaseの再帰についても定義を明記する。
+3. **実入力とartifact identityを照合。** 設定IDとCLI IDの一致だけでは不十分。
+   実際に読み込んだsource/CIRからidentityを計算して検証する。source複数ファイルは
+   順序と境界を含む再現可能な定義にし、stdin CIRも読込byte列で検証する。
+   ID対応に影響するloweringオプションも記録・検証する。
+   `write_phase_configs.py`の固定CIR function IDを任意の新しいhashへ付け直さない。
+   確認済みCIR hashに限定するか、根拠付き対応表を検証して生成し、未知CIRでは安全に拒否する。
+   改変source/CIR、古い設定、正しい設定の回帰テストを追加する。
+4. **評価の意味を訂正。** 開始chunk再訪率はphase全体の履歴内で既訪問だった割合であり、
+   直前要求との近さではない。隣接率と区別して記載する。
+   高い再訪率・同一region率だけで安全に一括処理できるとは言えず、call/I/O/alias等の
+   境界は未評価である。「portal連続処理の候補を調べる根拠」までに判断を限定する。
+   次の最適化をこの修正作業中に実装しない。
+
+レビューの再現fixtureと確認scriptは`tmp/review-5bdb6de.Tp2lua/`にある。
+再現でphase.jsonをmetricsへ置き換えているため、そのファイルは設定として再利用しない。
+修正に必要なfixtureは追跡対象のテストに追加する。
+
+修正後、`cargo test --workspace`、固定source/CIR×3入力の直接IR runner測定、
+新しい計測ON/OFFのoverheadをAB/BA 10ペアで再実行する。
+phase合計・portal合計・出力一致、実入力identity、設定IDの根拠を確認する。
+巨大BF再生成・長時間selfhost・新規最適化は不要。
+生ログは新しい`./tmp`専用directoryに保存し、既存結果は上書きしない。
+計画の進捗とEVALUATIONを更新し、訂正前後と制約を明示する。
+NEXT/FIX文書は作らない。AGENTS.mdに従いsubagentと`/tmp`は使わない。
+この計画追記は依頼元が加えた今回の作業指示として、修正コード・テスト・評価と一緒にcommitしてよい。
+その他の既存ユーザー変更は保持し、push/mergeはしない。
+完了したらcommit、各指摘への対応、テストと再測定の結果、残課題を同セッションに報告する。
+依頼元による監視・返答待ちは不要。
+
+2026-09-09完了。修正commitではこの節自体も作業指示の履歴として保持し、詳細な差分、
+再測定値、訂正後の判断、未計測の境界を`SELFHOST_OPTIMIZATION_EXPERIMENTS_EVALUATION.md`
+へ追記した。次の最適化はこの修正範囲に含めていない。
+
+## 前回の作業（実装済み・レビュー修正中）：実験1のphase・portal集計
 
 新規セッションは`gpt-5.6-luna`を使用する。本節の実装・検証・小規模計測・記録までを
 今回の完了範囲とした。次の最適化そのものや長時間full selfhost実行は開始していない。

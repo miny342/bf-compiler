@@ -2,7 +2,7 @@
   "format": "bfc-ir-phase-config-v1",
   "artifact": {
     "kind": "source",
-    "id": "344f0e38ac788601a4bcd84f2e66e5e33e323e6e4ae9ba3bd9f634f4743e08b3",
+    "id": "4bcd0b5850502e948925852a7da80105d29ef054ef284bd1f63bcbf7653c0135",
     "identity_version": "bfc-ir-artifact-v1",
     "lowering_options": {
       "inline_branch_successors": true
@@ -10,7 +10,7 @@
   },
   "chunk_cells": [8, 16],
   "phases": [
-    {"name": "main", "function_name": "main"},
-    {"name": "recursive", "function_name": "recurse"}
+    {"name": "phase_a", "function_name": "main"},
+    {"name": "phase_b", "function_name": "phase_b"}
   ]
 }

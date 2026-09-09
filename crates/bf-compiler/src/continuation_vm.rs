@@ -412,6 +412,7 @@ struct PhaseMetrics {
     portal_requests: HashMap<PortalRequestKey, PortalRequestAggregate>,
     portal_phases: Vec<PortalPhaseAggregate>,
     previous_portal: Option<PreviousPortalRequest>,
+    last_phase: Option<usize>,
 }
 
 impl PhaseMetrics {
@@ -473,6 +474,7 @@ impl PhaseMetrics {
             portal_requests: HashMap::new(),
             portal_phases,
             previous_portal: None,
+            last_phase: None,
         })
     }
 
@@ -481,6 +483,10 @@ impl PhaseMetrics {
     }
 
     fn record_continuation(&mut self, phase: usize, continuation: ContinuationId) {
+        if self.last_phase != Some(phase) {
+            self.previous_portal = None;
+            self.last_phase = Some(phase);
+        }
         *self
             .continuation_counts
             .entry((phase, continuation))
@@ -718,6 +724,7 @@ impl PhaseMetrics {
                                 "unique_start_chunks": unique,
                                 "revisits": revisits,
                                 "revisit_rate": if requests == 0 { 0.0 } else { revisits as f64 / requests as f64 },
+                                "revisit_definition": "Historical revisit: this (region, start offset / D) was seen earlier in this phase; it is not a predecessor-distance or adjacency metric.",
                             }),
                         )
                     })
@@ -764,6 +771,8 @@ impl PhaseMetrics {
                     "adjacent_same_region": "An adjacent pair in the portal request sequence with the same phase and region identity. Phase changes break adjacency.",
                     "offset_delta": "Offset of the current request minus the immediately preceding request when phase and region match.",
                     "start_chunk": "The logical request start offset divided by D; multi-cell payload accesses are not expanded into per-cell events.",
+                    "start_chunk_revisit": "A historical revisit of the same (region, start offset / D) within the phase; it is not evidence that requests are adjacent or safely batchable.",
+                    "phase_change": "A change in effective phase label at continuation dispatch clears portal adjacency. A nested call and return with the same phase label do not clear it; different labels, including unknown, do.",
                     "frame_region_identity": "Function ID plus activation ID plus frame aggregate ID; recursive activations are distinct.",
                     "unknown_phase": "Requests and continuation events without an active configured function activation are attributed to unknown.",
                     "terminal_attribution": "Halt and abort are attributed to the active phase of the terminating continuation; no successor transition is emitted.",

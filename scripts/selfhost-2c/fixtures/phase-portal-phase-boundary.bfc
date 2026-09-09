@@ -1,0 +1,16 @@
+cell[1] shared;
+
+void phase_a(cell index) {
+    output(shared[index]);
+    cell value = phase_b(shared[index]);
+    output(shared[index]);
+}
+
+cell phase_b(cell value) {
+    output(value);
+    return value;
+}
+
+void main() {
+    phase_a(input());
+}
