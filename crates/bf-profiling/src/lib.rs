@@ -6,6 +6,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub mod rle;
+
 /// The required marker in every version 1 profile-map artifact.
 pub const PROFILE_MAP_FORMAT: &str = "bfc-bf-profile-map";
 
@@ -109,6 +111,7 @@ pub struct ProfileMap {
 /// Errors while decoding or validating a profile map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProfileMapError {
+    InvalidEncoding(String),
     Json(String),
     UnsupportedFormat {
         found: String,
@@ -207,6 +210,7 @@ impl StdError for EmbeddedProfileError {}
 impl fmt::Display for ProfileMapError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidEncoding(message) => write!(f, "invalid BF encoding: {message}"),
             Self::Json(message) => write!(f, "invalid profile-map JSON: {message}"),
             Self::UnsupportedFormat { found } => {
                 write!(f, "unsupported profile-map format {found:?}")
@@ -303,7 +307,8 @@ impl ProfileMap {
                 found: self.version,
             });
         }
-        let actual = bf_identity(source);
+        let actual =
+            try_bf_identity(source).map_err(|e| ProfileMapError::InvalidEncoding(e.to_string()))?;
         if self.bf != actual {
             return Err(ProfileMapError::IdentityMismatch {
                 expected: self.bf,
@@ -424,26 +429,31 @@ impl ProfileMap {
     }
 }
 
-/// Calculates the profile identity while ignoring all non-Brainfuck bytes.
+/// Calculates the expanded BF identity, ignoring comments.
+/// Panics on malformed compressed input; use `try_bf_identity` for untrusted input.
 pub fn bf_identity(source: &[u8]) -> BfIdentity {
+    try_bf_identity(source).expect("valid BF encoding")
+}
+
+/// Fallible identity calculation for ordinary BF or header-bearing RLE BF.
+pub fn try_bf_identity(source: &[u8]) -> Result<BfIdentity, rle::RleError> {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
     let mut instruction_count = 0;
     let mut hash = OFFSET_BASIS;
-    for byte in source
-        .iter()
-        .copied()
-        .filter(|byte| is_bf_instruction(*byte))
-    {
-        instruction_count += 1;
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
+    for run in rle::Runs::new(source) {
+        let run = run?;
+        instruction_count += run.count as u64;
+        for _ in 0..run.count {
+            hash ^= u64::from(run.byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
     }
-    BfIdentity {
+    Ok(BfIdentity {
         instruction_count,
         fnv1a64: Fnv1a64(hash),
-    }
+    })
 }
 
 /// RFC 4648 base32 with padding. Its alphabet cannot contain BF commands.
@@ -524,7 +534,12 @@ pub fn embed_profile_markers(
 ) -> Result<String, EmbeddedProfileError> {
     map.validate_for_source(source.as_bytes())
         .map_err(EmbeddedProfileError::Map)?;
-    let mut output = String::from("@BFCDBG1;");
+    let compressed = rle::compressed(source.as_bytes());
+    let mut output = String::new();
+    if compressed {
+        output.push_str(rle::HEADER);
+    }
+    output.push_str("@BFCDBG1;");
     for site in &map.sites {
         let mut embedded_site = site.clone();
         embedded_site.source = None;
@@ -535,24 +550,43 @@ pub fn embed_profile_markers(
     output.push_str("@ENDDBG;");
     let mut ordinal = 0_u64;
     let mut range_index = 0_usize;
-    for byte in source.bytes() {
-        if matches!(byte, b'>' | b'<' | b'+' | b'-' | b'.' | b',' | b'[' | b']') {
+    let mut copied = if compressed { rle::HEADER.len() } else { 0 };
+    for run in rle::Runs::new(source.as_bytes()) {
+        let run = run.map_err(|_| EmbeddedProfileError::MalformedMarker)?;
+        output.push_str(&source[copied..run.offset]);
+        let mut remaining = run.count as u64;
+        while remaining > 0 {
             while map.ranges[range_index].end <= ordinal {
                 range_index += 1;
             }
             if ordinal == map.ranges[range_index].start {
                 output.push_str(&format!("@P{};", map.ranges[range_index].site.0));
             }
-            ordinal += 1;
+            let count = remaining.min(map.ranges[range_index].end - ordinal);
+            output.push(run.byte as char);
+            if compressed {
+                if count > 1 {
+                    output.push_str(&count.to_string());
+                }
+            } else {
+                output.extend(std::iter::repeat_n(run.byte as char, count as usize - 1));
+            }
+            ordinal += count;
+            remaining -= count;
         }
-        output.push(byte as char);
+        copied = run.end;
     }
+    output.push_str(&source[copied..]);
     Ok(output)
 }
 
 /// Decode embedded v1 markers. `Ok(None)` means no header: `@P` remains an
 /// ordinary comment in that case.
 pub fn embedded_profile_map(source: &[u8]) -> Result<Option<ProfileMap>, EmbeddedProfileError> {
+    // Validate counts before walking marker ranges, including cumulative overflow.
+    for run in rle::Runs::new(source) {
+        run.map_err(|_| EmbeddedProfileError::MalformedMarker)?;
+    }
     let Some(header) = source
         .windows(b"@BFCDBG1;".len())
         .position(|window| window == b"@BFCDBG1;")
@@ -637,19 +671,24 @@ pub fn embedded_profile_map(source: &[u8]) -> Result<Option<ProfileMap>, Embedde
             source[position],
             b'>' | b'<' | b'+' | b'-' | b'.' | b',' | b'[' | b']'
         ) {
+            let run = rle::run_at(source, position, rle::compressed(source))
+                .map_err(|_| EmbeddedProfileError::MalformedMarker)?;
+            let count = run.count as u64;
             if let Some(range) = ranges.last_mut()
                 && range.site == active
                 && range.end == ordinal
             {
-                range.end += 1;
+                range.end += count;
             } else {
                 ranges.push(ProfileRange {
                     start: ordinal,
-                    end: ordinal + 1,
+                    end: ordinal + count,
                     site: active,
                 });
             }
-            ordinal += 1;
+            ordinal += count;
+            position = run.end;
+            continue;
         }
         position += 1;
     }

@@ -9,6 +9,15 @@ artifact、compiler provenance、interpreter、CLI、report、検証方法を定
 この仕様のversion 1は実装済みである。未実装のsource span、self-host compiler自身からのmarker生成、
 profile比較toolは本文で明記する。wire formatを変更する場合はformat versionと本文を同時に更新する。
 
+## テキスト圧縮BFとの併用
+
+`bfc --compressed-bf` の `@BFCRLE1;` 形式も受け付ける（[実行仕様](SPEC.md)）。
+profile map v1のrangeは展開後のBF命令ordinal、identityも展開後の命令列なので、
+同じBFの非圧縮版とmapを共有する。圧縮でwire format versionは変えない。
+inline profileでは圧縮ヘッダを先頭に保ち、その後にdebug headerを置く。
+marker境界はrunを分割し、`@P` のsite IDを反復数として解釈しない。
+interpreterのエラーbyte offsetだけは、実際に読み込んだ圧縮テキスト内の位置になる。
+
 ## 目的
 
 - self-host testとbootstrap verificationのwall timeを支配する処理を特定する。

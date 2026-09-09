@@ -2,7 +2,8 @@
 set -euo pipefail
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-work_dir=$(mktemp -d)
+mkdir -p "$repo_dir/tmp"
+work_dir=$(mktemp -d "$repo_dir/tmp/verify-stage2.XXXXXXXX")
 trap 'rm -rf -- "$work_dir"' EXIT
 
 compiler_bf="$work_dir/stage2-compiler.bf"
@@ -14,7 +15,7 @@ test_source="$work_dir/stage2-tests.bfc"
 "$repo_dir/scripts/concat-stage2-compiler.sh" test >"$test_source"
 
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
-    -p bf-compiler --bin bfc -- --unlimited-tape "$test_source" >"$test_bf"
+    -p bf-compiler --bin bfc -- --unlimited-tape --compressed-bf "$test_source" >"$test_bf"
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
     -p bf-interpreter --bin bf-interpreter -- --unlimited-tape "$test_bf" \
     >"$work_dir/stage2-tests.actual"
@@ -22,7 +23,7 @@ printf 'ok\n' >"$work_dir/stage2-tests.expected"
 cmp "$work_dir/stage2-tests.expected" "$work_dir/stage2-tests.actual"
 
 cargo run --quiet --release --manifest-path "$repo_dir/Cargo.toml" \
-    -p bf-compiler --bin bfc -- --unlimited-tape \
+    -p bf-compiler --bin bfc -- --unlimited-tape --compressed-bf \
     "$compiler_source" >"$compiler_bf"
 
 printf 'void main(){cell value;if(value&1);}' | \

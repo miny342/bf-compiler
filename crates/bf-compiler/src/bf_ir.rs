@@ -197,8 +197,20 @@ impl AnnotatedBfProgram {
     /// are not yet carried by continuation IR, so compiler-generated sites
     /// currently have `source: null`.
     pub fn profile_map(&self) -> bf_profiling::ProfileMap {
-        let (source, ranges) = self.to_source_and_ranges();
-        bf_profiling::ProfileMap {
+        self.profile_artifact(false).map
+    }
+
+    /// Serialize directly in the selected encoding; ranges always count expanded BF commands.
+    pub fn profile_artifact(&self, compressed: bool) -> crate::CompiledProfileArtifact {
+        let (source, ranges) = if compressed {
+            let mut source = bf_profiling::rle::HEADER.to_owned();
+            let mut ranges = Vec::new();
+            write_annotated_compact(&self.instructions, &mut source, &mut 0, &mut ranges);
+            (source, ranges)
+        } else {
+            self.to_source_and_ranges()
+        };
+        let map = bf_profiling::ProfileMap {
             format: bf_profiling::PROFILE_MAP_FORMAT.to_owned(),
             version: bf_profiling::PROFILE_MAP_VERSION,
             bf: bf_profiling::bf_identity(source.as_bytes()),
@@ -221,7 +233,8 @@ impl AnnotatedBfProgram {
                 .into_iter()
                 .map(|(start, end, site)| bf_profiling::ProfileRange { start, end, site })
                 .collect(),
-        }
+        };
+        crate::CompiledProfileArtifact { source, map }
     }
 }
 
@@ -279,6 +292,110 @@ impl BfProgram {
     /// long pointer movements in the generated program.
     pub fn write_source(&self, output: &mut impl Write) -> io::Result<()> {
         write_instructions_streaming(&self.instructions, output)
+    }
+
+    pub fn write_compressed_source(&self, output: &mut impl Write) -> io::Result<()> {
+        output.write_all(bf_profiling::rle::HEADER.as_bytes())?;
+        write_compact(&self.instructions, output)
+    }
+
+    pub fn compressed_source_len(&self) -> u64 {
+        struct Count(u64);
+        impl Write for Count {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0 += bytes.len() as u64;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut count = Count(0);
+        self.write_compressed_source(&mut count)
+            .expect("counting cannot fail");
+        count.0
+    }
+}
+
+fn write_compact(instructions: &[BfInstruction], output: &mut impl Write) -> io::Result<()> {
+    for instruction in instructions {
+        match instruction {
+            BfInstruction::Move(n) => bf_profiling::rle::write_run(
+                output,
+                if *n < 0 { b'<' } else { b'>' },
+                n.unsigned_abs(),
+            )?,
+            BfInstruction::Add(n) => bf_profiling::rle::write_run(
+                output,
+                if *n <= 128 { b'+' } else { b'-' },
+                if *n <= 128 {
+                    *n as usize
+                } else {
+                    256 - *n as usize
+                },
+            )?,
+            BfInstruction::Input => output.write_all(b",")?,
+            BfInstruction::Output => output.write_all(b".")?,
+            BfInstruction::Loop(body) => {
+                output.write_all(b"[")?;
+                write_compact(body, output)?;
+                output.write_all(b"]")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_annotated_compact(
+    instructions: &[AnnotatedBfInstruction],
+    output: &mut String,
+    ordinal: &mut u64,
+    ranges: &mut Vec<(u64, u64, ProfileSiteId)>,
+) {
+    fn emit(
+        byte: char,
+        count: usize,
+        site: ProfileSiteId,
+        output: &mut String,
+        ordinal: &mut u64,
+        ranges: &mut Vec<(u64, u64, ProfileSiteId)>,
+    ) {
+        if count == 0 {
+            return;
+        }
+        output.push(byte);
+        if count > 1 {
+            output.push_str(&count.to_string());
+        }
+        if let Some((_, end, previous)) = ranges.last_mut()
+            && *previous == site
+        {
+            *end += count as u64;
+        } else {
+            ranges.push((*ordinal, *ordinal + count as u64, site));
+        }
+        *ordinal += count as u64;
+    }
+    for instruction in instructions {
+        let (byte, count) = match &instruction.operation {
+            AnnotatedBfOperation::Move(n) => (if *n < 0 { '<' } else { '>' }, n.unsigned_abs()),
+            AnnotatedBfOperation::Add(n) => (
+                if *n <= 128 { '+' } else { '-' },
+                if *n <= 128 {
+                    *n as usize
+                } else {
+                    256 - *n as usize
+                },
+            ),
+            AnnotatedBfOperation::Input => (',', 1),
+            AnnotatedBfOperation::Output => ('.', 1),
+            AnnotatedBfOperation::Loop(body) => {
+                emit('[', 1, instruction.site, output, ordinal, ranges);
+                write_annotated_compact(body, output, ordinal, ranges);
+                (']', 1)
+            }
+        };
+        emit(byte, count, instruction.site, output, ordinal, ranges);
     }
 }
 
@@ -421,6 +538,31 @@ fn write_annotated(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_serialization_preserves_every_add_value_and_long_moves() {
+        for value in 0..=255 {
+            let program = BfProgram::new(vec![
+                BfInstruction::Move(12345),
+                BfInstruction::Add(value),
+                BfInstruction::Move(-12345),
+            ]);
+            let mut compact = Vec::new();
+            program.write_compressed_source(&mut compact).unwrap();
+            assert_eq!(compact.len() as u64, program.compressed_source_len());
+            assert_eq!(
+                bf_profiling::bf_identity(&compact),
+                bf_profiling::bf_identity(program.to_source().as_bytes())
+            );
+            assert!(compact.len() < 40);
+        }
+        let program = BfProgram::new(vec![BfInstruction::Loop(vec![BfInstruction::Move(
+            1_000_000_000,
+        )])]);
+        let mut compact = Vec::new();
+        program.write_compressed_source(&mut compact).unwrap();
+        assert_eq!(compact, b"@BFCRLE1;[>1000000000]");
+    }
 
     #[test]
     fn serializes_nested_ir_without_merging_nodes() {

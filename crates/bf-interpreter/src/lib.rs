@@ -180,6 +180,7 @@ pub struct ProfileResult {
 /// An error encountered while parsing or running a program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    InvalidEncoding(String),
     UnmatchedOpeningBracket { offset: usize },
     UnmatchedClosingBracket { offset: usize },
     TapeUnderflow { instruction_offset: usize },
@@ -192,6 +193,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidEncoding(message) => write!(f, "invalid BF encoding: {message}"),
             Self::UnmatchedOpeningBracket { offset } => {
                 write!(f, "unmatched '[' at byte offset {offset}")
             }
@@ -584,6 +586,7 @@ enum LoopOptimization {
 struct SourceOffsetRange {
     start: usize,
     len: usize,
+    repeated: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -595,6 +598,7 @@ struct SourceOffsets {
 impl SourceOffsets {
     fn push(&mut self, offset: usize) {
         if let Some(last) = self.ranges.last_mut()
+            && !last.repeated
             && last.start.checked_add(last.len) == Some(offset)
         {
             last.len += 1;
@@ -602,9 +606,19 @@ impl SourceOffsets {
             self.ranges.push(SourceOffsetRange {
                 start: offset,
                 len: 1,
+                repeated: false,
             });
         }
         self.len += 1;
+    }
+
+    fn push_repeated(&mut self, offset: usize, count: usize) {
+        self.ranges.push(SourceOffsetRange {
+            start: offset,
+            len: count,
+            repeated: true,
+        });
+        self.len += count;
     }
 
     const fn len(&self) -> usize {
@@ -615,7 +629,7 @@ impl SourceOffsets {
         assert!(index < self.len);
         for range in &self.ranges {
             if index < range.len {
-                return range.start + index;
+                return range.start + if range.repeated { 0 } else { index };
             }
             index -= range.len;
         }
@@ -655,8 +669,14 @@ impl FastBlock {
         source_offset: usize,
         site: ResolvedProfileSite,
         profile_map: Option<&ProfileMap>,
+        count: usize,
+        compressed: bool,
     ) {
-        let amount = if op == RleOp::Right { 1 } else { -1 };
+        let amount = if op == RleOp::Right {
+            count as isize
+        } else {
+            -(count as isize)
+        };
         if self.last_rle == Some(op)
             && let Some(FastInstruction::Move {
                 site: current_site,
@@ -668,10 +688,18 @@ impl FastBlock {
             *mixed |= current_site.id != site.id;
             *current_site = lowest_common_ancestor(profile_map, *current_site, site);
             *current += amount;
-            source_offsets.push(source_offset);
+            if compressed {
+                source_offsets.push_repeated(source_offset, count);
+            } else {
+                source_offsets.push(source_offset);
+            }
         } else {
             let mut source_offsets = SourceOffsets::default();
-            source_offsets.push(source_offset);
+            if compressed {
+                source_offsets.push_repeated(source_offset, count);
+            } else {
+                source_offsets.push(source_offset);
+            }
             self.instructions.push(FastInstruction::Move {
                 site,
                 mixed: false,
@@ -682,8 +710,18 @@ impl FastBlock {
         self.last_rle = Some(op);
     }
 
-    fn push_add(&mut self, op: RleOp, site: ResolvedProfileSite, profile_map: Option<&ProfileMap>) {
-        let amount = if op == RleOp::Increment { 1 } else { 255 };
+    fn push_add(
+        &mut self,
+        op: RleOp,
+        site: ResolvedProfileSite,
+        profile_map: Option<&ProfileMap>,
+        count: usize,
+    ) {
+        let amount = if op == RleOp::Increment {
+            count as u8
+        } else {
+            0u8.wrapping_sub(count as u8)
+        };
         if self.last_rle == Some(op)
             && let Some(FastInstruction::Add {
                 site: current_site,
@@ -695,13 +733,13 @@ impl FastBlock {
             *mixed |= current_site.id != site.id;
             *current_site = lowest_common_ancestor(profile_map, *current_site, site);
             *current = current.wrapping_add(amount);
-            *raw_count += 1;
+            *raw_count += count as u64;
         } else {
             self.instructions.push(FastInstruction::Add {
                 site,
                 mixed: false,
                 amount,
-                raw_count: 1,
+                raw_count: count as u64,
             });
         }
         self.last_rle = Some(op);
@@ -721,63 +759,86 @@ fn parse_optimized(
     let mut ordinal = 0_u64;
     let mut range_index = 0_usize;
     let range_slots = profile_map.map(profile_range_slots);
-    for (source_offset, byte) in source.iter().copied().enumerate() {
-        if !matches!(byte, b'>' | b'<' | b'+' | b'-' | b'.' | b',' | b'[' | b']') {
-            continue;
-        }
-        let site = resolved_profile_site(
-            profile_map,
-            range_slots.as_deref(),
-            &mut range_index,
-            ordinal,
-        );
-        ordinal += 1;
-        let current = blocks.last_mut().unwrap();
-        match byte {
-            b'>' => current.push_move(RleOp::Right, source_offset, site, profile_map),
-            b'<' => current.push_move(RleOp::Left, source_offset, site, profile_map),
-            b'+' => current.push_add(RleOp::Increment, site, profile_map),
-            b'-' => current.push_add(RleOp::Decrement, site, profile_map),
-            b'.' => current.push_non_rle(FastInstruction::Output { site, mixed: false }),
-            b',' => current.push_non_rle(FastInstruction::Input { site, mixed: false }),
-            b'[' => {
-                current.last_rle = None;
-                blocks.push(FastBlock::nested(source_offset, site));
-            }
-            b']' => {
-                if blocks.len() == 1 {
-                    return Err(Error::UnmatchedClosingBracket {
-                        offset: source_offset,
-                    });
+    let compressed = bf_profiling::rle::compressed(source);
+    for run in bf_profiling::rle::Runs::new(source) {
+        let run = run.map_err(|e| Error::InvalidEncoding(e.to_string()))?;
+        let source_offset = run.offset;
+        let byte = run.byte;
+        let mut remaining = run.count;
+        while remaining > 0 {
+            let site = resolved_profile_site(
+                profile_map,
+                range_slots.as_deref(),
+                &mut range_index,
+                ordinal,
+            );
+            let count = if let Some(map) = profile_map {
+                remaining.min((map.ranges[range_index].end - ordinal) as usize)
+            } else {
+                remaining
+            };
+            ordinal += count as u64;
+            remaining -= count;
+            let current = blocks.last_mut().unwrap();
+            match byte {
+                b'>' => current.push_move(
+                    RleOp::Right,
+                    source_offset,
+                    site,
+                    profile_map,
+                    count,
+                    compressed,
+                ),
+                b'<' => current.push_move(
+                    RleOp::Left,
+                    source_offset,
+                    site,
+                    profile_map,
+                    count,
+                    compressed,
+                ),
+                b'+' => current.push_add(RleOp::Increment, site, profile_map, count),
+                b'-' => current.push_add(RleOp::Decrement, site, profile_map, count),
+                b'.' => current.push_non_rle(FastInstruction::Output { site, mixed: false }),
+                b',' => current.push_non_rle(FastInstruction::Input { site, mixed: false }),
+                b'[' => {
+                    current.last_rle = None;
+                    blocks.push(FastBlock::nested(source_offset, site));
                 }
-                let block = blocks.pop().unwrap();
-                let body = block.instructions;
-                let optimization = recognize_fast_loop(&body);
-                let mut loop_site = block.opening_site.unwrap();
-                let mut mixed = false;
-                if optimization.is_some() {
-                    merge_provenance(&mut loop_site, &mut mixed, site, false, profile_map);
-                    for instruction in &body {
-                        merge_provenance(
-                            &mut loop_site,
-                            &mut mixed,
-                            instruction.site(),
-                            instruction.mixed_provenance(),
-                            profile_map,
-                        );
+                b']' => {
+                    if blocks.len() == 1 {
+                        return Err(Error::UnmatchedClosingBracket {
+                            offset: source_offset,
+                        });
                     }
+                    let block = blocks.pop().unwrap();
+                    let body = block.instructions;
+                    let optimization = recognize_fast_loop(&body);
+                    let mut loop_site = block.opening_site.unwrap();
+                    let mut mixed = false;
+                    if optimization.is_some() {
+                        merge_provenance(&mut loop_site, &mut mixed, site, false, profile_map);
+                        for instruction in &body {
+                            merge_provenance(
+                                &mut loop_site,
+                                &mut mixed,
+                                instruction.site(),
+                                instruction.mixed_provenance(),
+                                profile_map,
+                            );
+                        }
+                    }
+                    blocks.last_mut().unwrap().push_non_rle(fold_countdown(
+                        FastInstruction::Loop {
+                            site: loop_site,
+                            mixed,
+                            body,
+                            optimization,
+                        },
+                    ));
                 }
-                blocks
-                    .last_mut()
-                    .unwrap()
-                    .push_non_rle(fold_countdown(FastInstruction::Loop {
-                        site: loop_site,
-                        mixed,
-                        body,
-                        optimization,
-                    }));
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -2093,6 +2154,124 @@ mod tests {
     #[test]
     fn ignores_comments_and_runs_a_loop() {
         assert_eq!(run_str("+++ add three [>++<-] >.", ""), Ok("\u{6}".into()));
+    }
+
+    #[test]
+    fn compressed_runs_match_plain_execution_and_profiles() {
+        let compressed = b"@BFCRLE1;,+257[->3+2<3]>3.[-]+>+>+<[>]+[<]>.[-]";
+        let mut plain = Vec::new();
+        for run in bf_profiling::rle::Runs::new(compressed) {
+            let run = run.unwrap();
+            plain.extend(std::iter::repeat_n(run.byte, run.count));
+        }
+        // Deliberately place profile boundaries *inside* compressed runs.
+        let map = test_profile_map(
+            &plain,
+            (0..plain.len())
+                .map(|i| ProfileRange {
+                    start: i as u64,
+                    end: i as u64 + 1,
+                    site: ProfileSiteId((i % 2 + 1) as u32),
+                })
+                .collect(),
+        );
+        let embedded =
+            bf_profiling::embed_profile_markers(std::str::from_utf8(compressed).unwrap(), &map)
+                .unwrap();
+        let embedded_map = bf_profiling::embedded_profile_map(embedded.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(embedded_map.bf, map.bf);
+        assert_eq!(embedded_map.ranges, map.ranges);
+        for input in [0, 1, 127, 254, 255] {
+            let baseline = run_with_stats(&plain, &[input]).unwrap();
+            for source in [compressed.as_slice(), embedded.as_bytes()] {
+                assert_eq!(run_with_stats(source, &[input]).unwrap(), baseline);
+                for mode in [
+                    ProfileMode::Counters,
+                    ProfileMode::Exact,
+                    ProfileMode::Sample {
+                        interval: Duration::from_millis(1),
+                    },
+                ] {
+                    let options = RunOptions {
+                        collect_stats: true,
+                        profile: Some(ProfileOptions {
+                            map: map.clone(),
+                            mode,
+                        }),
+                        ..RunOptions::default()
+                    };
+                    let expected = run_with_options(&plain, &[input], options.clone()).unwrap();
+                    let actual = run_with_options(source, &[input], options).unwrap();
+                    assert_eq!(actual.output, expected.output);
+                    assert_eq!(actual.stats, expected.stats);
+                    let actual = actual.profile.unwrap();
+                    let expected = expected.profile.unwrap();
+                    assert_eq!(
+                        actual.mixed_provenance_native_operations,
+                        expected.mixed_provenance_native_operations
+                    );
+                    for (a, b) in actual.sites.iter().zip(&expected.sites) {
+                        assert_eq!(a.counters, b.counters);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compressed_counts_are_opt_in_and_errors_use_physical_offsets() {
+        assert_eq!(run(b"+163.", b"").unwrap(), [1]);
+        assert_eq!(run(b"@P163;+163.", b"").unwrap(), [1]);
+        assert_eq!(run(b"@BFCRLE1;+163.", b"").unwrap(), [163]);
+        assert_eq!(run(b"@BFCRLE1;+513.", b"").unwrap(), [1]);
+        for source in [
+            "@BFCRLE1;+0",
+            "@BFCRLE1;>999999999999999999999999999",
+            "@BFCRLE2;+",
+        ] {
+            assert!(matches!(
+                run(source.as_bytes(), b""),
+                Err(Error::InvalidEncoding(_))
+            ));
+        }
+        let offset = bf_profiling::rle::HEADER.len();
+        assert_eq!(
+            run(b"@BFCRLE1;<16", b""),
+            Err(Error::TapeUnderflow {
+                instruction_offset: offset
+            })
+        );
+        assert_eq!(
+            run(b"@BFCRLE1;>30000", b""),
+            Err(Error::TapeOverflow {
+                instruction_offset: offset
+            })
+        );
+        assert_eq!(run(b"@BFCRLE1;[<16]", b"").unwrap(), b"");
+        assert_eq!(
+            run(b"@BFCRLE1;>16[", b""),
+            Err(Error::UnmatchedOpeningBracket { offset: offset + 3 })
+        );
+        let grown = run_unbounded_with_stats(b"@BFCRLE1;>30000+.<30000.", b"").unwrap();
+        assert_eq!(grown.output, [1, 0]);
+        assert_eq!(grown.stats.max_pointer, 30000);
+        // Parsing a billion moves must allocate one run, not a billion instructions/offsets.
+        let parsed = parse_optimized(b"@BFCRLE1;>1000000000", None).unwrap();
+        let [
+            FastInstruction::Move {
+                source_offsets,
+                amount,
+                ..
+            },
+        ] = parsed.as_slice()
+        else {
+            panic!()
+        };
+        assert_eq!(*amount, 1_000_000_000);
+        assert_eq!(source_offsets.ranges.len(), 1);
+        assert_eq!(source_offsets.get(999_999_999), offset);
     }
 
     #[test]

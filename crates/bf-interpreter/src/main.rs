@@ -821,7 +821,8 @@ fn usage(executable: &OsStr) -> String {
     format!(
         "usage: {} [--stats] [--timings] [--unlimited-tape] [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
          [--profile-mode counters|sample|exact] [--profile-sample-interval 1ms] \
-         [--profile-output PATH] [--profile-format text|json] <program.bf>",
+         [--profile-output PATH] [--profile-format text|json] <program.bf>\n\
+         Accepts ordinary BF and auto-detects @BFCRLE1; compressed BF.",
         executable.to_string_lossy()
     )
 }

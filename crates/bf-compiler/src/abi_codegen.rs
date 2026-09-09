@@ -53,9 +53,7 @@ pub fn compile_continuations_with_profile(
 ) -> Result<CompiledProfileArtifact, AbiCodegenError> {
     let annotated = lower_continuations_with_profile(program, granularity)?;
     let optimized = optimize_annotated_bf(&annotated);
-    let source = optimized.to_source();
-    let map = optimized.profile_map();
-    Ok(CompiledProfileArtifact { source, map })
+    Ok(optimized.profile_artifact(false))
 }
 
 /// Compile an unbounded-tape artifact with provenance sidecar metadata.
@@ -65,9 +63,7 @@ pub fn compile_continuations_unbounded_with_profile(
 ) -> Result<CompiledProfileArtifact, AbiCodegenError> {
     let annotated = lower_continuations_unbounded_with_profile(program, granularity)?;
     let optimized = optimize_annotated_bf(&annotated);
-    let source = optimized.to_source();
-    let map = optimized.profile_map();
-    Ok(CompiledProfileArtifact { source, map })
+    Ok(optimized.profile_artifact(false))
 }
 
 /// Compile continuation IR without enforcing the standard 30,000-cell tape.

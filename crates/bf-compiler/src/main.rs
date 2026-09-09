@@ -22,6 +22,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args_os();
     let executable = arguments.next().unwrap_or_default();
     let mut unlimited_tape = false;
+    let mut compressed_bf = false;
     let mut profile_map_output = None;
     let mut profile_granularity = None;
     let mut embed_profile = false;
@@ -37,6 +38,8 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(argument) = arguments.next() {
         if argument == "--unlimited-tape" {
             unlimited_tape = true;
+        } else if argument == "--compressed-bf" {
+            compressed_bf = true;
         } else if argument == "--profile-map-output" {
             profile_map_output = Some(
                 arguments
@@ -84,7 +87,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     }
     if source_paths.is_empty() && cir_input.is_none() {
         return Err(format!(
-            "usage: {} [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
+            "usage: {} [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--unlimited-tape] [--compressed-bf] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
             executable.to_string_lossy(),
             executable.to_string_lossy()
         )
@@ -114,7 +117,8 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         && (unlimited_tape
             || profile_map_output.is_some()
             || profile_granularity.is_some()
-            || embed_profile)
+            || embed_profile
+            || compressed_bf)
     {
         return Err("--run-ir cannot be combined with Brainfuck code-generation options".into());
     }
@@ -241,6 +245,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
                 granularity,
                 profile_map_output.as_deref().map(Path::new),
                 embed_profile,
+                compressed_bf,
             )?;
             eprintln!(
                 "bfc-cir phase=compile status=finished elapsed_ms={} output_bytes={} profiled=true {}",
@@ -259,10 +264,18 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "bfc-cir phase=compile status=finished elapsed_ms={} output_bytes={} profiled=false {}",
                 compile_started.elapsed().as_millis(),
-                brainfuck.source_len(),
+                if compressed_bf {
+                    brainfuck.compressed_source_len()
+                } else {
+                    brainfuck.source_len()
+                },
                 memory_metrics(),
             );
-            brainfuck.write_source(&mut output)?;
+            if compressed_bf {
+                brainfuck.write_compressed_source(&mut output)?;
+            } else {
+                brainfuck.write_source(&mut output)?;
+            }
         }
         output.flush()?;
         return Ok(());
@@ -336,7 +349,20 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             granularity,
             profile_map_output.as_deref().map(Path::new),
             embed_profile,
+            compressed_bf,
         )?
+    } else if compressed_bf {
+        let (program, _) =
+            bf_compiler::lower_sources_with_options(&source_files, optimization_options)?;
+        let lowered = if unlimited_tape {
+            bf_compiler::lower_continuations_unbounded(&program)?
+        } else {
+            bf_compiler::lower_continuations(&program)?
+        };
+        let mut output = BufWriter::new(io::stdout().lock());
+        bf_compiler::optimize_bf(&lowered).write_compressed_source(&mut output)?;
+        output.flush()?;
+        return Ok(());
     } else if unlimited_tape {
         let (program, _) =
             bf_compiler::lower_sources_with_options(&source_files, optimization_options)?;
@@ -357,12 +383,14 @@ fn compile_profiled(
     granularity: bf_compiler::ProfileGranularity,
     map_output: Option<&Path>,
     embed_profile: bool,
+    compressed_bf: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let artifact = if unlimited_tape {
-        bf_compiler::compile_continuations_unbounded_with_profile(program, granularity)?
+    let annotated = if unlimited_tape {
+        bf_compiler::lower_continuations_unbounded_with_profile(program, granularity)?
     } else {
-        bf_compiler::compile_continuations_with_profile(program, granularity)?
+        bf_compiler::lower_continuations_with_profile(program, granularity)?
     };
+    let artifact = bf_compiler::optimize_annotated_bf(&annotated).profile_artifact(compressed_bf);
     if let Some(path) = map_output {
         fs::write(path, artifact.map.to_json_pretty()?)?;
     }
