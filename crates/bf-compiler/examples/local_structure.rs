@@ -25,10 +25,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_new(true)
         .open(&output)?;
     let bytes = fs::read(&path)?;
+    let options = ContinuationOptimizationOptions {
+        inline_branch_successors: true,
+        structure_local_control_flow: false,
+    };
     let program = if route == "source" {
-        lower_source(std::str::from_utf8(&bytes)?)?
+        lower_source_with_options(std::str::from_utf8(&bytes)?, options)?.0
     } else {
-        lower_selfhost_cir(&SelfhostCirProgram::decode(&bytes)?)?
+        lower_selfhost_cir_with_options(&SelfhostCirProgram::decode(&bytes)?, options)?.0
     };
     let before = program.continuations().len();
     let start = Instant::now();

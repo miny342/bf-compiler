@@ -3,9 +3,10 @@
   "artifact": {
     "kind": "cir",
     "id": "computed-by-test",
-    "identity_version": "bfc-ir-artifact-v1",
+    "identity_version": "bfc-ir-artifact-v2",
     "lowering_options": {
-      "inline_branch_successors": true
+      "inline_branch_successors": true,
+      "structure_local_control_flow": false
     }
   },
   "chunk_cells": [8, 16],

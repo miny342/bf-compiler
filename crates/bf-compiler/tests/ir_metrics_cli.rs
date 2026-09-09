@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 fn run_bfc(root: &Path, arguments: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bfc"))
         .current_dir(root)
+        .arg("--disable-local-control-flow")
         .args(arguments)
         .output()
         .expect("failed to execute bfc")
@@ -20,6 +21,7 @@ fn run_bfc(root: &Path, arguments: &[&str]) -> std::process::Output {
 fn run_bfc_with_stdin(root: &Path, arguments: &[&str], input: &[u8]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_bfc"))
         .current_dir(root)
+        .arg("--disable-local-control-flow")
         .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -64,6 +66,170 @@ fn cir_fixture() -> Vec<u8> {
     .unwrap()
     .encode()
     .unwrap()
+}
+
+#[test]
+fn local_control_flow_options_bind_identity_and_preserve_execution() {
+    let root = test_root().with_file_name(format!(
+        "ir-metrics-local-control-flow-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("loop.bfc"),
+        "void main(){cell n=input();while(n != 0){n-=1;output(n);}output(n);}",
+    )
+    .unwrap();
+    let baseline = run_bfc_with_stdin(
+        &root,
+        &["--run-ir", "--ir-metrics", "baseline.json", "loop.bfc"],
+        &[3],
+    );
+    let candidate = run_bfc_with_stdin(
+        &root,
+        &[
+            "--enable-local-control-flow",
+            "--run-ir",
+            "--ir-metrics",
+            "candidate.json",
+            "loop.bfc",
+        ],
+        &[3],
+    );
+    assert!(baseline.status.success(), "{:?}", baseline.stderr);
+    assert!(candidate.status.success(), "{:?}", candidate.stderr);
+    assert_eq!(baseline.stdout, [2, 1, 0, 0]);
+    assert_eq!(candidate.stdout, baseline.stdout);
+    let read = |name| serde_json::from_slice::<Value>(&fs::read(root.join(name)).unwrap()).unwrap();
+    let before = read("baseline.json");
+    let after = read("candidate.json");
+    assert_ne!(before["artifact_identity"], after["artifact_identity"]);
+    assert!(
+        after["optimization"]["local_structure"]["loops"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        after["run"]["executed_continuations"].as_u64().unwrap()
+            < before["run"]["executed_continuations"].as_u64().unwrap()
+    );
+    assert_eq!(after["accounting"]["ok"], true);
+    assert_eq!(
+        after["artifact_identity_definition"]["version"],
+        "bfc-ir-artifact-v2"
+    );
+    let options = &after["measurement_options"]["lowering_options"];
+    assert_eq!(options["structure_local_control_flow"], true);
+    let id = after["artifact_identity"].as_str().unwrap();
+    let mut config = json!({"format": "bfc-ir-phase-config-v1",
+        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v2",
+            "lowering_options": options},
+        "chunk_cells": [8, 16], "phases": [{"name": "main", "function_name": "main"}]});
+    fs::write(root.join("phase.json"), config.to_string()).unwrap();
+    let measured = run_bfc_with_stdin(
+        &root,
+        &[
+            "--enable-local-control-flow",
+            "--run-ir",
+            "--ir-metrics",
+            "phase-metrics.json",
+            "--ir-phase-config",
+            "phase.json",
+            "--ir-artifact-id",
+            id,
+            "loop.bfc",
+        ],
+        &[3],
+    );
+    assert!(measured.status.success(), "{:?}", measured.stderr);
+    assert_eq!(measured.stdout, baseline.stdout);
+    assert_eq!(read("phase-metrics.json")["accounting"]["ok"], true);
+    let stale_option = run_bfc(
+        &root,
+        &[
+            "--run-ir",
+            "--ir-metrics",
+            "rejected.json",
+            "--ir-phase-config",
+            "phase.json",
+            "--ir-artifact-id",
+            id,
+            "loop.bfc",
+        ],
+    );
+    assert!(!stale_option.status.success());
+    assert!(String::from_utf8_lossy(&stale_option.stderr).contains("actual artifact identity"));
+    config["artifact"]["id"] = before["artifact_identity"].clone();
+    fs::write(root.join("phase.json"), config.to_string()).unwrap();
+    let forged_option = run_bfc(
+        &root,
+        &[
+            "--run-ir",
+            "--ir-metrics",
+            "rejected.json",
+            "--ir-phase-config",
+            "phase.json",
+            "--ir-artifact-id",
+            before["artifact_identity"].as_str().unwrap(),
+            "loop.bfc",
+        ],
+    );
+    assert!(!forged_option.status.success());
+    assert!(String::from_utf8_lossy(&forged_option.stderr).contains("lowering_options"));
+    config["artifact"]["id"] = after["artifact_identity"].clone();
+    config["artifact"]["identity_version"] = json!("bfc-ir-artifact-v1");
+    fs::write(root.join("phase.json"), config.to_string()).unwrap();
+    let stale_version = run_bfc(
+        &root,
+        &[
+            "--enable-local-control-flow",
+            "--run-ir",
+            "--ir-metrics",
+            "rejected.json",
+            "--ir-phase-config",
+            "phase.json",
+            "--ir-artifact-id",
+            id,
+            "loop.bfc",
+        ],
+    );
+    assert!(!stale_version.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale_version.stderr).contains("identity_version"),
+        "{}",
+        String::from_utf8_lossy(&stale_version.stderr)
+    );
+
+    fs::write(root.join("input.cir"), cir_fixture()).unwrap();
+    for variant in ["baseline", "candidate"] {
+        let enabled = if variant == "candidate" {
+            "--enable-local-control-flow"
+        } else {
+            "--disable-local-control-flow"
+        };
+        let run = run_bfc(
+            &root,
+            &[
+                enabled,
+                "--cir-input",
+                "input.cir",
+                "--run-ir",
+                "--ir-metrics",
+                &format!("cir-{variant}.json"),
+            ],
+        );
+        assert!(run.status.success(), "{:?}", run.stderr);
+        assert_eq!(run.stdout, b"A");
+    }
+    assert_ne!(
+        read("cir-baseline.json")["artifact_identity"],
+        read("cir-candidate.json")["artifact_identity"]
+    );
+    assert_eq!(
+        read("cir-candidate.json")["measurement_options"]["lowering_options"]["structure_local_control_flow"],
+        true
+    );
 }
 
 #[test]
@@ -261,7 +427,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "344f0e38ac788601a4bcd84f2e66e5e33e323e6e4ae9ba3bd9f634f4743e08b3",
+            "d1a56eee55f852dd05d3fe72a7a1c484740edd0bbf22b07b63c73524a6e2e96d",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -279,7 +445,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
     assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
     assert_eq!(
         report["artifact_identity"],
-        "344f0e38ac788601a4bcd84f2e66e5e33e323e6e4ae9ba3bd9f634f4743e08b3"
+        "d1a56eee55f852dd05d3fe72a7a1c484740edd0bbf22b07b63c73524a6e2e96d"
     );
     assert_eq!(report["phase_config"]["artifact"]["kind"], "source");
     assert_eq!(report["accounting"]["ok"], true);
@@ -354,7 +520,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "344f0e38ac788601a4bcd84f2e66e5e33e323e6e4ae9ba3bd9f634f4743e08b3",
+            "d1a56eee55f852dd05d3fe72a7a1c484740edd0bbf22b07b63c73524a6e2e96d",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -549,7 +715,7 @@ fn phase_metrics_break_portal_adjacency_across_a_non_portal_phase() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "4bcd0b5850502e948925852a7da80105d29ef054ef284bd1f63bcbf7653c0135",
+            "644966090d5ac7f9e19d86c7af96d9317d081573a6299e3f7fa267f24b1264ad",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",

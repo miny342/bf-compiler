@@ -26,7 +26,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut profile_granularity = None;
     let mut embed_profile = false;
     let mut run_ir = false;
-    let mut enable_2c = true;
+    let mut optimization_options = bf_compiler::ContinuationOptimizationOptions::default();
     let mut ir_metrics_output = None;
     let mut collect_ir_transitions = true;
     let mut ir_phase_config = None;
@@ -54,9 +54,13 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         } else if argument == "--run-ir" {
             run_ir = true;
         } else if argument == "--enable-2c" {
-            enable_2c = true;
+            optimization_options.inline_branch_successors = true;
         } else if argument == "--disable-2c" {
-            enable_2c = false;
+            optimization_options.inline_branch_successors = false;
+        } else if argument == "--enable-local-control-flow" {
+            optimization_options.structure_local_control_flow = true;
+        } else if argument == "--disable-local-control-flow" {
+            optimization_options.structure_local_control_flow = false;
         } else if argument == "--ir-metrics" {
             ir_metrics_output = Some(arguments.next().ok_or("--ir-metrics requires PATH")?);
             collect_ir_transitions = true;
@@ -80,7 +84,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     }
     if source_paths.is_empty() && cir_input.is_none() {
         return Err(format!(
-            "usage: {} [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
+            "usage: {} [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--ir-progress-interval 10s] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--unlimited-tape] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
             executable.to_string_lossy(),
             executable.to_string_lossy()
         )
@@ -147,7 +151,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             fs::read(&path)
                 .map_err(|error| format!("failed to read '{}': {error}", path.to_string_lossy()))?
         };
-        let artifact_identity = cir_artifact_identity(&bytes, enable_2c);
+        let artifact_identity = cir_artifact_identity(&bytes, optimization_options);
         if run_ir {
             if let Some(cli_id) = ir_artifact_id.as_deref() {
                 validate_cli_artifact_id(cli_id, &artifact_identity)?;
@@ -191,9 +195,6 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             memory_metrics(),
         );
         let lower_started = Instant::now();
-        let optimization_options = bf_compiler::ContinuationOptimizationOptions {
-            inline_branch_successors: enable_2c,
-        };
         let (program, optimization_stats) =
             bf_compiler::lower_selfhost_cir_with_options(&flat, optimization_options)?;
         eprintln!(
@@ -207,14 +208,22 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         if run_ir {
             let phase_config = ir_phase_config
                 .as_deref()
-                .map(|path| load_phase_config(path, "cir", &artifact_identity, enable_2c, &program))
+                .map(|path| {
+                    load_phase_config(
+                        path,
+                        "cir",
+                        &artifact_identity,
+                        optimization_options,
+                        &program,
+                    )
+                })
                 .transpose()?;
             run_ir_program(
                 &program,
                 optimization_stats,
                 "cir",
                 &artifact_identity,
-                enable_2c,
+                optimization_options,
                 ir_metrics_output.as_deref(),
                 ir_progress_interval,
                 collect_ir_transitions,
@@ -271,7 +280,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         })?;
         sources.push((path.to_string_lossy().into_owned(), source, bytes));
     }
-    let artifact_identity = source_artifact_identity(&sources, enable_2c);
+    let artifact_identity = source_artifact_identity(&sources, optimization_options);
     let source_files: Vec<_> = sources
         .iter()
         .map(|(name, source, _)| bf_compiler::SourceFile::new(name, source))
@@ -282,9 +291,6 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         }
         let lower_started = Instant::now();
         eprintln!("bfc-ir phase=lower status=started {}", memory_metrics());
-        let optimization_options = bf_compiler::ContinuationOptimizationOptions {
-            inline_branch_successors: enable_2c,
-        };
         let (program, optimization_stats) =
             bf_compiler::lower_sources_with_options(&source_files, optimization_options)?;
         eprintln!(
@@ -298,14 +304,22 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
 
         let phase_config = ir_phase_config
             .as_deref()
-            .map(|path| load_phase_config(path, "source", &artifact_identity, enable_2c, &program))
+            .map(|path| {
+                load_phase_config(
+                    path,
+                    "source",
+                    &artifact_identity,
+                    optimization_options,
+                    &program,
+                )
+            })
             .transpose()?;
         run_ir_program(
             &program,
             optimization_stats,
             "source",
             &artifact_identity,
-            enable_2c,
+            optimization_options,
             ir_metrics_output.as_deref(),
             ir_progress_interval,
             collect_ir_transitions,
@@ -313,9 +327,6 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         return Ok(());
     }
-    let optimization_options = bf_compiler::ContinuationOptimizationOptions {
-        inline_branch_successors: enable_2c,
-    };
     let brainfuck = if let Some(granularity) = profile_granularity {
         let (program, _) =
             bf_compiler::lower_sources_with_options(&source_files, optimization_options)?;
@@ -372,7 +383,7 @@ fn run_ir_program(
     optimization_stats: bf_compiler::ContinuationOptimizationStats,
     source_kind: &str,
     artifact_identity: &str,
-    inline_branch_successors: bool,
+    optimization_options: bf_compiler::ContinuationOptimizationOptions,
     metrics_path: Option<&std::ffi::OsStr>,
     progress_interval: Duration,
     collect_transitions: bool,
@@ -460,7 +471,7 @@ fn run_ir_program(
             source_kind,
             phase_config.map(|config| &config.raw),
             artifact_identity,
-            inline_branch_successors,
+            optimization_options,
             program,
             optimization_stats,
             &stats,
@@ -473,7 +484,7 @@ fn load_phase_config(
     path: &std::ffi::OsStr,
     source_kind: &str,
     actual_artifact_id: &str,
-    inline_branch_successors: bool,
+    optimization_options: bf_compiler::ContinuationOptimizationOptions,
     program: &bf_compiler::ContinuationProgram,
 ) -> Result<LoadedPhaseConfig, Box<dyn std::error::Error>> {
     let raw: Value = serde_json::from_str(
@@ -511,9 +522,9 @@ fn load_phase_config(
         .into());
     }
     if artifact.get("identity_version").and_then(Value::as_str) != Some(IR_ARTIFACT_ID_VERSION) {
-        return Err("phase config artifact.identity_version must be bfc-ir-artifact-v1".into());
+        return Err("phase config artifact.identity_version must be bfc-ir-artifact-v2".into());
     }
-    let expected_options = lowering_options_json(inline_branch_successors);
+    let expected_options = lowering_options_json(optimization_options);
     if artifact.get("lowering_options") != Some(&expected_options) {
         return Err(
             "phase config artifact.lowering_options do not match the IR runner options".into(),
@@ -607,7 +618,7 @@ fn write_ir_metrics(
     source_kind: &str,
     phase_config: Option<&Value>,
     artifact_identity: &str,
-    inline_branch_successors: bool,
+    optimization_options: bf_compiler::ContinuationOptimizationOptions,
     program: &bf_compiler::ContinuationProgram,
     optimization: bf_compiler::ContinuationOptimizationStats,
     run: &bf_compiler::ContinuationRunStats,
@@ -707,14 +718,14 @@ fn write_ir_metrics(
         "artifact_identity_definition": {
             "version": IR_ARTIFACT_ID_VERSION,
             "source_file_order_and_boundaries": "ordered raw-byte frames with an explicit file count; CIR uses one raw-byte frame",
-            "lowering_options": lowering_options_json(inline_branch_successors),
+            "lowering_options": lowering_options_json(optimization_options),
         },
         "phase_config": phase_config,
         "measurement_options": {
             "transition_collection": run.transitions_collected(),
             "phase_portal_collection": phase_config.is_some(),
             "phase_chunk_cells": phase_config.and_then(|config| config.get("chunk_cells")),
-            "lowering_options": lowering_options_json(inline_branch_successors),
+            "lowering_options": lowering_options_json(optimization_options),
         },
         "functions": functions,
         "continuations": continuation_rows,
@@ -730,6 +741,13 @@ fn write_ir_metrics(
             "successor_references_rewritten": optimization.successor_references_rewritten,
             "function_entries_rewritten": optimization.function_entries_rewritten,
             "continuation_ids_compacted": optimization.continuation_ids_compacted,
+            "local_structure": {
+                "continuations_removed": optimization.local_structure.continuations_removed,
+                "straight_blocks": optimization.local_structure.straight_blocks,
+                "branches": optimization.local_structure.branches,
+                "loops": optimization.local_structure.loops,
+                "scratch_slots": optimization.local_structure.scratch_slots,
+            },
         },
         "run": {
             "transitions_collected": run.transitions_collected(),
@@ -758,11 +776,14 @@ fn write_ir_metrics(
     Ok(())
 }
 
-const IR_ARTIFACT_ID_VERSION: &str = "bfc-ir-artifact-v1";
+const IR_ARTIFACT_ID_VERSION: &str = "bfc-ir-artifact-v2";
 
-fn lowering_options_json(inline_branch_successors: bool) -> Value {
+fn lowering_options_json(
+    optimization_options: bf_compiler::ContinuationOptimizationOptions,
+) -> Value {
     json!({
-        "inline_branch_successors": inline_branch_successors,
+        "inline_branch_successors": optimization_options.inline_branch_successors,
+        "structure_local_control_flow": optimization_options.structure_local_control_flow,
     })
 }
 
@@ -784,19 +805,12 @@ fn validate_cli_artifact_id(
 
 fn source_artifact_identity(
     sources: &[(String, String, Vec<u8>)],
-    inline_branch_successors: bool,
+    optimization_options: bf_compiler::ContinuationOptimizationOptions,
 ) -> String {
     let mut data = Vec::new();
     data.extend_from_slice(IR_ARTIFACT_ID_VERSION.as_bytes());
     append_identity_frame(&mut data, b"source");
-    append_identity_frame(
-        &mut data,
-        if inline_branch_successors {
-            b"inline_branch_successors=true"
-        } else {
-            b"inline_branch_successors=false"
-        },
-    );
+    append_lowering_options(&mut data, optimization_options);
     data.extend_from_slice(&(sources.len() as u64).to_be_bytes());
     for (_, _, bytes) in sources {
         append_identity_frame(&mut data, bytes);
@@ -804,20 +818,38 @@ fn source_artifact_identity(
     sha256_hex(&data)
 }
 
-fn cir_artifact_identity(bytes: &[u8], inline_branch_successors: bool) -> String {
+fn cir_artifact_identity(
+    bytes: &[u8],
+    optimization_options: bf_compiler::ContinuationOptimizationOptions,
+) -> String {
     let mut data = Vec::new();
     data.extend_from_slice(IR_ARTIFACT_ID_VERSION.as_bytes());
     append_identity_frame(&mut data, b"cir");
+    append_lowering_options(&mut data, optimization_options);
+    append_identity_frame(&mut data, bytes);
+    sha256_hex(&data)
+}
+
+fn append_lowering_options(
+    data: &mut Vec<u8>,
+    options: bf_compiler::ContinuationOptimizationOptions,
+) {
     append_identity_frame(
-        &mut data,
-        if inline_branch_successors {
+        data,
+        if options.inline_branch_successors {
             b"inline_branch_successors=true"
         } else {
             b"inline_branch_successors=false"
         },
     );
-    append_identity_frame(&mut data, bytes);
-    sha256_hex(&data)
+    append_identity_frame(
+        data,
+        if options.structure_local_control_flow {
+            b"structure_local_control_flow=true"
+        } else {
+            b"structure_local_control_flow=false"
+        },
+    );
 }
 
 fn append_identity_frame(data: &mut Vec<u8>, value: &[u8]) {
@@ -1052,12 +1084,27 @@ mod tests {
             ("b.bfc".to_owned(), "bc".to_owned(), b"bc".to_vec()),
         ];
         assert_ne!(
-            source_artifact_identity(&first, true),
-            source_artifact_identity(&second, true)
+            source_artifact_identity(
+                &first,
+                bf_compiler::ContinuationOptimizationOptions::default()
+            ),
+            source_artifact_identity(
+                &second,
+                bf_compiler::ContinuationOptimizationOptions::default()
+            )
         );
         assert_ne!(
-            source_artifact_identity(&first, true),
-            source_artifact_identity(&first, false)
+            source_artifact_identity(
+                &first,
+                bf_compiler::ContinuationOptimizationOptions::default()
+            ),
+            source_artifact_identity(
+                &first,
+                bf_compiler::ContinuationOptimizationOptions {
+                    inline_branch_successors: false,
+                    ..Default::default()
+                }
+            )
         );
     }
 }

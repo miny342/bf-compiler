@@ -25,11 +25,11 @@ run_one() {
     set +e
     if [[ $variant == on ]]; then
         /usr/bin/time -v -o "$time_log" "$bfc" \
-            --run-ir --ir-progress-interval 86400s "$program" \
+            --run-ir --disable-local-control-flow --ir-progress-interval 86400s "$program" \
             < <(printf '\040') > "$output" 2> "$log"
     else
         /usr/bin/time -v -o "$time_log" "$bfc" \
-            --run-ir --no-ir-transitions --ir-progress-interval 86400s "$program" \
+            --run-ir --disable-local-control-flow --no-ir-transitions --ir-progress-interval 86400s "$program" \
             < <(printf '\040') > "$output" 2> "$log"
     fi
     status=$?

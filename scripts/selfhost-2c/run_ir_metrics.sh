@@ -18,7 +18,7 @@ for family in source cir; do
         for variant in baseline candidate; do
             dir=$out_root/$family/$input_name/$variant
             mkdir -p "$dir"
-            args=(--run-ir --ir-progress-interval 15s --ir-metrics "$dir/metrics.json")
+            args=(--run-ir --disable-local-control-flow --ir-progress-interval 15s --ir-metrics "$dir/metrics.json")
             if [[ $variant == candidate ]]; then
                 args+=(--enable-2c)
             else

@@ -3,6 +3,11 @@ set -euo pipefail
 
 experiment_root=$(cd "${1:?experiment output directory}" && pwd)
 repo_root=$(cd "${2:?repository root}" && pwd)
+local_option=${3:---disable-local-control-flow}
+case "$local_option" in
+    --enable-local-control-flow|--disable-local-control-flow) ;;
+    *) echo "invalid local control-flow option: $local_option" >&2; exit 2 ;;
+esac
 out_root=$experiment_root/phase-portal-overhead
 bfc=$experiment_root/bin/bfc-candidate
 program=$experiment_root/source/phase-portal-overhead.bfc
@@ -14,7 +19,7 @@ if [[ -e "$out_root" ]] && find "$out_root" -mindepth 1 -print -quit | grep -q .
 fi
 mkdir -p "$out_root"
 artifact_id=$(python3 "$repo_root/scripts/selfhost-2c/write_overhead_phase_config.py" \
-    "$experiment_root")
+    "$experiment_root" "$local_option")
 
 printf 'variant\tpair\torder\tstarted\tended\tstatus\toutput\tlog\ttime\tmetrics\texecute_ns\n' \
     > "$out_root/runs.tsv"
@@ -30,13 +35,13 @@ run_one() {
     set +e
     if [[ $variant == phase_on ]]; then
         /usr/bin/time -v -o "$time_log" "$bfc" \
-            --run-ir --ir-progress-interval 86400s \
+            --run-ir "$local_option" --ir-progress-interval 86400s \
             --ir-metrics "$metrics" \
             --ir-phase-config "$config" --ir-artifact-id "$artifact_id" \
             "$program" < /dev/null > "$output" 2> "$log"
     else
         /usr/bin/time -v -o "$time_log" "$bfc" \
-            --run-ir --ir-progress-interval 86400s \
+            --run-ir "$local_option" --ir-progress-interval 86400s \
             --ir-metrics "$metrics" "$program" \
             < /dev/null > "$output" 2> "$log"
     fi

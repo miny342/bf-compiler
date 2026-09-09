@@ -1674,8 +1674,13 @@ mod tests {
 
     #[test]
     fn optionally_collects_hot_continuation_transitions() {
-        let program = crate::lower_source(
+        // Keep dispatcher edges in this transition-collection fixture.
+        let (program, _) = crate::lower_source_with_options(
             "void main() { cell value = input(); while (value != 0) { output(value); value = value - 1; } }",
+            crate::ContinuationOptimizationOptions {
+                structure_local_control_flow: false,
+                ..Default::default()
+            },
         )
         .unwrap();
         let mut input = &[2][..];
@@ -1699,7 +1704,14 @@ mod tests {
     #[test]
     fn transition_collection_does_not_change_execution_counters() {
         let source = "void main() { cell value = input(); while (value != 0) { output(value); value = value - 1; } }";
-        let program = crate::lower_source(source).unwrap();
+        let (program, _) = crate::lower_source_with_options(
+            source,
+            crate::ContinuationOptimizationOptions {
+                structure_local_control_flow: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let run = |collect_transitions| {
             let mut input = &[2][..];
             let mut output = Vec::new();

@@ -13,16 +13,17 @@
 
 - 空Goto threading・到達不能除去・ID compactionはsource/CIR共通で採用済み。
 - 同一関数の非空Branch後継inline化（2c）は採用済み。比較用に`--disable-2c`を保持。
-- arena算術化は試作・検証後に撤回。局所if/while構造化は実験用APIとdriverを追加し、
-  境界microbenchmarkと直接IR比較まで検証済み。通常コンパイルへの採用判断は保留。
+- arena算術化は試作・検証後に撤回。単一入口の局所if/while構造化（2d）はsource/CIRの
+  production BF比較に基づき通常経路へ採用。比較用に`--disable-local-control-flow`を保持。
 - IRの継続・遷移・終端・phase別集計とportal要求集計は実装済み。
   phase設定は実入力byte列・lowering optionsのidentityに結び付ける。
   sourceは関数名、CIRは確認済みartifact限定の明示function IDを使用する。
 - 設定入力上書き防止、phaseを跨ぐportal隣接切断、identity照合と
   固定CIR mapping検証は修正済み。開始chunk再訪はphase全体の履歴指標である。
 - BF hidden dispatch/navigation計測、実験3〜5、full selfhost時間比較は未完。
-- 次は実験2の局所構造化をproduction compilerのsource/CIR生成BF・3入力で比較する。
-  `scripts/local-structure/run.py`で新しいrun rootに10ペアの結果を保存する。
+- 局所構造化のproduction比較とstage-12 selfhost機能検証は完了。
+  次の候補は残るBF側費用の計測、PC配置、portal往復削減。代表phaseの実測で優先順位を決める。
+  `scripts/local-structure/run.py`はdefault採用後もON/OFF比較を再現できる。
   `arena_advance`はphase別IR集計で熱い関数として確認された。
   portal再訪率だけからbatchの安全性・優位性を判断しない。
 

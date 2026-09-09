@@ -42,7 +42,7 @@ generate_source_artifact() {
         "$run_root/artifacts/source/$variant.bfmap.json"
         --profile-granularity continuation)
     if [[ $variant == candidate ]]; then
-        options+=(--enable-2c)
+        options+=(--enable-2c --disable-local-control-flow)
     fi
     "$compiler" "${options[@]}" "$run_root/source/stage2-compiler.bfc" \
         > "$run_root/artifacts/source/$variant.bf"
@@ -63,7 +63,7 @@ generate_cir_artifact() {
         "$run_root/artifacts/cir/$variant.bfmap.json"
         --profile-granularity continuation)
     if [[ $variant == candidate ]]; then
-        options+=(--enable-2c)
+        options+=(--enable-2c --disable-local-control-flow)
     fi
     "$compiler" "${options[@]}" > "$run_root/artifacts/cir/$variant.bf"
 }
@@ -93,7 +93,7 @@ for route in source cir; do
         fi
         options=(--unlimited-tape --profile-granularity continuation)
         if [[ $variant == candidate ]]; then
-            options+=(--enable-2c)
+            options+=(--enable-2c --disable-local-control-flow)
         fi
         if [[ $route == source ]]; then
             "$compiler" "${options[@]}" --profile-map-output \

@@ -1,4 +1,4 @@
-//! Experimental region reduction on allocated source/CIR continuations.
+//! Region reduction on allocated source/CIR continuations.
 //!
 //! Only single-entry regions are consumed. Calls, portal requests and terminal
 //! exits remain explicit; no operation crosses one of those boundaries.
@@ -13,16 +13,17 @@ use crate::continuation_optimizer::{
     ContinuationOptimizationOptions, optimize_continuations_with_options,
 };
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LocalStructureStats {
+    pub continuations_removed: usize,
     pub straight_blocks: usize,
     pub branches: usize,
     pub loops: usize,
     pub scratch_slots: usize,
 }
 
-/// Reduce local regions after allocation. This experiment is not enabled by
-/// default. The final cleanup does not run 2c again or duplicate branch bodies.
+/// Reduce local regions after allocation. The final cleanup does not run 2c
+/// again or duplicate branch bodies.
 pub fn structure_local_control_flow(
     program: &ContinuationProgram,
 ) -> Result<(ContinuationProgram, LocalStructureStats), ContinuationIrError> {
@@ -186,8 +187,10 @@ pub fn structure_local_control_flow(
         &reduced,
         ContinuationOptimizationOptions {
             inline_branch_successors: false,
+            structure_local_control_flow: false,
         },
     )?;
+    stats.continuations_removed = program.continuations().len() - compacted.continuations().len();
     Ok((compacted, stats))
 }
 
@@ -349,9 +352,21 @@ mod tests {
                 source,
                 ContinuationOptimizationOptions {
                     inline_branch_successors,
+                    structure_local_control_flow: false,
                 },
             )
             .unwrap();
+            let (integrated, integrated_stats) = crate::lower_source_with_options(
+                source,
+                ContinuationOptimizationOptions {
+                    inline_branch_successors,
+                    structure_local_control_flow: true,
+                },
+            )
+            .unwrap();
+            let (explicit, explicit_stats) = structure_local_control_flow(&program).unwrap();
+            assert_eq!(integrated, explicit);
+            assert_eq!(integrated_stats.local_structure, explicit_stats);
             for input in [0, 3] {
                 let stats = check(&program, &[input]);
                 assert!(stats.loops >= 2, "{stats:?}");
@@ -461,9 +476,21 @@ mod tests {
                 &decoded,
                 ContinuationOptimizationOptions {
                     inline_branch_successors,
+                    structure_local_control_flow: false,
                 },
             )
             .unwrap();
+            let (integrated, integrated_stats) = crate::lower_selfhost_cir_with_options(
+                &decoded,
+                ContinuationOptimizationOptions {
+                    inline_branch_successors,
+                    structure_local_control_flow: true,
+                },
+            )
+            .unwrap();
+            let (explicit, explicit_stats) = structure_local_control_flow(&program).unwrap();
+            assert_eq!(integrated, explicit);
+            assert_eq!(integrated_stats.local_structure, explicit_stats);
             for input in [0, 1, 255] {
                 assert!(check(&program, &[input]).loops > 0);
             }

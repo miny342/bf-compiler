@@ -18,12 +18,15 @@ use crate::continuation_ir::{
 pub struct ContinuationOptimizationOptions {
     /// Inline a nonempty same-function Branch successor into a Goto source.
     pub inline_branch_successors: bool,
+    /// Reconstruct single-entry local branches and loops after CFG cleanup.
+    pub structure_local_control_flow: bool,
 }
 
 impl Default for ContinuationOptimizationOptions {
     fn default() -> Self {
         Self {
             inline_branch_successors: true,
+            structure_local_control_flow: true,
         }
     }
 }
@@ -42,6 +45,7 @@ pub struct ContinuationOptimizationStats {
     pub successor_references_rewritten: usize,
     pub function_entries_rewritten: usize,
     pub continuation_ids_compacted: bool,
+    pub local_structure: crate::continuation_structure::LocalStructureStats,
 }
 
 impl ContinuationOptimizationStats {
@@ -153,7 +157,7 @@ pub fn optimize_continuations_with_options(
     let mut functions = functions;
     let mut optimized_continuations = optimized_continuations;
     let ids_compacted = compact_ids(&mut functions, &mut optimized_continuations);
-    let stats = ContinuationOptimizationStats {
+    let mut stats = ContinuationOptimizationStats {
         continuations_before: continuations.len(),
         continuations_after: optimized_continuations.len(),
         empty_gotos_before,
@@ -169,6 +173,7 @@ pub fn optimize_continuations_with_options(
         successor_references_rewritten,
         function_entries_rewritten,
         continuation_ids_compacted: ids_compacted,
+        local_structure: Default::default(),
     };
 
     let optimized = ContinuationProgram::new_with_globals(
@@ -177,7 +182,24 @@ pub fn optimize_continuations_with_options(
         functions,
         optimized_continuations,
     )?;
-    Ok((optimized, stats))
+    if options.structure_local_control_flow {
+        let (structured, local_stats) =
+            crate::continuation_structure::structure_local_control_flow(&optimized)?;
+        stats.local_structure = local_stats;
+        stats.continuation_ids_compacted |=
+            optimized.continuations().len() != structured.continuations().len();
+        stats.continuations_after = structured.continuations().len();
+        stats.empty_gotos_after = structured
+            .continuations()
+            .iter()
+            .filter(|node| {
+                node.body().is_empty() && matches!(node.terminator(), Terminator::Goto { .. })
+            })
+            .count();
+        Ok((structured, stats))
+    } else {
+        Ok((optimized, stats))
+    }
 }
 
 /// Inline a nonempty branch successor into a same-function `Goto` edge.  This
@@ -513,6 +535,7 @@ mod tests {
             &program,
             ContinuationOptimizationOptions {
                 inline_branch_successors: false,
+                structure_local_control_flow: false,
             },
         )
         .unwrap();
@@ -522,6 +545,7 @@ mod tests {
             &program,
             ContinuationOptimizationOptions {
                 inline_branch_successors: true,
+                structure_local_control_flow: false,
             },
         )
         .unwrap();

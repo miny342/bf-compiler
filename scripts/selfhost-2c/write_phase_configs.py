@@ -2,21 +2,28 @@
 """Write identity-bound phase configurations for the verified production CIR."""
 
 import hashlib
+import argparse
 import json
 import sys
 from pathlib import Path
 
+# Keep generated cache files out of the source directory.
+sys.dont_write_bytecode = True
 from ir_artifact_identity import cir_identity, source_identity
 
-if len(sys.argv) not in (2, 3):
-    raise SystemExit("usage: write_phase_configs.py EXPERIMENT_ROOT [--disable-2c]")
-
-root = Path(sys.argv[1]).resolve()
-inline_branch_successors = sys.argv[2:] != ["--disable-2c"]
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("root", type=Path)
+parser.add_argument("--disable-2c", action="store_true")
+parser.add_argument("--enable-local-control-flow", dest="local", action="store_true")
+parser.add_argument("--disable-local-control-flow", dest="local", action="store_false")
+parser.set_defaults(local=True)
+args = parser.parse_args()
+root = args.root.resolve()
+inline_branch_successors = not args.disable_2c
 source_program = root / "source" / "stage2-compiler.bfc"
 cir_program = root / "artifacts" / "cir" / "stage2-compiler.cir"
-source_id = source_identity([str(source_program)], inline_branch_successors)
-cir_id = cir_identity(str(cir_program), inline_branch_successors)
+source_id = source_identity([str(source_program)], inline_branch_successors, args.local)
+cir_id = cir_identity(str(cir_program), inline_branch_successors, args.local)
 
 # These IDs were verified against the fixed production CIR and the source/CIR
 # function correspondence recorded in the phase-portal evaluation. A new CIR
@@ -42,7 +49,8 @@ cir_phases = verified_cir_phase_ids.get(cir_raw_sha256)
 if cir_phases is None:
     raise SystemExit("no verified phase/function mapping for this production CIR")
 
-lowering_options = {"inline_branch_successors": inline_branch_successors}
+lowering_options = {"inline_branch_successors": inline_branch_successors,
+                    "structure_local_control_flow": args.local}
 
 
 def write(path: Path, value: dict) -> None:
@@ -58,7 +66,7 @@ write(
         "artifact": {
             "kind": "source",
             "id": source_id,
-            "identity_version": "bfc-ir-artifact-v1",
+            "identity_version": "bfc-ir-artifact-v2",
             "lowering_options": lowering_options,
         },
         "chunk_cells": [8, 16],
@@ -79,7 +87,7 @@ write(
         "artifact": {
             "kind": "cir",
             "id": cir_id,
-            "identity_version": "bfc-ir-artifact-v1",
+            "identity_version": "bfc-ir-artifact-v2",
             "lowering_options": lowering_options,
         },
         "chunk_cells": [8, 16],

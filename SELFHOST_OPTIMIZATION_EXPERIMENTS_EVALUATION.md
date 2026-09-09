@@ -8,6 +8,7 @@
 | continuation除去のみでIDを詰めない案 | 不採用 | 疎なpageがequality scanを選び、生成BFが増大した。密なID配置を維持する。 |
 | arena_advanceの桁上がり付き加算 | 不採用・試作撤回 | 境界とselfhost検証は通過したが、helloのraw/RLE換算命令とprocess wallが悪化。native operation削減だけでは採用しない。 |
 | 同一関数の非空Branch後継inline化（2c） | 再評価後に採用 | 当初の少数wall測定による不採用をpaired比較で見直した。source/CIR複数ケースでBF execute短縮を確認。生成BF増加を伴う。全入力で差を識別できたわけではなく、end-to-end/full selfhost改善は未確認。 |
+| 局所CFG構造化（2d） | 採用 | source/CIRの複数入力でBF execute短縮と出力一致を確認。call・portal等の境界を維持し、通常loweringで有効化。frame guard追加とID配置変化を伴うため、削減全体をloop化だけの効果とは解釈しない。full selfhost時間の改善は未確認。 |
 | IR継続・遷移・終端・phase・portal集計 | 採用 | 出力・通常counter一致とaccounting、source/CIR測定を確認。計測費用があるためオプトイン。BF hidden dispatch/navigation費用は測れていない。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
 | 高い再訪率を根拠にportal batchを優先する判断 | 撤回 | 開始chunk再訪はphase全体の履歴指標。直前要求の近さやcall/I/O/aliasを跨ぐbatch安全性を示さない。候補を調べる根拠までに限定する。 |
@@ -18,100 +19,100 @@ CIRの関数名は推測しない。frame/global regionと再帰activationを区
 
 ## 未検証の案
 
-局所if/while構造化は下記の試作・小規模検証まで完了し、通常コンパイルへの採用は保留。
 頻度に基づくPC配置、portal連続処理・専用lane、PC多分割は未採用。
+局所構造化は単一入口の直列・分岐合流・then側back-edgeを扱う。
+else側back-edge、複雑な非構造CFG、call/portal/abortを含む外側while全体の構造化は未対応。
 BF hidden dispatch/navigation計測とfull selfhost時間比較も未完。
-優先順位と必要な検証は`SELFHOST_OPTIMIZATION_EXPERIMENTS.md`を参照する。
+後続実験は`SELFHOST_OPTIMIZATION_EXPERIMENTS.md`を参照する。
 
 ## このコミットの作業結果
 
-### 実験2d：局所CFG構造化の試作
+### 局所CFG構造化の通常経路への採用
 
-開始baselineは`ca33380`。source/CIR共通のallocated Continuation IRに対して、
-単一入口の直列block、合流する分岐、then側が戻る局所loopを反復してまとめる。
-2c適用済みbaselineの後に追加し、最後のcleanupは2cを再適用せずIDを詰め直す。
-call・portal・return・abort境界は維持し、関数entryとcall/portal resumeもincomingとして数える。
-外部参照のある内部blockは吸収しない。else側back-edgeや複雑な非構造CFGは対象外。
+実験用driverと同じ順序（既存cleanup・2c後に構造化、最後に2cなしのcleanup）で
+source/CIR共通optimizerへ組み込んだ。
+`--enable-local-control-flow` / `--disable-local-control-flow`で切り替えられ、
+defaultは有効。2cも引き続き有効で、両optionは独立に設定できる。
 
-終端Branchは条件を分岐前だけ消費するが、FrameInstruction::Branchは分岐後にも消す。
-allocated slotの再利用を壊さないよう、分岐をまとめる関数に専用guard slotを1つ追加する。
-ネスト時もguardを再利用でき、backendのelse flagは別の既存scratchで確保される。
-Loopではback-edge前の条件消費と条件本体の再評価を明示する。
-frame allocationのやり直しは行わず、追加slotを含むframe layoutはbackendが計算する。
+専用guard slotで条件cellの分岐後の再利用を保護し、call・portal・return・abort境界と
+外部からの入口を維持する。既存allocation後に変換し、追加slotを含むlayoutをbackendで計算する。
+static metricsにはlocal構造化による継続削減・直列結合・分岐・loop・scratch追加数を別項目で保存する。
 
-`structure_local_control_flow`と`examples/local_structure.rs`は実験用入口であり、
-通常のCLI・default loweringは変更していない。採用時にはoptionsとartifact identityにも
-反映し、実験用driverの結果と通常経路の一致を確認する必要がある。
+artifact identityを`bfc-ir-artifact-v2`へ更新し、順序・境界付きraw入力に加えて
+2cと局所構造化の設定をhashへ含めた。旧identity設定は再生成が必要。
+Python helper・固定fixtureも更新し、設定IDだけでなくversionとoptionsの不一致も拒否する。
+固定CIRの関数ID mappingは従来どおり確認済みraw hashに限定する。
 
-### 今回の検証
+### production BF比較
 
-`cargo test --workspace`は269件成功。追加4テストは条件slotを両armで上書きする例、
-ネストしたif/whileとI/O、call・再帰・portal・abort、CIRの0/1/255境界を扱う。
-2c有効/無効のloop形状、D=8/D=16生成BFと直接IRの出力一致を確認した。
-CIR fixtureの初版は破壊的Binaryのsource operandを再設定せず停止しなかったため、
-そのテスト実行を中断し、各反復で再設定するfixtureに修正してworkspace全体を再実行した。
-最終ログは`tmp/local-structure/workspace-tests-final.log`。
+比較開始commitは`c14a053`。固定production source/CIRに対し、2c有効のbaselineと
+局所構造化を追加したcandidateを同じrelease driver/interpreterで比較した。
+各経路・各入力でwarm-up後AB/BA交互10ペア。全132実行（warm-up込み）の出力が
+対応する直接IRの出力と一致した。
 
-固定production sourceは現在のconcat出力とSHA-256が一致した。
-source=`9fdab34bc55be1329256fb93c360d8bfb7ce756e4888ce8d9eb972ac731838e6`、
-CIR=`c7ff5b09e53714b4e9a2278ee4aee36c8fc88d868f49138c5c1a632fcdb5c2bb`。
-直接IRで3入力を比較し、baseline/candidateおよびsource/CIRの出力が一致した。
-各経路内でcall・return・portal・I/O回数と正常終了も一致。
-生成された3入力分のBFも実行し、各入力をRust frontendの直接IRで実行した結果と一致した
-（stage5の入力はEOF条件）。
+以下のexecuteは生成されたcompiler BFの実行時間であり、直接IR時間ではない。
+差分区間はpaired median bootstrap 95% CI。process wallはparseとプロセス起動等も含む。
 
-| 経路/input | baseline continuation実行 | candidate continuation実行 |
+| 経路/input | BF execute中央値 baseline→candidate | execute差分95% CI | process wall中央値 baseline→candidate |
+|---|---:|---:|---:|
+| source/hello | 106.559→84.834 ms（-20.39%） | -22.765〜-20.659 ms | 22.942→22.908 s |
+| source/stage5_functions | 824.095→642.328 ms（-22.06%） | -188.186〜-174.407 ms | 23.532→23.261 s |
+| source/stage8_aggregates | 1,351.888→1,044.073 ms（-22.77%） | -310.463〜-297.150 ms | 23.891→23.581 s |
+| CIR/hello | 118.355→102.573 ms（-13.33%） | -16.280〜-14.556 ms | 3.487→3.491 s |
+| CIR/stage5_functions | 976.680→839.633 ms（-14.03%） | -142.780〜-134.572 ms | 4.377→4.201 s |
+| CIR/stage8_aggregates | 1,596.141→1,362.362 ms（-14.65%） | -235.567〜-230.400 ms | 4.980→4.719 s |
+
+全6件のexecute差分区間は負。process wallはstage5/stage8の両経路で短縮を支持し、
+helloの両経路は0を含むため改善を識別できない。
+sourceのparse中央値は約20秒、CIRは約3秒で、executeの改善率をprocess wallへ流用しない。
+
+| 経路 | BF bytes baseline→candidate | map bytes baseline→candidate |
 |---|---:|---:|
-| source/hello | 64,284 | 27,936 |
-| source/stage5_functions | 532,821 | 222,851 |
-| source/stage8_aggregates | 826,243 | 341,362 |
-| CIR/hello | 52,690 | 51,594 |
-| CIR/stage5_functions | 435,945 | 420,732 |
-| CIR/stage8_aggregates | 681,695 | 637,340 |
+| source | 5,949,341,515→5,949,341,072 | 10,983,719→10,336,419 |
+| CIR | 873,058,539→873,066,794 | 12,497,651→12,443,868 |
 
-静的継続数はsourceで4,980→4,300、CIRで5,155→5,064。
-sourceでは直列223・分岐240・loop 8、CIRでは直列29・分岐46・loop 8を変換した。
-これはIR計測であり、BF時間改善率ではない。ログは`tmp/local-structure/ir/`。
+最大pointerは全6件で変化なし。RSS差は小さい。
+sourceのraw実行命令はわずかに増加した一方、RLE換算命令・native operations・実行時間は減少。
+CIRはこれらが減少した。副指標を速度の代用にせず、実時間を採用根拠とする。
+CIRでは継続訪問の削減率よりBF時間の短縮率が大きく、ID compaction後のdispatcher配置などの
+寄与は分離していない。full selfhost完走時間や代表phaseのBF時間改善は未確認。
 
-### arena境界microbenchmarkのBF比較
+生ログ、入力・binary identity、全統計とBF/map hash：
+`tmp/local-structure/production-run/{manifest,artifacts,ir,summary}.json`、
+`runs.jsonl`および同directoryの各runログ。元の測定物は上書きしていない。
 
-既存arena_micro sourceと同じ内容の固定CIRを使用した。amount=0/1/255、slot末尾、
-page/bank境界を32反復する。入力ファイル名はrunner上でhelloだが、このmainはstdinを読まない。
-2cは両variantで有効、同じrelease driver/interpreter、warm-up後AB/BA交互10ペア。
-各BF/mapは同時生成し、unprofiled時間測定と別にcandidateのsample profileを取得して
-両経路のmap受理・出力一致を確認した。profile sample数は意味上の実行回数に換算しない。
+### 通常経路の検証
 
-| 経路 | BF execute中央値 baseline→candidate | paired差分95% CI | process wall中央値 | BF bytes baseline→candidate |
-|---|---:|---:|---:|---:|
-| source | 47.664→27.062 ms（-43.22%） | -21.782〜-20.154 ms | 887.327→816.247 ms | 107,768,541→107,768,153 |
-| CIR | 101.350→68.558 ms（-32.36%） | -34.707〜-31.803 ms | 3,512.080→3,489.586 ms | 873,106,720→873,114,661 |
+- `cargo test --workspace`は270件成功。
+  D=8/D=16、条件slot再利用、ネスト、CIR境界、call・再帰・portal・abortに加え、
+  CLI設定切替、source/CIR identity差、古いversionと偽のoptionsの拒否を確認した。
+  source/CIRとも、統合APIのIRが独立実験APIと完全一致するテストを追加した。
+- CLI defaultと明示OFFでproduction BF/mapを再生成し、source/CIRの計4組すべてが
+  測定に使用した実験driverのBF/mapとbyte単位で一致した。
+- default ONのsource/CIR×3入力でphase/portal設定を再生成し、accountingと出力一致を確認した。
+  source identityは`0a68efe1fe20a3e5312e4a8d99cf58b0f8eb1ee19d75e929caafd2f0728153d3`、
+  CIR identityは`eb5f20d2eb75d8c20b1ee99df4187ea639c1ec1bb8784daa90e2832f91ac088a`。
+- 2c専用の既存比較scriptは局所構造化を明示OFFに固定し、別の最適化を混ぜない。
+  phase/portal runnerは第3引数でONも選べる。新旧のphase集計を同じartifactと取り違えない。
+  切替後のrunnerもON/OFF各6件のphase集計・出力一致と、overhead fixtureの設定照合を確認した。
+- `scripts/verify-stage2-selfhost.sh`も正常終了し、`stage-12 self-host verification passed`を確認。
+  compiler自身のテスト、無効入力、global・aggregate・snapshot・型・macro・大きいASTの
+  生成と実行をdefault ONで検証した。これは機能検証であり、full selfhostの時間比較ではない。
 
-sourceのprocess wall差分区間は負、CIRは0を含む。最大pointerは両経路とも変化なし。
-全実行の出力checksumは`ba9e12b580adf8cf5e53fbaf81f09ef7ba814b4a5e88bf4bce77353c32684e11`。
-全raw/RLE命令数・native operations・parse/execute・RSS・BF/map hashは
-`tmp/local-structure/arena-run/{summary,artifacts,manifest}.json`と`runs.jsonl`に保存した。
+検証ログは`tmp/local-structure/integration-tests-final.log`、
+再生成BF/mapとphase結果は`tmp/local-structure/integration/`、
+切替scriptの検証結果は`tmp/local-structure/phase-cli-on/`と`phase-cli-off/`、
+追加selfhost検証ログは`tmp/local-structure/integration-selfhost.log`。
+通常経路を検証するbuild・テストは反復性能測定の完了後に行った。
 
-arena sourceは内部分岐の統合が効き、fail callを含む外側whileは局所loopになっていない。
-CIR microのIR訪問削減は小さい一方、BF時間は短縮した。ID compactionに伴うdispatcher配置の
-変化などの寄与は分離できておらず、短縮全体を局所loop化の効果と解釈しない。
+### 再現
 
-### 判断と再現
+`scripts/local-structure/run.py`のbaselineは局所構造化OFFを明示するため、default採用後も
+実験を再現できる。新しいrun rootと同一内容のsource/CIR、3入力を指定する。
+`--driver`にはrelease example `local_structure`、`--interpreter`には同じrelease interpreterを使う。
 
-小規模では有望だが、production BF・複数入力・full selfhost代表phaseの時間は未測定。
-通常経路への採用を保留し、次にproduction source/CIRのBF比較を行う。
-今回の実験コードと回帰テスト・runnerをcommitし、次のコミットではこの作業結果節を置き換える。
-
-```sh
-mkdir -p ./tmp/local-structure/cargo-tmp
-TMPDIR="$PWD/tmp/local-structure/cargo-tmp" CARGO_TARGET_DIR="$PWD/tmp/local-structure/build" \
-  cargo build --release -p bf-compiler --example local_structure -p bf-interpreter --bin bf-interpreter
-python3 scripts/local-structure/run.py ./tmp/local-structure/NEW-RUN \
-  --driver ./tmp/local-structure/build/release/examples/local_structure \
-  --interpreter ./tmp/local-structure/build/release/bf-interpreter \
-  --source SOURCE.bfc --cir SAME_PROGRAM.cir --inputs INPUT.bfc
-```
-
-runnerは新しいrootを要求し、identity・IR出力と通常counter・BF出力一致を確認してから
-集計する。production比較では`--inputs`にhello、stage5_functions、stage8_aggregatesを指定する。
-sourceは`concat-stage2-compiler.sh main`、対応CIRは同じsourceをstage2 CIR compilerへ
-入力して生成する。既存固定CIRを使う場合もmanifestに実byte列のhashを記録する。
+phase集計は`scripts/selfhost-2c/run_ir_phase_portal.sh RUN_ROOT REPO_ROOT --enable-local-control-flow`。
+既存2c artifactに対応させる場合は第3引数を省略（OFF）する。
+selfhost検証はリポジトリ内の`TMPDIR`と`CARGO_TARGET_DIR`を指定して
+`bash scripts/verify-stage2-selfhost.sh`を実行する。
+次のコミットではこの作業結果節を置き換え、採否と制約だけを継続して保持する。
