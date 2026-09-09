@@ -13,6 +13,7 @@ mod continuation_adapter;
 mod continuation_ir;
 mod continuation_lowering;
 mod continuation_optimizer;
+mod continuation_structure;
 mod continuation_vm;
 mod frame_allocation;
 mod frame_layout;
@@ -55,6 +56,7 @@ pub use continuation_optimizer::{
     ContinuationOptimizationOptions, ContinuationOptimizationStats, optimize_continuations,
     optimize_continuations_with_options,
 };
+pub use continuation_structure::{LocalStructureStats, structure_local_control_flow};
 pub use continuation_vm::{
     ContinuationPhaseBoundary, ContinuationPhaseConfig, ContinuationRunOptions,
     ContinuationRunProgress, ContinuationRunStats, ContinuationTerminatorKind, ContinuationVmError,

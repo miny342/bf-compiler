@@ -418,6 +418,11 @@ impl FunctionDescriptor {
         self.frame_slots
     }
 
+    pub(crate) fn with_frame_slots(mut self, frame_slots: usize) -> Self {
+        self.frame_slots = frame_slots;
+        self
+    }
+
     pub fn frame_arrays(&self) -> &[FrameArrayDescriptor] {
         &self.frame_aggregates
     }
