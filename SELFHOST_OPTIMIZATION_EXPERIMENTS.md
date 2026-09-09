@@ -73,7 +73,7 @@ NEXT/FIX文書は作らない。AGENTS.mdに従いsubagentと`/tmp`は使わな�
 再測定値、訂正後の判断、未計測の境界を`SELFHOST_OPTIMIZATION_EXPERIMENTS_EVALUATION.md`
 へ追記した。次の最適化はこの修正範囲に含めていない。
 
-## 前回の作業（実装済み・レビュー修正中）：実験1のphase・portal集計
+## 前回の作業（完了・レビュー修正済み）：実験1のphase・portal集計
 
 新規セッションは`gpt-5.6-luna`を使用する。本節の実装・検証・小規模計測・記録までを
 今回の完了範囲とした。次の最適化そのものや長時間full selfhost実行は開始していない。

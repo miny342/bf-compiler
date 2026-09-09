@@ -266,11 +266,12 @@ phase OFFでも既存のtransition収集はON、phase ONだけが新しいphase/
 ### 判断と残課題
 
 実測ではportal要求の同一region隣接率が0.850〜1.000、開始chunk再訪率がD=8で
-0.902〜0.950、D=16で0.938〜0.972と高く、まずはportal連続処理を次に試す根拠がある。
+0.902〜0.950、D=16で0.938〜0.972と高く、portal連続処理の候補を調べる根拠がある。
 同時に`arena_advance`のphase実行数も大きく、局所構造化の候補は残る。ただしこれはIRの
 要求・継続回数であり、BF hidden portalのdispatch/navigation回数や時間改善率ではない。
-したがって、次の最適化ではportal連続処理を先に小fixtureで検証し、局所構造化を別軸で
-比較するのが妥当である。CIRのsource function名対応、BF hidden dispatch event、巨大BFの
+当初の「portal連続処理を優先する」という判断はレビューで撤回した。開始chunk再訪率は
+phase全体の履歴指標であり、安全な一括処理や局所構造化に対する優位性は示さない。
+訂正後の判断は後掲「5bdb6deレビュー修正と再評価」を参照。CIRのsource function名対応、BF hidden dispatch event、巨大BFの
 再生成、長時間full selfhost、実験3〜5は今回の範囲外で未実施である。
 
 再実行は次のコマンドで行える。既存結果を上書きしないため、新しいrun rootを指定する。
@@ -381,7 +382,7 @@ OFF側も既存transition収集はONで、新phase/portal集計だけをON側で
 ### 検証・残課題
 
 `cargo test -p bf-compiler --test ir_metrics_cli`の4件、artifact identity SHA-256/順序・境界
-unit test、`cargo test --workspace`を実行する。修正はphase設定、集計境界、identity検証、評価の
-意味に限定し、既存ユーザー変更はcommitしない。BF hidden dispatch/navigation event、CIRの
+unit test、`cargo test --workspace`は成功した。依頼元の再検証でも全265テストが成功した。
+修正はphase設定、集計境界、identity検証、評価の意味に限定し、既存ユーザー変更はcommitしていない。BF hidden dispatch/navigation event、CIRの
 source function名対応、portalのalias/call/I/Oを跨ぐ安全なbatch判定、巨大BF・full selfhost、
 実験3〜5は未実施である。
