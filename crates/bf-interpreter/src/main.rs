@@ -75,6 +75,7 @@ enum ProfileFormat {
 }
 
 struct CliOptions {
+    disable_remote_transfer: bool,
     print_stats: bool,
     print_timings: bool,
     unlimited_tape: bool,
@@ -166,6 +167,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         &source,
         &input,
         RunOptions {
+            disable_remote_transfer: options.disable_remote_transfer,
             unbounded_tape: options.unlimited_tape,
             collect_stats: options.print_stats || profile.is_some(),
             collect_timings: options.print_timings || profile.is_some(),
@@ -240,6 +242,7 @@ fn parse_arguments(
     let mut print_stats = false;
     let mut print_timings = false;
     let mut unlimited_tape = false;
+    let mut disable_remote_transfer = false;
     let mut program_path = None;
     let mut profile_map_path = None;
     let mut accept_embedded_profile = false;
@@ -258,6 +261,8 @@ fn parse_arguments(
             print_timings = true;
         } else if argument == "--unlimited-tape" {
             unlimited_tape = true;
+        } else if argument == "--disable-remote-transfer" {
+            disable_remote_transfer = true;
         } else if argument == "--profile-map" {
             profile_map_path = Some(PathBuf::from(required_value(
                 executable,
@@ -339,6 +344,7 @@ fn parse_arguments(
         return Err("--no-progress cannot be combined with --progress-interval".into());
     }
     Ok(CliOptions {
+        disable_remote_transfer,
         print_stats,
         print_timings,
         unlimited_tape,
@@ -420,6 +426,18 @@ fn parse_duration(value: &OsStr) -> Result<Duration, String> {
 }
 
 fn print_stats(stats: &RunStats) {
+    eprintln!(
+        "remote_transfer_loops={}",
+        stats.optimization.remote_transfer_loops
+    );
+    eprintln!(
+        "remote_transfer_iterations={}",
+        stats.optimization.remote_transfer_iterations
+    );
+    eprintln!(
+        "remote_transfer_fallbacks={}",
+        stats.optimization.remote_transfer_fallbacks
+    );
     eprintln!("executed_instructions={}", stats.executed_instructions);
     eprintln!(
         "executed_rle_instructions={}",
@@ -579,7 +597,7 @@ fn render_text_report(
         result.stats.max_pointer,
     ));
     output.push_str(&format!(
-        "native_operations={} rle_operations={} clear_loops={} scan_loops={} scan_steps={} transfer_loops={} transfer_iterations={}\n",
+        "native_operations={} rle_operations={} clear_loops={} scan_loops={} scan_steps={} transfer_loops={} transfer_iterations={} remote_transfer_loops={} remote_transfer_iterations={} remote_transfer_fallbacks={}\n",
         result.stats.optimization.executed_native_operations,
         result.stats.optimization.rle_operations,
         result.stats.optimization.clear_loops,
@@ -587,6 +605,9 @@ fn render_text_report(
         result.stats.optimization.scan_steps,
         result.stats.optimization.transfer_loops,
         result.stats.optimization.transfer_iterations,
+        result.stats.optimization.remote_transfer_loops,
+        result.stats.optimization.remote_transfer_iterations,
+        result.stats.optimization.remote_transfer_fallbacks,
     ));
     let duration_sum = profile
         .sites
@@ -675,6 +696,9 @@ fn render_json_report(
             "executed_rle_instructions": result.stats.executed_rle_instructions,
             "max_pointer": result.stats.max_pointer,
             "optimization": {
+                "remote_transfer_loops": result.stats.optimization.remote_transfer_loops,
+                "remote_transfer_iterations": result.stats.optimization.remote_transfer_iterations,
+                "remote_transfer_fallbacks": result.stats.optimization.remote_transfer_fallbacks,
                 "executed_native_operations": result.stats.optimization.executed_native_operations,
                 "rle_operations": result.stats.optimization.rle_operations,
                 "clear_loops": result.stats.optimization.clear_loops,
@@ -783,6 +807,9 @@ fn render_site_children(
 
 fn counters_json(counters: SiteCounters) -> Value {
     json!({
+        "remote_transfer_loops": counters.remote_transfer_loops,
+        "remote_transfer_iterations": counters.remote_transfer_iterations,
+        "remote_transfer_fallbacks": counters.remote_transfer_fallbacks,
         "fast_operations": counters.fast_operations,
         "raw_bf_instructions": counters.raw_bf_instructions,
         "rle_instructions": counters.rle_instructions,
@@ -819,7 +846,7 @@ fn duration_percent(numerator: u128, denominator: u128) -> f64 {
 
 fn usage(executable: &OsStr) -> String {
     format!(
-        "usage: {} [--stats] [--timings] [--unlimited-tape] [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
+        "usage: {} [--stats] [--timings] [--unlimited-tape] [--disable-remote-transfer] [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
          [--profile-mode counters|sample|exact] [--profile-sample-interval 1ms] \
          [--profile-output PATH] [--profile-format text|json] <program.bf>\n\
          Accepts ordinary BF and auto-detects @BFCRLE1; compressed BF.",

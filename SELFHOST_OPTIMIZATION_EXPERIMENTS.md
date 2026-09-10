@@ -12,6 +12,10 @@
 ## 現在地と次の作業
 
 - 空Goto threading・到達不能除去・ID compactionはsource/CIR共通で採用済み。
+- BFCRLE v1はRust版の `--compressed-bf` で使用可能。通常BFとprofile互換を維持する。
+- interpreterのRemoteTransferを採用。Scan経路と更新先が独立な局所転送を実行時に
+  一括化し、`--disable-remote-transfer`で比較可能。BF生成・nibble搬送ABIは未変更。
+  compiler側のportal batch/専用laneとは別の最適化として評価する。
 - 同一関数の非空Branch後継inline化（2c）は採用済み。比較用に`--disable-2c`を保持。
 - arena算術化は試作・検証後に撤回。単一入口の局所if/while構造化（2d）はsource/CIRの
   production BF比較に基づき通常経路へ採用。比較用に`--disable-local-control-flow`を保持。
@@ -132,6 +136,10 @@ page幅・page順・page内順を候補にし、hidden portal優先の現方式�
 これは単なる符号の並べ替えとは別の実験にする。
 
 ## 実験4：portalの連続処理と移動ABI
+
+interpreter側のRemoteTransferでScan付き転送を一括化できるようになった。
+今後のABI/nibble比較ではinterpreter設定を固定し、必要ならON/OFFの両方を測る。
+既存BFの実行高速化と、BF自体の往復・搬送量削減は区別する。
 
 既存profileでwindow左右・global navigationが重かったことから、offsetだけでなく往復数を減らす。
 現 `jump_portal_window` は、16セルのprotocolと移動先payloadの値を交換する。

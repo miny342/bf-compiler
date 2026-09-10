@@ -10,6 +10,8 @@
 | 同一関数の非空Branch後継inline化（2c） | 再評価後に採用 | 当初の少数wall測定による不採用をpaired比較で見直した。source/CIR複数ケースでBF execute短縮を確認。生成BF増加を伴う。全入力で差を識別できたわけではなく、end-to-end/full selfhost改善は未確認。 |
 | 局所CFG構造化（2d） | 採用 | source/CIRの複数入力でBF execute短縮と出力一致を確認。call・portal等の境界を維持し、通常loweringで有効化。frame guard追加とID配置変化を伴うため、削減全体をloop化だけの効果とは解釈しない。full selfhost時間の改善は未確認。 |
 | IR継続・遷移・終端・phase・portal集計 | 採用 | 出力・通常counter一致とaccounting、source/CIR測定を確認。計測費用があるためオプトイン。BF hidden dispatch/navigation費用は測れていない。 |
+| BFCRLE v1テキスト圧縮 | 採用（オプトイン） | Rust版出力のSSD書込量を削減。通常BF互換を維持し、profileの展開後ordinal/identityとinline markerを保つ。セルフホスト版の出力は未変更。 |
+| interpreter RemoteTransfer | 採用 | BFの意味から経路不変性を実行時検証してScan往復を一括転送へ置換。source由来BFの複数入力で出力・論理counter一致とexecute短縮を確認。不成立時は通常実行。CIR/full selfhost時間比較は未実施。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
 | 高い再訪率を根拠にportal batchを優先する判断 | 撤回 | 開始chunk再訪はphase全体の履歴指標。直前要求の近さやcall/I/O/aliasを跨ぐbatch安全性を示さない。候補を調べる根拠までに限定する。 |
 
@@ -27,92 +29,77 @@ BF hidden dispatch/navigation計測とfull selfhost時間比較も未完。
 
 ## このコミットの作業結果
 
-### 局所CFG構造化の通常経路への採用
+### RemoteTransferの採用
 
-実験用driverと同じ順序（既存cleanup・2c後に構造化、最後に2cなしのcleanup）で
-source/CIR共通optimizerへ組み込んだ。
-`--enable-local-control-flow` / `--disable-local-control-flow`で切り替えられ、
-defaultは有効。2cも引き続き有効で、両optionは独立に設定できる。
+Scanを含むMove/Add loopをFastIRのRemoteTransferへ落とす。コンパイラの出力・ABIは変更しない。
+通常BFとBFCRLE v1の双方でdefault ON、`--disable-remote-transfer`で比較できる。
 
-専用guard slotで条件cellの分岐後の再利用を保護し、call・portal・return・abort境界と
-外部からの入口を維持する。既存allocation後に変換し、追加slotを含むlayoutをbackendで計算する。
-static metricsにはlocal構造化による継続削減・直列結合・分岐・loop・scratch追加数を別項目で保存する。
+32命令以下の候補を実行時に読み取り専用で探索し、元のpointerへ戻ること、
+Scanの全判定セル（ゼロ終端を含む）と更新先の非重複、元セルの正味delta ±1を確認する。
+複数更新先・係数付き転送に対応し、不成立・未割当領域への移動では元のloopへ戻す。
+既存のClear/Scan/固定offset Transferは維持する。nibble生成側は変更していない。
 
-artifact identityを`bfc-ir-artifact-v2`へ更新し、順序・境界付きraw入力に加えて
-2cと局所構造化の設定をhashへ含めた。旧identity設定は再生成が必要。
-Python helper・固定fixtureも更新し、設定IDだけでなくversionとoptionsの不一致も拒否する。
-固定CIRの関数ID mappingは従来どおり確認済みraw hashに限定する。
+raw/RLE換算命令・最大pointerと出力は不変。profileの論理移動距離・loop回数も保持し、
+融合したnative operationはsiteのLCAへ帰属する。
+remote_transfer_loops / iterations / fallbacksをstatsとprofileに追加した。
+独立したScanのcounterは減るが、経路探索もあるためその削減率を実メモリアクセス削減率とはしない。
 
-### production BF比較
+### production source BF比較
 
-比較開始commitは`c14a053`。固定production source/CIRに対し、2c有効のbaselineと
-局所構造化を追加したcandidateを同じrelease driver/interpreterで比較した。
-各経路・各入力でwarm-up後AB/BA交互10ペア。全132実行（warm-up込み）の出力が
-対応する直接IRの出力と一致した。
+圧縮対応commit `d441d20` を基点とし、同じrelease interpreterと同じstage2 compiler BFを使用。
+BFは圧縮＋inline metadata付きだが、測定はprofileなし（markerはコメントとして扱う）。
+各入力warm-up後AB/BA交互10ペア、計66実行。別のBFを生成して比較したものではない。
+全runで出力hash、raw/RLE換算命令数、最大pointerが一致した。
 
-以下のexecuteは生成されたcompiler BFの実行時間であり、直接IR時間ではない。
-差分区間はpaired median bootstrap 95% CI。process wallはparseとプロセス起動等も含む。
-
-| 経路/input | BF execute中央値 baseline→candidate | execute差分95% CI | process wall中央値 baseline→candidate |
+| 入力 | execute中央値 OFF→ON | execute差分95% CI | process_total中央値 OFF→ON |
 |---|---:|---:|---:|
-| source/hello | 106.559→84.834 ms（-20.39%） | -22.765〜-20.659 ms | 22.942→22.908 s |
-| source/stage5_functions | 824.095→642.328 ms（-22.06%） | -188.186〜-174.407 ms | 23.532→23.261 s |
-| source/stage8_aggregates | 1,351.888→1,044.073 ms（-22.77%） | -310.463〜-297.150 ms | 23.891→23.581 s |
-| CIR/hello | 118.355→102.573 ms（-13.33%） | -16.280〜-14.556 ms | 3.487→3.491 s |
-| CIR/stage5_functions | 976.680→839.633 ms（-14.03%） | -142.780〜-134.572 ms | 4.377→4.201 s |
-| CIR/stage8_aggregates | 1,596.141→1,362.362 ms（-14.65%） | -235.567〜-230.400 ms | 4.980→4.719 s |
+| hello | 83.674→76.625 ms（-8.43%） | -9.593〜-5.603 ms | 661.798→650.568 ms |
+| stage5_functions | 631.653→560.285 ms（-11.30%） | -78.970〜-60.413 ms | 1,189.184→1,154.853 ms |
+| stage8_aggregates | 1,034.468→932.057 ms（-9.90%） | -105.339〜-92.296 ms | 1,617.495→1,515.461 ms |
 
-全6件のexecute差分区間は負。process wallはstage5/stage8の両経路で短縮を支持し、
-helloの両経路は0を含むため改善を識別できない。
-sourceのparse中央値は約20秒、CIRは約3秒で、executeの改善率をprocess wallへ流用しない。
+区間はpaired median差のbootstrap（10,000 resamples、seed 20260910）。
+execute差は3入力とも負。process_totalはstage5/stage8で短縮を支持し、helloは0を含む。
+parse差は3入力とも0を含み、この比較では改善・悪化を識別しない。
+process_totalはinterpreter内計測（read/parse/execute/outputを含む）であり、
+外部プロセス起動から終了までのwall時間とは区別する。
+CIR由来BF・full self-compilation時間の比較は未実施。
 
-| 経路 | BF bytes baseline→candidate | map bytes baseline→candidate |
-|---|---:|---:|
-| source | 5,949,341,515→5,949,341,072 | 10,983,719→10,336,419 |
-| CIR | 873,058,539→873,066,794 | 12,497,651→12,443,868 |
+stage8ではRemoteTransfer適用277,503回、まとめた反復1,633,821回、fallback 5回。
+native operationsは233,257,625→219,214,685。
+実行時間改善を採用根拠とし、命令counterだけで判断していない。
 
-最大pointerは全6件で変化なし。RSS差は小さい。
-sourceのraw実行命令はわずかに増加した一方、RLE換算命令・native operations・実行時間は減少。
-CIRはこれらが減少した。副指標を速度の代用にせず、実時間を採用根拠とする。
-CIRでは継続訪問の削減率よりBF時間の短縮率が大きく、ID compaction後のdispatcher配置などの
-寄与は分離していない。full selfhost完走時間や代表phaseのBF時間改善は未確認。
+生データ・入力/BF/binary hash：
+`tmp/remote-transfer-measurement/{manifest,summary}.json`、
+`runs.jsonl`、後処理の`paired-intervals.json`。
+比較scriptは`scripts/remote-transfer/run.py`。新規rootと
+`--interpreter`、`--program`、`--inputs`、`--pairs 10`を指定する。
 
-生ログ、入力・binary identity、全統計とBF/map hash：
-`tmp/local-structure/production-run/{manifest,artifacts,ir,summary}.json`、
-`runs.jsonl`および同directoryの各runログ。元の測定物は上書きしていない。
+### full selfhost途中の観測（性能比較ではない）
 
-### 通常経路の検証
+ユーザーの `full7.metrics` はsample modeで、取得した末尾はelapsed 3,300秒、
+入力184,330 bytes、出力蓄積7,340,721,984 bytes。ソースhashを既存のfunction mappingと
+照合し、function.180/continuation.3760はemit_repeat_256、function.29/continuation.299は
+emit_move_toと確認した。最後の60秒ではportal左右の累積samplesは変わらず、
+emit_repeat_256のbranch/copyが増加しており、当該区間はcodegenの反復出力が主な候補。
+累積上位siteを現在phaseの順位と誤解しない。
 
-- `cargo test --workspace`は270件成功。
-  D=8/D=16、条件slot再利用、ネスト、CIR境界、call・再帰・portal・abortに加え、
-  CLI設定切替、source/CIR identity差、古いversionと偽のoptionsの拒否を確認した。
-  source/CIRとも、統合APIのIRが独立実験APIと完全一致するテストを追加した。
-- CLI defaultと明示OFFでproduction BF/mapを再生成し、source/CIRの計4組すべてが
-  測定に使用した実験driverのBF/mapとbyte単位で一致した。
-- default ONのsource/CIR×3入力でphase/portal設定を再生成し、accountingと出力一致を確認した。
-  source identityは`0a68efe1fe20a3e5312e4a8d99cf58b0f8eb1ee19d75e929caafd2f0728153d3`、
-  CIR identityは`eb5f20d2eb75d8c20b1ee99df4187ea639c1ec1bb8784daa90e2832f91ac088a`。
-- 2c専用の既存比較scriptは局所構造化を明示OFFに固定し、別の最適化を混ぜない。
-  phase/portal runnerは第3引数でONも選べる。新旧のphase集計を同じartifactと取り違えない。
-  切替後のrunnerもON/OFF各6件のphase集計・出力一致と、overhead fixtureの設定照合を確認した。
-- `scripts/verify-stage2-selfhost.sh`も正常終了し、`stage-12 self-host verification passed`を確認。
-  compiler自身のテスト、無効入力、global・aggregate・snapshot・型・macro・大きいASTの
-  生成と実行をdefault ONで検証した。これは機能検証であり、full selfhostの時間比較ではない。
+現interpreter CLIは出力をVecへ蓄積し完走後にstdoutへ書くため、output_bytesは
+ディスク書込済み量ではない。出力蓄積とともにRSSも増えている。
+この観測は同じ進捗・計測modeのOFF比較ではなく、full selfhostの改善率・完走を示さない。
+セルフホスト側RLE生成や出力streamingは今回実装していない。
 
-検証ログは`tmp/local-structure/integration-tests-final.log`、
-再生成BF/mapとphase結果は`tmp/local-structure/integration/`、
-切替scriptの検証結果は`tmp/local-structure/phase-cli-on/`と`phase-cli-off/`、
-追加selfhost検証ログは`tmp/local-structure/integration-selfhost.log`。
-通常経路を検証するbuild・テストは反復性能測定の完了後に行った。
+### 検証
 
-### 再現
+- `cargo test --workspace`：280件成功。
+- 全256初期値、左右方向、Scan長0を含む複数距離、加減算係数、複数転送先を
+  従来FastIR実行と比較し、tape全体・pointer・raw/RLE換算回数を確認。
+- Scan判定セルとのalias、元のpointerへ戻らない経路、境界エラー、
+  動的テープ拡張、失敗探索の無副作用、探索中のinterruptを確認。
+- 通常BF・圧縮BF・inline marker付きBFで出力とraw reference counterを照合。
+  counters/exact/sampleの各modeとsite融合後の集計を確認。
+- `scripts/verify-stage2-selfhost.sh`成功（stage-12 self-host verification passed）。
+  Rust版生成物は圧縮し、セルフホスト版の通常BF出力も実行した。
 
-`scripts/local-structure/run.py`のbaselineは局所構造化OFFを明示するため、default採用後も
-実験を再現できる。新しいrun rootと同一内容のsource/CIR、3入力を指定する。
-`--driver`にはrelease example `local_structure`、`--interpreter`には同じrelease interpreterを使う。
-
-phase集計は`scripts/selfhost-2c/run_ir_phase_portal.sh RUN_ROOT REPO_ROOT --enable-local-control-flow`。
-既存2c artifactに対応させる場合は第3引数を省略（OFF）する。
-selfhost検証はリポジトリ内の`TMPDIR`と`CARGO_TARGET_DIR`を指定して
-`bash scripts/verify-stage2-selfhost.sh`を実行する。
-次のコミットではこの作業結果節を置き換え、採否と制約だけを継続して保持する。
+ログ：`tmp/remote-transfer-tests-final.log`、`tmp/remote-transfer-unit.log`、
+`tmp/remote-transfer-selfhost.log`。最終workspace/selfhost検証は反復性能測定後に実行した。
+次のコミットではこの作業結果節を置き換え、採否・理由・制約を保持する。

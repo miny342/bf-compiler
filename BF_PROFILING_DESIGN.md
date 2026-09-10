@@ -18,6 +18,36 @@ inline profileでは圧縮ヘッダを先頭に保ち、その後にdebug header
 marker境界はrunを分割し、`@P` のsite IDを反復数として解釈しない。
 interpreterのエラーbyte offsetだけは、実際に読み込んだ圧縮テキスト内の位置になる。
 
+## RemoteTransfer（Scanを含む転送loop）
+
+interpreterは通常BFと圧縮BFの両方でRemoteTransferを標準で有効にする。
+`--disable-remote-transfer`（libraryでは `RunOptions.disable_remote_transfer`）で
+この最適化だけを無効にできる。BF生成やcompiler ABIの変更は不要。
+
+候補は、先頭が加算delta ±1で、Move/Add/単独Scanだけからなる32命令以下のloop。
+実行時にtapeを変更せず経路を調べ、次をすべて確認してから一括加算する。
+
+- loop末尾のpointerが先頭と一致する。
+- Scanが検査するセル（停止したゼロセルを含む）と、値が変わるセルが重ならない。
+- 先頭セルの1周あたりの正味deltaが ±1である。
+- 全経路が割当済みtape内に収まり、費用集計が表現可能である。
+
+経路が不変なので複数の転送先・加算係数にも対応できる。成立しない場合は
+元のloopを実行し、テープ拡張・境界エラーとそのsource offsetを保つ。
+初期値0では経路に触れずskipする。探索中もprogress/interruptを確認する。
+
+raw/RLE命令数、論理的なpointer distance、loop進入／反復回数、最大pointerは
+元のBFの意味を保つ。native operationは一つになり、費用は融合範囲のsiteのLCAへ
+帰属する。したがって最適化前後で個々のsiteの順位や時間が一致するとは限らない。
+探索そのものをraw BF命令数へ加算しない。
+`remote_transfer_loops`、`remote_transfer_iterations`、`remote_transfer_fallbacks` を
+通常statsとprofileのglobal/site countersに出す。sample modeのsiteは従来通り
+samplingを主体とし、exact/counters modeのような命令counter集計は行わない。
+
+比較は `scripts/remote-transfer/run.py` で同じBFを有効／無効にしてAB/BA順に実行する。
+profilingなしの実行時間・parse時間・全体時間を分け、全runの出力hash、raw/RLE
+命令数、最大pointerの一致を必須とする。
+
 ## 目的
 
 - self-host testとbootstrap verificationのwall timeを支配する処理を特定する。

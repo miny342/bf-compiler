@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 pub use bf_profiling::{ProfileMap, ProfileSiteId};
 
+mod remote_transfer;
+
 /// Number of cells in the standard tape.
 pub const TAPE_LEN: usize = 30_000;
 
@@ -34,6 +36,11 @@ pub struct RunStats {
 /// unoptimized bytecode execution.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OptimizationRunStats {
+    /// Scan-bearing transfer loops executed as one native operation.
+    pub remote_transfer_loops: u64,
+    pub remote_transfer_iterations: u64,
+    /// Candidates whose runtime safety checks required normal BF execution.
+    pub remote_transfer_fallbacks: u64,
     /// Fast-IR instructions dispatched by Rust.
     pub executed_native_operations: u64,
     /// Coalesced `+`, `-`, `<`, or `>` runs executed.
@@ -64,6 +71,8 @@ pub struct RunResult {
 /// Options for the configurable interpreter entry point.
 #[derive(Clone, Default)]
 pub struct RunOptions {
+    /// Disable only RemoteTransfer recognition, for differential evaluation.
+    pub disable_remote_transfer: bool,
     pub unbounded_tape: bool,
     pub collect_stats: bool,
     pub collect_timings: bool,
@@ -75,6 +84,7 @@ impl fmt::Debug for RunOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RunOptions")
+            .field("disable_remote_transfer", &self.disable_remote_transfer)
             .field("unbounded_tape", &self.unbounded_tape)
             .field("collect_stats", &self.collect_stats)
             .field("collect_timings", &self.collect_timings)
@@ -140,6 +150,9 @@ pub struct Timings {
 /// Dynamic counters attributed to one profile site.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SiteCounters {
+    pub remote_transfer_loops: u64,
+    pub remote_transfer_iterations: u64,
+    pub remote_transfer_fallbacks: u64,
     pub fast_operations: u64,
     pub raw_bf_instructions: u64,
     pub rle_instructions: u64,
@@ -342,7 +355,11 @@ pub fn run_with_options(
     // 40-byte `Instruction` per BF byte before immediately coalescing those runs
     // multiplies a large source into tens of gigabytes. Build the fast representation
     // directly in both profiled and unprofiled modes.
-    let optimized = parse_optimized(source, options.profile.as_ref().map(|profile| &profile.map))?;
+    let optimized = parse_optimized_with_remote(
+        source,
+        options.profile.as_ref().map(|profile| &profile.map),
+        !options.disable_remote_transfer,
+    )?;
     let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
     let build_elapsed = Duration::ZERO;
     let execute_started = (options.collect_timings || options.profile.is_some()).then(Instant::now);
@@ -562,6 +579,7 @@ fn fold_countdown(instruction: FastInstruction) -> FastInstruction {
 
 #[derive(Debug, Clone)]
 enum LoopOptimization {
+    RemoteTransfer,
     Clear {
         delta: u8,
         body_raw_count: u64,
@@ -751,9 +769,18 @@ impl FastBlock {
     }
 }
 
+#[cfg(test)]
 fn parse_optimized(
     source: &[u8],
     profile_map: Option<&ProfileMap>,
+) -> Result<Vec<FastInstruction>, Error> {
+    parse_optimized_with_remote(source, profile_map, true)
+}
+
+fn parse_optimized_with_remote(
+    source: &[u8],
+    profile_map: Option<&ProfileMap>,
+    remote_transfer: bool,
 ) -> Result<Vec<FastInstruction>, Error> {
     let mut blocks = vec![FastBlock::root()];
     let mut ordinal = 0_u64;
@@ -813,7 +840,7 @@ fn parse_optimized(
                     }
                     let block = blocks.pop().unwrap();
                     let body = block.instructions;
-                    let optimization = recognize_fast_loop(&body);
+                    let optimization = recognize_fast_loop(&body, remote_transfer);
                     let mut loop_site = block.opening_site.unwrap();
                     let mut mixed = false;
                     if optimization.is_some() {
@@ -930,7 +957,10 @@ fn lowest_common_ancestor(
     ResolvedProfileSite::ROOT
 }
 
-fn recognize_fast_loop(body: &[FastInstruction]) -> Option<LoopOptimization> {
+fn recognize_fast_loop(
+    body: &[FastInstruction],
+    remote_transfer: bool,
+) -> Option<LoopOptimization> {
     if body.is_empty() {
         return None;
     }
@@ -994,7 +1024,10 @@ fn recognize_fast_loop(body: &[FastInstruction]) -> Option<LoopOptimization> {
             FastInstruction::Countdown { .. }
             | FastInstruction::Input { .. }
             | FastInstruction::Output { .. }
-            | FastInstruction::Loop { .. } => return None,
+            | FastInstruction::Loop { .. } => {
+                return (remote_transfer && remote_transfer::recognize(body))
+                    .then_some(LoopOptimization::RemoteTransfer);
+            }
         }
     }
 
@@ -1457,6 +1490,13 @@ impl<'a> Machine<'a> {
         optimization: Option<&LoopOptimization>,
     ) -> Result<(), Error> {
         match optimization {
+            Some(LoopOptimization::RemoteTransfer) => {
+                if self.execute_remote_transfer::<false>(site, body)? {
+                    Ok(())
+                } else {
+                    self.execute_generic_loop_light::<SAMPLE>(body)
+                }
+            }
             Some(LoopOptimization::Clear {
                 delta,
                 body_raw_count,
@@ -1662,6 +1702,13 @@ impl<'a> Machine<'a> {
         optimization: Option<&LoopOptimization>,
     ) -> Result<Duration, Error> {
         match optimization {
+            Some(LoopOptimization::RemoteTransfer) => {
+                if self.execute_remote_transfer::<true>(site, body)? {
+                    Ok(Duration::ZERO)
+                } else {
+                    self.execute_generic_loop(site, body)
+                }
+            }
             Some(LoopOptimization::Clear {
                 delta,
                 body_raw_count,
@@ -2154,6 +2201,102 @@ mod tests {
     #[test]
     fn ignores_comments_and_runs_a_loop() {
         assert_eq!(run_str("+++ add three [>++<-] >.", ""), Ok("\u{6}".into()));
+    }
+
+    #[test]
+    fn remote_transfer_profiles_preserve_logical_counts_for_plain_rle_and_embedded_bf() {
+        let plain = b">>+>>+>>+<<<<<,[->[>>]>+<<<[<<]>]>>>>>>>>.<<<<<<<<.";
+        let compressed = "@BFCRLE1;>2+>2+>2+<5,[->[>2]>+<3[<2]>]>8.<8.";
+        let map = test_profile_map(
+            plain,
+            (0..plain.len())
+                .map(|i| ProfileRange {
+                    start: i as u64,
+                    end: i as u64 + 1,
+                    site: ProfileSiteId((i % 2 + 1) as u32),
+                })
+                .collect(),
+        );
+        let embedded = bf_profiling::embed_profile_markers(compressed, &map).unwrap();
+        for initial in [0, 1, 17, 128, 255] {
+            let reference = run_reference(plain, &[initial]).unwrap();
+            for source in [plain.as_slice(), compressed.as_bytes(), embedded.as_bytes()] {
+                for mode in [
+                    ProfileMode::Counters,
+                    ProfileMode::Exact,
+                    ProfileMode::Sample {
+                        interval: Duration::from_millis(1),
+                    },
+                ] {
+                    let options = RunOptions {
+                        collect_stats: true,
+                        profile: Some(ProfileOptions {
+                            map: map.clone(),
+                            mode,
+                        }),
+                        ..RunOptions::default()
+                    };
+                    let baseline = run_with_options(
+                        source,
+                        &[initial],
+                        RunOptions {
+                            disable_remote_transfer: true,
+                            ..options.clone()
+                        },
+                    )
+                    .unwrap();
+                    let result = run_with_options(source, &[initial], options).unwrap();
+                    assert_eq!(result.output, reference.output);
+                    assert_eq!(
+                        result.stats.executed_instructions,
+                        reference.stats.executed_instructions
+                    );
+                    assert_eq!(
+                        result.stats.executed_rle_instructions,
+                        reference.stats.executed_rle_instructions
+                    );
+                    assert_eq!(result.stats.max_pointer, reference.stats.max_pointer);
+                    assert_eq!(result.stats.optimization.remote_transfer_loops, 1);
+                    assert_eq!(
+                        result.stats.optimization.remote_transfer_iterations,
+                        initial as u64
+                    );
+                    let profile = result.profile.unwrap();
+                    let baseline = baseline.profile.unwrap();
+                    if mode
+                        != (ProfileMode::Sample {
+                            interval: Duration::from_millis(1),
+                        })
+                    {
+                        for field in [
+                            (|c: SiteCounters| c.raw_bf_instructions) as fn(SiteCounters) -> u64,
+                            |c| c.rle_instructions,
+                            |c| c.pointer_distance,
+                            |c| c.loop_entries,
+                            |c| c.loop_iterations,
+                        ] {
+                            assert_eq!(
+                                profile.sites.iter().map(|s| field(s.counters)).sum::<u64>(),
+                                baseline
+                                    .sites
+                                    .iter()
+                                    .map(|s| field(s.counters))
+                                    .sum::<u64>()
+                            );
+                        }
+                        assert_eq!(
+                            profile
+                                .sites
+                                .iter()
+                                .map(|s| s.counters.remote_transfer_iterations)
+                                .sum::<u64>(),
+                            initial as u64
+                        );
+                        assert!(profile.mixed_provenance_native_operations > 0);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
