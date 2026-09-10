@@ -66,7 +66,7 @@ write(
         "artifact": {
             "kind": "source",
             "id": source_id,
-            "identity_version": "bfc-ir-artifact-v2",
+            "identity_version": "bfc-ir-artifact-v3",
             "lowering_options": lowering_options,
         },
         "chunk_cells": [8, 16],
@@ -87,7 +87,7 @@ write(
         "artifact": {
             "kind": "cir",
             "id": cir_id,
-            "identity_version": "bfc-ir-artifact-v2",
+            "identity_version": "bfc-ir-artifact-v3",
             "lowering_options": lowering_options,
         },
         "chunk_cells": [8, 16],

@@ -12,6 +12,10 @@
 ## 現在地と次の作業
 
 - 空Goto threading・到達不能除去・ID compactionはsource/CIR共通で採用済み。
+- HIRの単純なローカルwhileを、セル割当て前に直接Frame Loopへlowerする。
+  非ゼロ条件は元セルを検査し、ローカルOutputの一時コピーと定数更新の一時セルを省く。
+  複雑な条件・call/portal等は既存loweringへ戻す。多箇所inlineの拡張は未実施。
+  IR phase設定のidentityはv3。以前の設定は再生成する。
 - BFCRLE v1はRust版の `--compressed-bf` で使用可能。通常BFとprofile互換を維持する。
 - interpreterのRemoteTransferを採用。Scan経路と更新先が独立な局所転送を実行時に
   一括化し、`--disable-remote-transfer`で比較可能。BF生成・nibble搬送ABIは未変更。

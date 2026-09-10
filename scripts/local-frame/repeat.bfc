@@ -1,0 +1,21 @@
+void emit_repeat_256(cell character) {
+    cell count;
+    output(character);
+    count = 1;
+    while (count != 0) {
+        output(character);
+        count += 1;
+    }
+}
+void main() {
+    cell outer = 255;
+    while (outer != 0) {
+        emit_repeat_256('A');
+        cell inner = 255;
+        while (inner != 0) {
+            emit_repeat_256('A');
+            inner -= 1;
+        }
+        outer -= 1;
+    }
+}

@@ -159,7 +159,8 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     fs::create_dir_all(&root).unwrap();
     fs::write(
         root.join("loop.bfc"),
-        "void main(){cell n=input();while(n != 0){n-=1;output(n);}output(n);}",
+        // Keep this a CFG-restoration test, not a direct scalar-loop test.
+        "void main(){cell n=input();while(n != 0){n-=1;output(n+0);}output(n);}",
     )
     .unwrap();
     let baseline = run_bfc_with_stdin(
@@ -199,13 +200,13 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     assert_eq!(after["accounting"]["ok"], true);
     assert_eq!(
         after["artifact_identity_definition"]["version"],
-        "bfc-ir-artifact-v2"
+        "bfc-ir-artifact-v3"
     );
     let options = &after["measurement_options"]["lowering_options"];
     assert_eq!(options["structure_local_control_flow"], true);
     let id = after["artifact_identity"].as_str().unwrap();
     let mut config = json!({"format": "bfc-ir-phase-config-v1",
-        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v2",
+        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v3",
             "lowering_options": options},
         "chunk_cells": [8, 16], "phases": [{"name": "main", "function_name": "main"}]});
     fs::write(root.join("phase.json"), config.to_string()).unwrap();
@@ -260,7 +261,7 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     assert!(!forged_option.status.success());
     assert!(String::from_utf8_lossy(&forged_option.stderr).contains("lowering_options"));
     config["artifact"]["id"] = after["artifact_identity"].clone();
-    config["artifact"]["identity_version"] = json!("bfc-ir-artifact-v1");
+    config["artifact"]["identity_version"] = json!("bfc-ir-artifact-v2");
     fs::write(root.join("phase.json"), config.to_string()).unwrap();
     let stale_version = run_bfc(
         &root,
@@ -509,7 +510,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "d1a56eee55f852dd05d3fe72a7a1c484740edd0bbf22b07b63c73524a6e2e96d",
+            "13545dc270735fe8ccad2283abb6f31f6b9d20cc6fe2c9304ce5aee9aeb40784",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -527,7 +528,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
     assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
     assert_eq!(
         report["artifact_identity"],
-        "d1a56eee55f852dd05d3fe72a7a1c484740edd0bbf22b07b63c73524a6e2e96d"
+        "13545dc270735fe8ccad2283abb6f31f6b9d20cc6fe2c9304ce5aee9aeb40784"
     );
     assert_eq!(report["phase_config"]["artifact"]["kind"], "source");
     assert_eq!(report["accounting"]["ok"], true);
@@ -602,7 +603,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "d1a56eee55f852dd05d3fe72a7a1c484740edd0bbf22b07b63c73524a6e2e96d",
+            "13545dc270735fe8ccad2283abb6f31f6b9d20cc6fe2c9304ce5aee9aeb40784",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -797,7 +798,7 @@ fn phase_metrics_break_portal_adjacency_across_a_non_portal_phase() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "644966090d5ac7f9e19d86c7af96d9317d081573a6299e3f7fa267f24b1264ad",
+            "50599a97ced099221690da1eb215bb965268d9695e8d5ee16bc76f207f3118fd",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",

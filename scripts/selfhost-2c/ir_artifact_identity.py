@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 
-VERSION = b"bfc-ir-artifact-v2"
+VERSION = b"bfc-ir-artifact-v3"
 
 
 def frame(value: bytes) -> bytes:

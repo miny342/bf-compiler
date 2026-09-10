@@ -29,7 +29,7 @@ path.write_text(
             "artifact": {
                 "kind": "source",
                 "id": artifact_id,
-                "identity_version": "bfc-ir-artifact-v2",
+                "identity_version": "bfc-ir-artifact-v3",
                 "lowering_options": {"inline_branch_successors": True,
                                      "structure_local_control_flow": args.local},
             },

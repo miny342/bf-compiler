@@ -48,6 +48,19 @@ samplingを主体とし、exact/counters modeのような命令counter集計は�
 profilingなしの実行時間・parse時間・全体時間を分け、全runの出力hash、raw/RLE
 命令数、最大pointerの一致を必須とする。
 
+## sourceの直接Frame loweringとIR identity
+
+HIRのローカルな非ゼロwhileと単純なscalar操作は、仮想セル割当て前に直接Frame命令にする。
+`x != 0` / `0 != x` / `x` のloop条件ではx自身を非破壊に検査し、ローカル変数のOutputを
+直接参照する。定数代入・定数加減算にも一時セルを作らない。
+値として使う比較結果の0/1化、引数のsnapshot、call/return/portal/abort等の境界は保持する。
+これはHIR loweringの簡約であり、`--disable-local-control-flow`が切り替える後段のCFG復元とは独立。
+
+lowering結果の変更を旧設定と区別するため、direct IR runnerのartifact identityは
+`bfc-ir-artifact-v3`に更新する。source/CIRのphase設定helperとfixtureもv3を使用する。
+旧v2を含む設定は再生成が必要。BF profile mapのschemaとBFCRLE形式は変更しないが、
+最適化前のBF mapを新しく生成したBFへ流用せず、必ず同時生成する。
+
 ## 目的
 
 - self-host testとbootstrap verificationのwall timeを支配する処理を特定する。

@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+mod local_frame;
+
 use crate::continuation_ir::{
     Address, AggregateRegion, Continuation, ContinuationId, ContinuationIrError,
     ContinuationProgram, FrameAggregateDescriptor, FrameAggregateId, FrameInstruction, FrameSlot,
@@ -526,6 +528,14 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         statement: &HirStatement,
     ) -> Result<(), ContinuationLoweringError> {
         if self.current.is_none() {
+            return Ok(());
+        }
+        // Keep simple, non-yielding operations structured before allocating
+        // slots. A failed attempt is read-only and leaves normal lowering intact.
+        if let Some(instructions) = self.direct_frame_statement(statement) {
+            for instruction in instructions {
+                self.emit(instruction);
+            }
             return Ok(());
         }
         match &statement.kind {
