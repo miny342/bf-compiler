@@ -1,6 +1,16 @@
 // target Brainfuckのdata pointer位置を追跡しながらprimitiveを出力する。
 
 void emit_move_to(cell destination) {
+    if (COMPRESSED_BF_OUTPUT) {
+        if (target_position < destination) {
+            emit_repeat_character('>', destination - target_position);
+        }
+        if (target_position > destination) {
+            emit_repeat_character('<', target_position - destination);
+        }
+        target_position = destination;
+        return;
+    }
     while (target_position < destination) {
         compiler_output!('>');
         target_position += 1;

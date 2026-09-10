@@ -10,7 +10,7 @@
 | 同一関数の非空Branch後継inline化（2c） | 再評価後に採用 | 当初の少数wall測定による不採用をpaired比較で見直した。source/CIR複数ケースでBF execute短縮を確認。生成BF増加を伴う。全入力で差を識別できたわけではなく、end-to-end/full selfhost改善は未確認。 |
 | 局所CFG構造化（2d） | 採用 | source/CIRの複数入力でBF execute短縮と出力一致を確認。call・portal等の境界を維持し、通常loweringで有効化。frame guard追加とID配置変化を伴うため、削減全体をloop化だけの効果とは解釈しない。full selfhost時間の改善は未確認。 |
 | IR継続・遷移・終端・phase・portal集計 | 採用 | 出力・通常counter一致とaccounting、source/CIR測定を確認。計測費用があるためオプトイン。BF hidden dispatch/navigation費用は測れていない。 |
-| BFCRLE v1テキスト圧縮 | 採用（オプトイン） | Rust版出力のSSD書込量を削減。通常BF互換を維持し、profileの展開後ordinal/identityとinline markerを保つ。セルフホスト版の出力は未変更。 |
+| BFCRLE v1テキスト圧縮 | 採用（オプトイン） | Rust版出力のSSD書込量を削減。通常BF互換を維持し、profileの展開後ordinal/identityとinline markerを保つ。セルフホスト版にもcompressedエントリを追加し、通常mainとbinary CIRを維持。 |
 | interpreter RemoteTransfer | 採用 | BFの意味から経路不変性を実行時検証してScan往復を一括転送へ置換。source由来BFの複数入力で出力・論理counter一致とexecute短縮を確認。不成立時は通常実行。CIR/full selfhost時間比較は未実施。 |
 | HIRの局所Frame lowering | 採用 | 単純なローカルwhileの非ゼロ条件・Output・定数更新を直接Frame命令にし、割当て前に不要な一時セルと条件の0/1化を除く。emit_repeat_256の反復は通常BFの最小形となり出力ベンチを短縮。複雑な制御は従来経路、多箇所inlineは未拡張。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
@@ -30,88 +30,36 @@ BF hidden dispatch/navigation計測とfull selfhost時間比較も未完。
 
 ## このコミットの作業結果
 
-### HIRの局所Frame loweringを採用
+### セルフホスト版の可逆な短縮出力
 
-単純なローカルscalar操作を仮想セル割当て前にFrame命令へ直接lowerする。
-ローカル変数のOutputは元セルを読み、定数代入・定数加減算は一時セルを作らない。
-whileの条件がx / x!=0 / 0!=xなら、x自身を非破壊のLoop条件にする。
-本体は直接扱えるblock・宣言・代入・Output・nested whileに限定し、
-call・return・abort・portal・一般条件やifは従来経路へ戻す。
-試行は読み取り専用で、失敗時に部分的なIRやcontinuation IDを残さない。
+`concat-stage2-compiler.sh compressed`を追加。先頭に`@BFCRLE1;`を出し、
+反復出力と局所pointer移動を回数付きで直接生成する。
+通常BFの`main`とbinary `cir`は維持。モードはentrypointの定数で選び、
+圧縮前の巨大な出力bufferは作らない。
 
-値として使う比較結果の0/1化、入力の評価順、ローカル宣言のゼロ初期化は維持する。
-多箇所inlineの拡張、interpreterの追加最適化、セルフホスト側の圧縮出力は行っていない。
-`--disable-local-control-flow`の後段CFG復元とは独立したsource loweringである。
+24-bit反復は固定8桁の十進数で直接出す。先頭ゼロはBFCRLE仕様で許される。
+隣接runの最大合併はしない。
+各runの総数から通常BFのサイズ・命令列を復元できる。
+これは保存形式の変更であり、生成BFの論理命令数削減ではない。
+interpreter、profile形式、inline marker形式は変更していない。
+sourceが変わるため、コンパイラ実行用BFとmap・phase設定は再生成する。
 
-production stage2 sourceのemit_repeat_256を実際にlowerし、function 180 /
-continuation 3760のまま、frame_slots=2と次の本体を確認した。
+### 検証
 
-```text
-Set(count, 0)
-Output(character)
-Set(count, 1)
-Loop(count) {
-    Output(character)
-    AddConst(count, 1)
-}
-Return
-```
+- `scripts/verify-selfhost-compressed.py`成功。
+  短縮版コンパイラをBFとして実行し、全exampleについて通常版のIR実行が
+  出したBFと展開後の命令列を比較。通常版のデータはディスクに保存しない。
+- 全cell反復数、十進境界、256、65536、最大24-bit反復数を検証。
+- 境界テストの生成コードをBFとしても実行し、IR実行と一致。
+- `cargo test --workspace`成功（283件）。
+- `scripts/verify-stage2-selfhost.sh`成功。通常出力と既存stage-12動作を維持。
+- binary CIR経路もhelloを生成・Rust backendでBFへ変換・実行し、`A!`改行を確認。
+- ログ：`tmp/selfhost-rle-verification-complete.log`、
+  `tmp/selfhost-rle-plain-verification.log`。
+- workspaceログ：`tmp/selfhost-rle-workspace-tests.log`。
+- `logs/full-selfhost-20260910-190148/stage2-compiler.bfc`を入力にした
+  IR実行は途中で区切った。`tmp/selfhost-rle-partial-output.bf`は未完の生成物であり、
+  実行用artifactではない。fullサイズ・速度の測定結果としては扱わない。
+- full selfhostのBF実行完走時間は未測定。
 
-ループ内にBranch / Copy / 継続遷移はない。回帰テストではD=8/D=16とも
-最適化後BFに `[<.>+]` 相当のMove / Output / Move / Addだけのloopがあることを確認。
-関数をinlineせず、関数外枠のReturnは残している。
-
-### 反復出力の測定
-
-基点は`d03e88c`。同じinterpreter（RemoteTransfer有効）で旧／新compilerの生成BFを比較。
-`scripts/local-frame/repeat.bfc`は65,280回emit_repeat_256を呼び、
-固定文字（A）を16,711,680 bytes出力する。
-生成プログラムの保存にBFCRLEを使うが、実行時の出力は圧縮しない。
-
-warm-up後AB/BA交互10ペア、計22実行。全出力hashが一致した。
-execute中央値は3,129.624→297.937 ms（約10.5倍）。
-paired median差の95% CIは-2,847.750〜-2,808.251 ms。
-process_total中央値は3,141.913→310.546 ms。
-native operationsは739,054,145→86,448,705、最大pointerは93で不変。
-これは反復出力workloadの値であり、full selfhost全体の改善率ではない。
-
-### production source BF比較
-
-同じstage2 compilerソースから生成したBFで3入力を比較。各10ペア＋warm-upの計66実行。
-全runで旧／新の出力hashが一致した。
-
-| 入力 | execute中央値 baseline→candidate | execute差分95% CI |
-|---|---:|---:|
-| hello | 74.633→75.272 ms | -0.496〜+1.571 ms |
-| stage5_functions | 560.262→568.728 ms | -18.560〜+16.416 ms |
-| stage8_aggregates | 931.029→924.237 ms | -19.795〜-3.593 ms |
-
-hello/functionsの差は識別できない。aggregatesではexecute短縮を支持する。
-3入力の最大pointerは不変。CIR経路・full selfhost完走時間は比較していない。
-区間はいずれもpaired median差のbootstrap（10,000 resamples、seed 20260910）。
-process_totalはinterpreter内のread/parse/execute/output計測で、外部起動終了のwallとは異なる。
-
-再現script：`scripts/local-frame/run.py`。新規rootへ、
-`--interpreter`、`--baseline`、`--candidate`を指定する。
-compiler BFでは`--inputs`に入力ソースを渡し、反復出力fixtureでは省略する。
-出力データはメモリ上でhash照合し、大容量出力を保存しない。
-
-測定ログ・BF/binary/input identity：
-`tmp/direct-frame-repeat-measurement/`と`tmp/direct-frame-production-measurement/`の
-`manifest.json`、`runs.jsonl`、`summary.json`。
-production IRの確認結果は`tmp/direct-frame-production-ir.txt`。
-生成BFとmapは`tmp/direct-frame-stage2-compiler.bf`と同名の`.bfmap.json`。
-
-### 検証と設定互換
-
-- `cargo test --workspace`：283件成功。
-- 全256文字について各256回の出力、非破壊条件・反復後の値、wraparound、
-  nested localの再初期化、入力による条件更新、call・early returnを検証。
-- 値としての比較が0/1を返すこと、条件としての比較で元変数を消さないことを確認。
-- `scripts/verify-stage2-selfhost.sh`成功（stage-12 self-host verification passed）。
-- IR phase artifact identityを`bfc-ir-artifact-v3`へ更新し、helperとfixtureも同期。
-  source/CIRとも旧v2設定は再生成が必要。BF mapのschemaと通常BF出力形式は不変。
-
-最終検証ログ：`tmp/direct-frame-tests-final.log`、`tmp/direct-frame-shape-tests.log`、
-`tmp/direct-frame-selfhost.log`。workspace/selfhost検証は反復性能測定の完了後に行った。
 次のコミットではこの作業結果節を置き換え、採否・理由・制約を保持する。

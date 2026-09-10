@@ -1,0 +1,16 @@
+// Same compiler and expanded BF commands as main; only the output encoding differs.
+const cell COMPRESSED_BF_OUTPUT = 1;
+
+void read_character() {
+    current_char = input();
+}
+
+macro compiler_output(value) {
+    output(value);
+}
+
+void main() {
+    output('@'); output('B'); output('F'); output('C');
+    output('R'); output('L'); output('E'); output('1'); output(';');
+    compile_program_stage12();
+}

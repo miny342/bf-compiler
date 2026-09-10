@@ -1,5 +1,7 @@
 // productionでは実際の標準入出力を使って1 compile unitを変換する。
 
+const cell COMPRESSED_BF_OUTPUT = 0;
+
 void read_character() {
     current_char = input();
 }

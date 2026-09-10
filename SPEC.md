@@ -45,7 +45,11 @@ interpreterはこの先頭ヘッダを自動判別する。ヘッダなしでは
 `--embed-profile` と併用可能。圧縮ヘッダの後に `@BFCDBG1;` とsite定義を置き、
 `@P123;` markerは数字列と分離する。site境界をまたぐrunはmarker挿入時に分割する。
 圧縮出力は通常の外部BF処理系では正しく実行できないため、その場合は
-`--compressed-bf` を付けずに生成する。セルフホスト版コンパイラの出力は変更しない。
+`--compressed-bf` を付けずに生成する。セルフホスト版は
+`scripts/concat-stage2-compiler.sh compressed`で同形式を出力する版を構築できる。
+`main`は通常BF、`cir`はbinary CIRのまま。短縮版も展開後の命令列は通常版と同じ。
+24-bitのrunは8桁の十進数で直接出力する（先頭ゼロを含むことがある）。
+隣接runの最大合併はしないため、最短表記とは限らない。
 
 ## セルとテープ
 

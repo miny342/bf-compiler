@@ -17,6 +17,8 @@
   複雑な条件・call/portal等は既存loweringへ戻す。多箇所inlineの拡張は未実施。
   IR phase設定のidentityはv3。以前の設定は再生成する。
 - BFCRLE v1はRust版の `--compressed-bf` で使用可能。通常BFとprofile互換を維持する。
+- セルフホスト版も`concat-stage2-compiler.sh compressed`でBFCRLE出力を選べる。
+  命令列の変更ではなく可逆な保存形式の変更。通常BFの`main`とbinary `cir`は維持する。
 - interpreterのRemoteTransferを採用。Scan経路と更新先が独立な局所転送を実行時に
   一括化し、`--disable-remote-transfer`で比較可能。BF生成・nibble搬送ABIは未変更。
   compiler側のportal batch/専用laneとは別の最適化として評価する。

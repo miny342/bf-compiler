@@ -1,5 +1,7 @@
 // production compilerのbinary CIR出力用entrypoint。
 
+const cell COMPRESSED_BF_OUTPUT = 0;
+
 void read_character() {
     current_char = input();
 }

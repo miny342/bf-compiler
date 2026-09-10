@@ -27,6 +27,29 @@
 
 BF上で動くBFC製コンパイラの入力は1本のbyte streamなので、セルフコンパイル時は連結して渡す。
 `scripts/concat-stage2-compiler.sh main`がproduction sourceを連結し、各ファイル境界へ改行を補う。
+
+### 巨大なBF出力を短縮する
+
+`main`の代わりに`compressed`を指定すると、セルフホストコンパイラ自身が
+`@BFCRLE1;`付きの可逆な短縮BFを出力する。通常BFの命令列は変更しない。
+Rust側の`--compressed-bf`は「コンパイラを実装するBF」の圧縮、
+`compressed`エントリは「そのコンパイラが生成するBF」の圧縮で、独立している。
+
+```sh
+scripts/concat-stage2-compiler.sh compressed > "$run_dir/stage2-compiler.bfc"
+cargo run --release -p bf-compiler -- --unlimited-tape --compressed-bf \
+  --profile-map-output "$run_dir/tmp.bfmap.json" --profile-granularity continuation \
+  "$run_dir/stage2-compiler.bfc" > "$run_dir/tmp.bf"
+```
+
+あとは従来通りinterpreterで実行できる。BFとprofile mapは必ずセットで再生成する。
+コンパイラ実行のprofile mapと、生成されたプログラムのmapは別物である。
+セルフホスト版はinline-profile markerを生成せず、既存のprofile形式を変更しない。
+入力は引き続きBFCソースであり、BFCRLEをBFCとして再入力するものではない。
+`main`で通常BFを、`cir`でbinary CIRを出す経路も引き続き使用できる。
+
+検証は`python3 scripts/verify-selfhost-compressed.py --compiler <bfc> --interpreter <bf-interpreter>`。
+展開せずrunの回数を比較し、巨大な通常BFをSSDへ保存しない。
 `00_legacy_stage4.bfc`、`03_legacy_symbols.bfc`、`04_legacy_codegen.bfc`、`05_parser.bfc`はproductionの
 到達可能性に関与しないため除外する。`test` entryだけは旧回帰を維持するためこれらも連結する。
 

@@ -1,5 +1,7 @@
 // productionのmain.bfcと差し替えるtest entry。
 
+const cell COMPRESSED_BF_OUTPUT = 0;
+
 void read_character() {
     current_char = 0;
     if (test_input_kind == 1) {
