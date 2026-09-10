@@ -614,18 +614,25 @@ fn lower_binary(
             };
             boolean_from(destination, scratch[0], destination, nonzero, zero, body);
         }
-        SelfhostCirBinaryOp::Less | SelfhostCirBinaryOp::GreaterEqual => {
-            less_than(destination, source, scratch, body);
-            if op == SelfhostCirBinaryOp::GreaterEqual {
-                boolean_from(destination, scratch[0], destination, 0, 1, body);
-            }
-        }
-        SelfhostCirBinaryOp::Greater | SelfhostCirBinaryOp::LessEqual => {
-            swap(destination, source, scratch[0], body);
-            less_than(destination, source, scratch, body);
-            if op == SelfhostCirBinaryOp::LessEqual {
-                boolean_from(destination, scratch[0], destination, 0, 1, body);
-            }
+        SelfhostCirBinaryOp::Less
+        | SelfhostCirBinaryOp::GreaterEqual
+        | SelfhostCirBinaryOp::Greater
+        | SelfhostCirBinaryOp::LessEqual => {
+            let reverse = matches!(
+                op,
+                SelfhostCirBinaryOp::Greater | SelfhostCirBinaryOp::LessEqual
+            );
+            let invert = matches!(
+                op,
+                SelfhostCirBinaryOp::GreaterEqual | SelfhostCirBinaryOp::LessEqual
+            );
+            body.push(FrameInstruction::Compare {
+                left: if reverse { source } else { destination },
+                right: if reverse { destination } else { source },
+                dst: destination,
+                true_value: u8::from(!invert),
+                false_value: u8::from(invert),
+            });
         }
     }
 }
@@ -639,13 +646,6 @@ fn transfer(src: Address, dst: Address, factor: u8, body: &mut Vec<FrameInstruct
         src,
         targets: vec![FrameTransferTarget { dst, factor }],
     });
-}
-
-fn swap(left: Address, right: Address, temporary: Address, body: &mut Vec<FrameInstruction>) {
-    set(temporary, 0, body);
-    transfer(left, temporary, 1, body);
-    transfer(right, left, 1, body);
-    transfer(temporary, right, 1, body);
 }
 
 fn boolean_from(
@@ -671,72 +671,6 @@ fn boolean_from(
             value: zero,
         }],
     });
-}
-
-fn less_than(left: Address, right: Address, scratch: &[Address], body: &mut Vec<FrameInstruction>) {
-    let right_test = scratch[0];
-    let restore = scratch[1];
-    let destination = scratch[2];
-    let loop_body = vec![
-        FrameInstruction::Set {
-            dst: right_test,
-            value: 0,
-        },
-        FrameInstruction::Transfer {
-            src: right,
-            targets: vec![
-                FrameTransferTarget {
-                    dst: right_test,
-                    factor: 1,
-                },
-                FrameTransferTarget {
-                    dst: restore,
-                    factor: 1,
-                },
-            ],
-        },
-        FrameInstruction::Transfer {
-            src: restore,
-            targets: vec![FrameTransferTarget {
-                dst: right,
-                factor: 1,
-            }],
-        },
-        FrameInstruction::Branch {
-            condition: right_test,
-            then_body: vec![
-                FrameInstruction::AddConst {
-                    dst: left,
-                    value: 255,
-                },
-                FrameInstruction::AddConst {
-                    dst: right,
-                    value: 255,
-                },
-            ],
-            else_body: vec![FrameInstruction::Transfer {
-                src: left,
-                targets: vec![],
-            }],
-        },
-    ];
-    body.push(FrameInstruction::Loop {
-        condition: left,
-        body: loop_body,
-    });
-    body.push(FrameInstruction::Branch {
-        condition: right,
-        then_body: vec![FrameInstruction::Set {
-            dst: destination,
-            value: 1,
-        }],
-        else_body: vec![FrameInstruction::Set {
-            dst: destination,
-            value: 0,
-        }],
-    });
-    set(left, 0, body);
-    transfer(destination, left, 1, body);
 }
 
 fn add_u16_constant(

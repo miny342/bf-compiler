@@ -271,6 +271,15 @@ fn build_body(
             ..Node::new(function)
         };
         match instruction {
+            FrameInstruction::Compare {
+                left, right, dst, ..
+            } => {
+                node.read(*left);
+                node.read(*right);
+                node.write(*left);
+                node.write(*right);
+                node.write(*dst);
+            }
             FrameInstruction::Set { dst, .. } | FrameInstruction::Input { dst } => node.write(*dst),
             FrameInstruction::AddConst { dst, .. } => {
                 node.read(*dst);
@@ -516,6 +525,13 @@ fn map_body(body: &mut [FrameInstruction], map: &mut impl FnMut(&mut Address)) {
             | FrameInstruction::Input { dst } => map(dst),
             FrameInstruction::Copy { src, dst } => {
                 map(src);
+                map(dst);
+            }
+            FrameInstruction::Compare {
+                left, right, dst, ..
+            } => {
+                map(left);
+                map(right);
                 map(dst);
             }
             FrameInstruction::Transfer { src, targets } => {

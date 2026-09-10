@@ -66,7 +66,7 @@ write(
         "artifact": {
             "kind": "source",
             "id": source_id,
-            "identity_version": "bfc-ir-artifact-v3",
+            "identity_version": "bfc-ir-artifact-v4",
             "lowering_options": lowering_options,
         },
         "chunk_cells": [8, 16],

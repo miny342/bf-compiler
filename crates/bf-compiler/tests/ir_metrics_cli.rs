@@ -200,13 +200,13 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     assert_eq!(after["accounting"]["ok"], true);
     assert_eq!(
         after["artifact_identity_definition"]["version"],
-        "bfc-ir-artifact-v3"
+        "bfc-ir-artifact-v4"
     );
     let options = &after["measurement_options"]["lowering_options"];
     assert_eq!(options["structure_local_control_flow"], true);
     let id = after["artifact_identity"].as_str().unwrap();
     let mut config = json!({"format": "bfc-ir-phase-config-v1",
-        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v3",
+        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v4",
             "lowering_options": options},
         "chunk_cells": [8, 16], "phases": [{"name": "main", "function_name": "main"}]});
     fs::write(root.join("phase.json"), config.to_string()).unwrap();
@@ -261,7 +261,7 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     assert!(!forged_option.status.success());
     assert!(String::from_utf8_lossy(&forged_option.stderr).contains("lowering_options"));
     config["artifact"]["id"] = after["artifact_identity"].clone();
-    config["artifact"]["identity_version"] = json!("bfc-ir-artifact-v2");
+    config["artifact"]["identity_version"] = json!("bfc-ir-artifact-v3");
     fs::write(root.join("phase.json"), config.to_string()).unwrap();
     let stale_version = run_bfc(
         &root,
@@ -510,7 +510,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "13545dc270735fe8ccad2283abb6f31f6b9d20cc6fe2c9304ce5aee9aeb40784",
+            "57fc29c255e29bc10f264d7fb839e509000c747b0e81fdf804fac32f502e9f59",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -528,7 +528,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
     assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
     assert_eq!(
         report["artifact_identity"],
-        "13545dc270735fe8ccad2283abb6f31f6b9d20cc6fe2c9304ce5aee9aeb40784"
+        "57fc29c255e29bc10f264d7fb839e509000c747b0e81fdf804fac32f502e9f59"
     );
     assert_eq!(report["phase_config"]["artifact"]["kind"], "source");
     assert_eq!(report["accounting"]["ok"], true);
@@ -798,7 +798,7 @@ fn phase_metrics_break_portal_adjacency_across_a_non_portal_phase() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "50599a97ced099221690da1eb215bb965268d9695e8d5ee16bc76f207f3118fd",
+            "c9f6e4d9673a8f6280cb68e02ce84597433b1ddd2d3d8cc78d28ac415ca84b0f",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",

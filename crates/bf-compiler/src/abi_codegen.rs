@@ -658,6 +658,7 @@ pub(crate) fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
 
 fn instruction_kind(instruction: &FrameInstruction) -> &'static str {
     match instruction {
+        FrameInstruction::Compare { .. } => "compare",
         FrameInstruction::Set { .. } => "set",
         FrameInstruction::AddConst { .. } => "add_const",
         FrameInstruction::Copy { .. } => "copy",
@@ -1402,6 +1403,15 @@ impl<'a> AbiEmitter<'a> {
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
         match instruction {
+            FrameInstruction::Compare {
+                left,
+                right,
+                dst,
+                true_value,
+                false_value,
+            } => {
+                self.emit_compare(*left, *right, *dst, *true_value, *false_value, function)?;
+            }
             FrameInstruction::Set { dst, value } => {
                 let dst = self.address_location(*dst, function)?;
                 self.set_location(dst, *value);
@@ -1464,6 +1474,79 @@ impl<'a> AbiEmitter<'a> {
                 else_body,
             } => self.emit_structured_branch(*condition, then_body, else_body, function)?,
         }
+        Ok(())
+    }
+
+    /// Destructive unsigned comparison on four adjacent ABI scratch cells:
+    /// L, R, E (else flag), B (zero landing cell). The inner non-destructive
+    /// test exits at E when R was nonzero, or stays at R when skipped. One
+    /// rightward step and the else arm join both paths at B. No operand is
+    /// copied inside the countdown, even when its value is 255.
+    /// Scratch0..3 are contiguous in both supported layouts, inaccessible as
+    /// public operand addresses, and all zero on exit. The context origin and
+    /// surrounding structured-branch flags are preserved.
+    fn emit_compare(
+        &mut self,
+        left: Address,
+        right: Address,
+        dst: Address,
+        true_value: u8,
+        false_value: u8,
+        function: FunctionId,
+    ) -> Result<(), AbiCodegenError> {
+        let left = self.address_location(left, function)?;
+        let right = self.address_location(right, function)?;
+        let dst = self.address_location(dst, function)?;
+        let l = self.current_abi_offset(AbiField::Scratch0)?;
+        let r = self.current_abi_offset(AbiField::Scratch1)?;
+        let e = self.current_abi_offset(AbiField::Scratch2)?;
+        let b = self.current_abi_offset(AbiField::Scratch3)?;
+        debug_assert_eq!([r - l, e - r, b - e], [1, 1, 1]);
+        if left == right {
+            self.copy_locations(left, Location::Relative(l), Location::Relative(e));
+        } else {
+            self.move_location(left, Location::Relative(l));
+        }
+        self.move_location(right, Location::Relative(r));
+        self.clear(e);
+        self.clear(b);
+        self.move_to(l);
+        let countdown = self.capture_infallible(|emitter| {
+            emitter.move_to(e);
+            emitter.adjust(1);
+            emitter.move_to(r);
+            let nonzero = emitter.capture_infallible(|emitter| {
+                emitter.adjust(255);
+                emitter.move_to(l);
+                emitter.adjust(255);
+                emitter.move_to(e);
+                emitter.adjust(255);
+            });
+            emitter.emit_loop(nonzero);
+            // The runtime pointer is R (skipped) or E (entered). It cannot be
+            // represented by `position` until the two paths join at B.
+            emitter.push_move(1);
+            emitter.position = e; // entry to the else body is always E
+            let zero = emitter.capture_infallible(|emitter| {
+                emitter.adjust(255);
+                emitter.clear(l);
+                emitter.move_to(b);
+            });
+            emitter.emit_loop(zero);
+            emitter.position = b; // skipped and entered paths now agree
+            emitter.move_to(l);
+        });
+        self.emit_loop(countdown);
+        self.set(e, false_value);
+        self.move_to(r);
+        let less = self.capture_infallible(|emitter| {
+            emitter.clear_current();
+            emitter.set(e, true_value);
+            emitter.move_to(r);
+        });
+        self.emit_loop(less);
+        self.move_to(0);
+        self.move_location(Location::Relative(e), dst);
         Ok(())
     }
 

@@ -15,7 +15,10 @@
 - HIRの単純なローカルwhileを、セル割当て前に直接Frame Loopへlowerする。
   非ゼロ条件は元セルを検査し、ローカルOutputの一時コピーと定数更新の一時セルを省く。
   複雑な条件・call/portal等は既存loweringへ戻す。多箇所inlineの拡張は未実施。
-  IR phase設定のidentityはv3。以前の設定は再生成する。
+  IR phase設定のidentityはv4。以前の設定は再生成する。
+- 大小比較をFrame Compareとして保持し、BF生成時にABI scratch上の非破壊判定へ展開する。
+  source/binary CIR共通。比較反復内のoperand複製・復元を除く。
+  Tape IR導入、十進変換の定数特殊化、多箇所inline拡張は未実施。
 - BFCRLE v1はRust版の `--compressed-bf` で使用可能。通常BFとprofile互換を維持する。
 - セルフホスト版も`concat-stage2-compiler.sh compressed`でBFCRLE出力を選べる。
   命令列の変更ではなく可逆な保存形式の変更。通常BFの`main`とbinary `cir`は維持する。

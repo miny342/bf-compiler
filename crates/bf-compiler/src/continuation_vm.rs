@@ -948,6 +948,18 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
         self.stats.executed_frame_instructions += 1;
         self.maybe_progress(progress, false);
         match instruction {
+            FrameInstruction::Compare {
+                left,
+                right,
+                dst,
+                true_value,
+                false_value,
+            } => {
+                let less = self.read_address(*left)? < self.read_address(*right)?;
+                self.write_address(*left, 0)?;
+                self.write_address(*right, 0)?;
+                self.write_address(*dst, if less { *true_value } else { *false_value })?;
+            }
             FrameInstruction::Set { dst, value } => self.write_address(*dst, *value)?,
             FrameInstruction::AddConst { dst, value } => {
                 let result = self.read_address(*dst)?.wrapping_add(*value);

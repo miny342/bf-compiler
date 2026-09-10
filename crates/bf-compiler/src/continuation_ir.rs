@@ -255,6 +255,17 @@ pub struct FrameTransferTarget {
 /// A structured operation whose frame addresses are resolved at run time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameInstruction {
+    /// Compare unsigned input snapshots (`left < right`), clear both operands,
+    /// then write `true_value` or `false_value` to `dst`. All addresses may
+    /// alias. Keeping this operation intact avoids copying a shrinking operand
+    /// on every iteration.
+    Compare {
+        left: Address,
+        right: Address,
+        dst: Address,
+        true_value: u8,
+        false_value: u8,
+    },
     Set {
         dst: Address,
         value: u8,
@@ -1390,6 +1401,13 @@ fn validate_instructions(
 ) -> Result<(), ContinuationIrError> {
     for instruction in instructions {
         match instruction {
+            FrameInstruction::Compare {
+                left, right, dst, ..
+            } => {
+                validate_address(*left, continuation, function, globals)?;
+                validate_address(*right, continuation, function, globals)?;
+                validate_address(*dst, continuation, function, globals)?;
+            }
             FrameInstruction::Set { dst, .. }
             | FrameInstruction::AddConst { dst, .. }
             | FrameInstruction::Input { dst } => {

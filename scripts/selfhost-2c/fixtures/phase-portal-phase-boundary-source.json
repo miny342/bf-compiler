@@ -2,8 +2,8 @@
   "format": "bfc-ir-phase-config-v1",
   "artifact": {
     "kind": "source",
-    "id": "50599a97ced099221690da1eb215bb965268d9695e8d5ee16bc76f207f3118fd",
-    "identity_version": "bfc-ir-artifact-v3",
+    "id": "c9f6e4d9673a8f6280cb68e02ce84597433b1ddd2d3d8cc78d28ac415ca84b0f",
+    "identity_version": "bfc-ir-artifact-v4",
     "lowering_options": {
       "inline_branch_successors": true,
       "structure_local_control_flow": false

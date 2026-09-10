@@ -1,0 +1,12 @@
+void compare(cell a, cell b) {
+    output(a < b); output(a <= b); output(a > b); output(a >= b);
+    output(a); output(b);
+}
+void main() {
+    cell a; cell outer = 1;
+    while (outer) {
+        cell b; cell inner = 1;
+        while (inner) { compare(a,b); b+=1; inner=b!=0; }
+        a+=1; outer=a!=0;
+    }
+}

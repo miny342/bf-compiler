@@ -1255,7 +1255,6 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         if low_add != 0 {
             let compare_left = self.temporary_cell();
             let compare_right = self.temporary_cell();
-            let right_test = self.temporary_cell();
             let restore = self.temporary_cell();
             let carry = self.temporary_cell();
             body.extend(copy_instructions(low, compare_left, restore));
@@ -1267,8 +1266,6 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 compare_left,
                 compare_right,
                 carry,
-                right_test,
-                restore,
                 0,
                 1,
             ));
@@ -1620,17 +1617,8 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         true_value: u8,
         false_value: u8,
     ) {
-        let right_test = self.temporary_cell();
-        let restore = self.temporary_cell();
-        for instruction in less_than_instructions(
-            left,
-            right,
-            destination,
-            right_test,
-            restore,
-            true_value,
-            false_value,
-        ) {
+        for instruction in less_than_instructions(left, right, destination, true_value, false_value)
+        {
             self.emit(instruction);
         }
     }
@@ -1669,76 +1657,20 @@ fn copy_instructions(
     ]
 }
 
-#[allow(clippy::too_many_arguments)]
 fn less_than_instructions(
     left: Address,
     right: Address,
     destination: Address,
-    right_test: Address,
-    restore: Address,
     true_value: u8,
     false_value: u8,
 ) -> Vec<FrameInstruction> {
-    let body = vec![
-        FrameInstruction::Set {
-            dst: right_test,
-            value: 0,
-        },
-        FrameInstruction::Transfer {
-            src: right,
-            targets: vec![
-                FrameTransferTarget {
-                    dst: right_test,
-                    factor: 1,
-                },
-                FrameTransferTarget {
-                    dst: restore,
-                    factor: 1,
-                },
-            ],
-        },
-        FrameInstruction::Transfer {
-            src: restore,
-            targets: vec![FrameTransferTarget {
-                dst: right,
-                factor: 1,
-            }],
-        },
-        FrameInstruction::Branch {
-            condition: right_test,
-            then_body: vec![
-                FrameInstruction::AddConst {
-                    dst: left,
-                    value: 255,
-                },
-                FrameInstruction::AddConst {
-                    dst: right,
-                    value: 255,
-                },
-            ],
-            else_body: vec![FrameInstruction::Transfer {
-                src: left,
-                targets: vec![],
-            }],
-        },
-    ];
-    vec![
-        FrameInstruction::Loop {
-            condition: left,
-            body,
-        },
-        FrameInstruction::Branch {
-            condition: right,
-            then_body: vec![FrameInstruction::Set {
-                dst: destination,
-                value: true_value,
-            }],
-            else_body: vec![FrameInstruction::Set {
-                dst: destination,
-                value: false_value,
-            }],
-        },
-    ]
+    vec![FrameInstruction::Compare {
+        left,
+        right,
+        dst: destination,
+        true_value,
+        false_value,
+    }]
 }
 
 #[cfg(test)]

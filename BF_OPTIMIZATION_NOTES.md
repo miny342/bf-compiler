@@ -642,6 +642,14 @@ executeはwarm実行3回の中央値、sample比率は別の2 ms sampling 1回�
 
 ### 非破壊的な非同期分岐
 
+大小比較では採用済み。source/binary CIRから破壊的な`FrameInstruction::Compare`
+（入力snapshotをunsigned比較し、両operandをclearしてから結果を書く）を生成する。
+ABI backendで既存の連続したScratch0..3へoperandを移し、非同期分岐で残り値を
+検査する。比較ループ内の複製・復元を省き、通常BFへ展開する。作業セルは出口で
+すべて0、pointerはcontext originへ戻す。D=8/D=16を検証対象に含める。
+汎用Frame Branchの意味は変更せず、Tape IRや汎用非破壊if命令は追加していない。
+現コミットの測定・制約は`SELFHOST_OPTIMIZATION_EXPERIMENTS_EVALUATION.md`を参照。
+
 [非破壊的条件分岐](https://zenn.dev/angel_p_57/articles/afcae170f7311a)では、次の2方式が
 整理されている。
 
