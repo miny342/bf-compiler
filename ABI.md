@@ -487,8 +487,6 @@ normalizeする。関数本体と`ARRAY_COPY`本体はどちらも1回だけ生�
 保持でき、localのheadはstack flagなので、どちらもportとして上書きしてはならない。
 callerは値を回収した後にportを0へ戻す。store helperのsource portも終了時に0へ戻す。
 
-代替案として、compiler-privateなfat region handleをfrontier-normalized helperへ渡す
-方式も実装可能である。しかしpointer-relative portal方式が実測で成立する限り、
 version 0ではruntime region handleを導入しない。
 
 version 0ではsource-level pointer/referenceを導入せず、共有array accessorが必要とする
@@ -496,8 +494,6 @@ version 0ではsource-level pointer/referenceを導入せず、共有array acces
 
 初期loweringは、最大宣言長を持つ配列に合わせたchunk/withinの二段静的dispatchを
 `ARRAY_COPY`内に1回だけ生成する。短い配列の有効添字は同じprefixを使って共有できる。
-256要素では生成codeが大きいため、将来はmoving-index方式などへ置換してよいが、これは
-array portal ABIを変更しないbackend最適化とする。
 
 ## Version 1 aggregate region
 
@@ -618,44 +614,8 @@ version 0とversion 1のBFCは、次を持たない。
 したがって、local aggregateまたはscalar localのaddressをcalleeへ渡したり、returnしたり、
 globalへ保存したりできない。
 
-異なるlocal `a`と`b`を同じ関数へ参照渡しするために、関数本体を複製する必要が必ず
-あるわけではない。例えば次のfat handleを実行時に解決すれば、単一の関数本体で
-実装できる。
-
-```text
-ReferenceHandle {
-    address_space,
-    frame_depth,
-    chunk_offset,
-    cell_offset,
-}
-```
-
-しかし、この方式には次が必要になる。
-
-- 可変長のframe chainを辿るdereference helper
-- frame境界またはframe sizeの実行時表現
-- referenceのlifetime検査
-- aliasing規則
-- referenceを別の関数へ転送するときのframe depth更新
-- return後のframeを指すdangling referenceの禁止
-
-これらは実装可能だが、初期BFCの目的に対して大きすぎる。関数間のaggregate受け渡しは
-参照ではなく値渡しと値返しを標準とする。
-
-参照に似た呼出構文が将来必要になっても、addressを言語値にする必要はない。
-non-escapingかつ重複しない`inout`引数だけを認め、次のcopy-in/copy-outへloweringできる。
-
-```text
-update(inout a)       // source sugar
-a = update(a)         // ABI上の意味
-```
-
-複数の`inout`引数はstructまたは複数cell aggregateとしてまとめて返し、call siteが
-元の変数へwritebackする。writeback先はcall siteごとに静的に既知なので、callee本体の
-複製もruntime referenceも要らない。同じ変数を複数の`inout`引数へ渡すalias、参照の
-保存、calleeからの再返却はこの変換では認めない。version 0とセルフホスト拡張version 1は
-この糖衣を導入せず、method callも含めて明示的な値返しと代入だけを仕様とする。
+関数間のaggregate受け渡しは値渡しと値返しを使用する。`inout`引数は導入せず、
+method callも含めて明示的な値返しと代入を使用する。
 
 ## Aggregate value
 
@@ -900,8 +860,7 @@ case bodyがcall、return、portalによって別contextへpointerを移した�
 branch flagは0でなければならない。これにより残りのcountdown caseを誤って実行しない。
 
 現行frontendは密なcontinuation IDを割り当てるが、公開Continuation IRは任意のnonzero `u16` IDを
-許す。このためbackendは疎な範囲へ巨大なcountdownを生成しない。profileに基づくhot continuationの
-ID配置は将来の最適化であり、source順の再現性とdebuggabilityを含めて評価する。
+許す。このためbackendは疎な範囲へ巨大なcountdownを生成しない。
 
 ## Pointer position convention
 

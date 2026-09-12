@@ -2316,7 +2316,7 @@ impl<'a> AbiEmitter<'a> {
         let body = self.capture_infallible(|emitter| {
             emitter.adjust(255);
             emitter.move_to(low);
-            if level % 16 == 0 {
+            if level.is_multiple_of(16) {
                 emitter.adjust(0_u8.wrapping_sub(15));
                 emitter.move_to(high);
                 emitter.adjust(1);
