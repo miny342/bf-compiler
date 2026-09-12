@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/bf-compiler",
-    "crates/bf-frame-experiment",
     "crates/bf-interpreter",
     "crates/bf-profiling",
 ]

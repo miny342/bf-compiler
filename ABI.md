@@ -9,8 +9,9 @@ dispatch、call/return、直接・相互再帰、static global、array portal、
 enum、struct、任意要素型・多次元固定長配列のlogical aggregate layout、16-bit offset portal、
 任意のactivationからの`abort`を使用する。定数offsetはlayoutから直接解決し、動的offsetは
 local/globalに共通のportal accessorを使用する。sourceのmethod call、macro、文字列、`len`はfrontendで
-消費されるためABI機能を追加しない。独立した低水準の検証コードは引き続き
-`bf-frame-experiment` crateに置く。
+消費されるためABI機能を追加しない。現行backendの低水準の検証は
+`crates/bf-compiler/src/abi_codegen.rs`のunit test、sourceからの検証は
+`crates/bf-compiler/tests/stage78.rs`と`version1.rs`で行う。
 
 ## 目的
 
@@ -1114,9 +1115,13 @@ version 1実装は少なくとも次を`D = 8`と`D = 16`の両方で検証す�
 
 ## 実験結果とversion 0の決定
 
-`bf-frame-experiment`で8/16-cellの両方について次を実行した。
+初期の独立実験crate（削除済み）で8/16-cellの両方について次を実行した。
+以下はversion 0の設計判断に使った過去の測定であり、現行backendの性能値ではない。
+実験コードと実行手順はGit履歴に残る。
 
-- global/local array portalから単一の`ARRAY_COPY` continuationを呼び、全有効添字をload。
+- legacy frame probeで全添字、anchor往復、nested frame解放を検証。
+- 長さ16/32のglobal/local array portalから単一の`ARRAY_COPY` continuationを呼び、全有効添字をload。
+- 共有`ARRAY_STORE`で全有効添字を上書きして再loadし、global auxとlocal stack flagの保存を検証。
 - nonzero high byteを含む16 bit continuation IDのdispatch。
 - scalarを返す直接再帰を深さ0から20まで実行。
 - frame sizeが異なる2関数の相互再帰を深さ0から20まで実行。
