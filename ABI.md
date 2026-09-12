@@ -1,7 +1,7 @@
 # BFC Brainfuck ABI
 
 この文書は、BFCからBrainfuckへ関数、再帰、ローカル変数、aggregateをloweringするための
-実験的な実行時ABIを定義する。
+実行時ABIを定義する。
 
 ABI version 0と、その上に定義するセルフホスト拡張version 1の設計仕様である。
 現在の`bf-compiler`はversion 1まで実装している。version 0のscalar/array frame、continuation
@@ -9,9 +9,7 @@ dispatch、call/return、直接・相互再帰、static global、array portal、
 enum、struct、任意要素型・多次元固定長配列のlogical aggregate layout、16-bit offset portal、
 任意のactivationからの`abort`を使用する。定数offsetはlayoutから直接解決し、動的offsetは
 local/globalに共通のportal accessorを使用する。sourceのmethod call、macro、文字列、`len`はfrontendで
-消費されるためABI機能を追加しない。現行backendの低水準の検証は
-`crates/bf-compiler/src/abi_codegen.rs`のunit test、sourceからの検証は
-`crates/bf-compiler/tests/stage78.rs`と`version1.rs`で行う。
+消費されるためABI機能を追加しない。
 
 ## 目的
 
@@ -530,8 +528,7 @@ address(A, o) = A + chunk(o) * S + 1 + within(o)
 
 protocol prefix、chunk head、paddingはpayload cell数に含めず、aggregate copyでも読み書き
 しない。zero-size aggregateはregionを確保せず、copyも行わない。現行backendはlocal aggregateを
-一律にaligned regionへ置く。将来、動的indexを一度も使わないlocal aggregateをscalarizeしてよいが、
-これは解析を伴う未実装のlayout最適化である。regionは1個のrootにつき1個のprotocol prefixを置き、
+一律にaligned regionへ置く。regionは1個のrootにつき1個のprotocol prefixを置き、
 nested arrayごとにprefixを重ねない。
 
 ### Flat logical offset
@@ -755,9 +752,6 @@ callee aggregate return:
 再帰呼び出しでは各activationが別のoutboxを持つため、global scratchへ戻り値を置く
 方式と異なり、深いcallによる上書きが起こらない。
 
-この配置は、2 chunk outboxを持つ再帰probeで、子のaggregateを各activationのoutboxへ
-受け取り、加工後に親outboxへ転送する経路まで検証済みである。
-
 ### Copy elision
 
 calleeは、return対象の一時aggregateを自身のframeへ作ってからcopyする代わりに、最初から
@@ -973,28 +967,6 @@ trampoline loopの継続判定cellは反復ごとのcurrent contextにあるた�
 global、outbox、protocol cellをclearする義務はない。`Abort`はarray accessor内部には生成せず、
 portalからuser continuationへ戻った後に実行する。
 
-## 容量と効率
-
-stack領域におけるdata cell比率は次である。
-
-```text
-D = 8:   8 / 9  = 88.9%
-D = 16: 16 / 17 = 94.1%
-```
-
-global aligned regionではheadを`aux`として利用できるため、paddingを除けばheadの
-容量損失はない。anchor head 1 cellだけは必ずsentinelとして予約する。
-
-大きい`D`には次の性質がある。
-
-- head overheadが小さい。
-- anchor/frontier走査のBFポインタ移動列が長い。
-- frameごとの末尾paddingが増えやすい。
-- 小さい配列や小さいframeで内部断片化が増える。
-
-小さい`D`では逆のtrade-offになる。最終値は生成BF bytes、実行step数、実効テープ
-容量を測定して決定する。
-
 ## エラーと未定義動作
 
 少なくとも次をcompiler errorとする。
@@ -1112,56 +1084,3 @@ version 1実装は少なくとも次を`D = 8`と`D = 16`の両方で検証す�
 - embedded NULを含む文字列aggregateが末尾追加なしで宣言byte数どおり初期化される。
 - 直接・相互再帰中の深いactivationから`Abort`するとcallerへ戻らずtrampolineを終了する。
 - version 0の`cell[N]` programがversion 1 backendでも同じbinary outputを生成する。
-
-## 実験結果とversion 0の決定
-
-初期の独立実験crate（削除済み）で8/16-cellの両方について次を実行した。
-以下はversion 0の設計判断に使った過去の測定であり、現行backendの性能値ではない。
-実験コードと実行手順はGit履歴に残る。
-
-- legacy frame probeで全添字、anchor往復、nested frame解放を検証。
-- 長さ16/32のglobal/local array portalから単一の`ARRAY_COPY` continuationを呼び、全有効添字をload。
-- 共有`ARRAY_STORE`で全有効添字を上書きして再loadし、global auxとlocal stack flagの保存を検証。
-- nonzero high byteを含む16 bit continuation IDのdispatch。
-- scalarを返す直接再帰を深さ0から20まで実行。
-- frame sizeが異なる2関数の相互再帰を深さ0から20まで実行。
-- activationごとに2 chunk outboxを持つaggregate再帰を深さ0から10まで実行。
-- return時にcallee全体をclearし、次のallocationではflagだけを設定してframeを再利用。
-
-array portal probeの測定値は次のとおりである。各programは同じ添字でlocal/globalを1回
-ずつ読み、stepは全有効添字の平均と最大である。
-
-| D | 配列長 | BF source bytes | 平均steps | 最大steps |
-| ---: | ---: | ---: | ---: | ---: |
-| 8 | 16 | 14,626 | 60,174 | 70,221 |
-| 16 | 16 | 13,807 | 73,460 | 86,625 |
-| 8 | 100 | 95,980 | 181,263 | 306,576 |
-| 16 | 100 | 90,521 | 193,085 | 316,880 |
-| 8 | 256 | 364,234 | 416,329 | 763,194 |
-| 16 | 256 | 342,698 | 410,527 | 756,978 |
-
-`D = 8`は中規模配列のstep数で少し有利だが、`D = 16`は同一長でsourceが小さく、
-256要素ではstep数も逆転し、flag overheadも半減する。このためdefaultを16とする。
-
-scalar再帰深さ20では、8-cell版が7,196 bytes / 506,300 steps、16-cell版が6,756 bytes /
-494,903 stepsだった。aggregate probeは返すcell数が`D + 3`で異なるため直接比較には
-使わず、outbox配置と再帰安全性の検証だけに使う。
-
-256要素accessorの約343KBは小さくないが、全access siteへ複製せずprogram全体で1本
-だけ生成する初期実装として許容する。array portal ABIを保ったまま、accessor内部を
-moving-index方式や別のdispatchへ後から交換する。
-
-## 継続して評価する最適化
-
-次はABIの意味を変えずに比較できる。実装・profiling後に再評価する。
-外部記事から収集した具体的なBF lowering候補、適用条件、benchmark順序は
-[BF_OPTIMIZATION_NOTES.md](BF_OPTIMIZATION_NOTES.md)に分離して記録する。
-
-- 照合型16 bit dispatcherのpage/slot countdownへの置換。（実装済み。疎なIDは照合型へfallback）
-- 二段静的array dispatchをmoving-index方式へ置換するか。
-- call graphと頻度推定を使うcontinuation ID割当。
-- aggregate copy elisionとoutboxを複数slotへ拡張する条件。
-- tail call optimization。
-- debug専用のstack overflow guard。
-
-これらの未実装候補を除くversion 0の項目とversion 1の節は、現在の実装基準である。

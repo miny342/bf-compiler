@@ -86,19 +86,16 @@ impl Iterator for Runs<'_> {
                 self.position += 1;
                 continue;
             }
-            match run_at(self.source, offset, self.rle) {
-                Ok(run) => {
-                    self.position = run.end;
-                    if let Some(total) = self
-                        .total
-                        .checked_add(run.count)
-                        .filter(|n| *n <= isize::MAX as usize)
-                    {
-                        self.total = total;
-                        return Some(Ok(run));
-                    }
+            if let Ok(run) = run_at(self.source, offset, self.rle) {
+                self.position = run.end;
+                if let Some(total) = self
+                    .total
+                    .checked_add(run.count)
+                    .filter(|n| *n <= isize::MAX as usize)
+                {
+                    self.total = total;
+                    return Some(Ok(run));
                 }
-                Err(_) => {}
             }
             self.position = self.source.len();
             return Some(Err(RleError(offset)));
