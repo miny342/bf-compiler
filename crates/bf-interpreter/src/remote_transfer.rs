@@ -44,7 +44,7 @@ impl ScanSpan {
     fn contains(self, cell: usize) -> bool {
         cell >= self.start.min(self.end)
             && cell <= self.start.max(self.end)
-            && cell.abs_diff(self.start) % self.stride == 0
+            && cell.abs_diff(self.start).is_multiple_of(self.stride)
     }
 }
 
@@ -136,7 +136,7 @@ impl Machine<'_> {
                     // Probe allocated cells only. Growth/boundary errors use
                     // normal execution, preserving exact physical error offsets.
                     while self.tape[pointer] != 0 {
-                        if steps % 1024 == 0 {
+                        if steps.is_multiple_of(1024) {
                             self.observe_progress(site)?;
                         }
                         let Some(next) = pointer

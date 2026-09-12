@@ -314,7 +314,7 @@ peephole optimizationはtape boundaryのerror semanticsを不用意に変えな�
 
 ### Microbenchmark
 
-`bf-frame-experiment`または専用exampleに次を置く。
+`bf-compiler`の専用exampleに、現行backendを使う次の測定を置く。
 
 - dispatcher sizeとID分布。
 - scalar call/returnと再帰depth。

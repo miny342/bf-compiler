@@ -11,9 +11,13 @@ fn continuation_id(value: u16) -> ContinuationId {
 }
 
 #[test]
-fn profile_artifact_has_the_same_brainfuck_as_normal_compilation() {
-    let program =
-        lower_source("void helper() {} void main() { helper(); helper(); output('x'); }").unwrap();
+fn profile_artifact_preserves_brainfuck_and_separates_abi_phases() {
+    let program = lower_source(
+        "cell[2] values; void helper() {} \
+         void main() { helper(); helper(); output('x'); \
+         cell index; values[index] = 1; output(values[index]); }",
+    )
+    .unwrap();
     let normal = compile_continuations(&program).unwrap();
     for granularity in [
         ProfileGranularity::Abi,
@@ -38,6 +42,14 @@ fn profile_artifact_has_the_same_brainfuck_as_normal_compilation() {
             "abi.dispatcher",
             "abi.call",
             "abi.return",
+            "abi.portal.start",
+            "abi.portal.accessor",
+            "abi.portal.offset",
+            "abi.portal.window.right",
+            "abi.portal.load",
+            "abi.portal.store",
+            "abi.portal.resume",
+            "abi.portal.router.global.0",
         ] {
             assert!(keys.contains(&key), "missing profile site {key}");
         }
@@ -67,49 +79,16 @@ fn profile_artifact_has_the_same_brainfuck_as_normal_compilation() {
 fn unbounded_backend_accepts_a_self_host_sized_static_region() {
     let program = lower_source("cell[256][256] arena; void main() {}").unwrap();
     assert!(compile_continuations(&program).is_err());
-    assert!(
-        !compile_continuations_unbounded(&program)
-            .unwrap()
-            .is_empty()
-    );
+    let normal = compile_continuations_unbounded(&program).unwrap();
+    assert!(!normal.is_empty());
     let profiled =
         compile_continuations_unbounded_with_profile(&program, ProfileGranularity::Continuation)
             .unwrap();
-    assert_eq!(
-        profiled.source,
-        compile_continuations_unbounded(&program).unwrap()
-    );
+    assert_eq!(profiled.source, normal);
     profiled
         .map
         .validate_for_source(profiled.source.as_bytes())
         .unwrap();
-}
-
-#[test]
-fn abi_profile_separates_portal_phases() {
-    let program = lower_source(
-        "cell[2] values; void main() { cell index; values[index] = 1; output(values[index]); }",
-    )
-    .unwrap();
-    let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi).unwrap();
-    let keys = artifact
-        .map
-        .sites
-        .iter()
-        .map(|site| site.stable_key.as_str())
-        .collect::<Vec<_>>();
-    for key in [
-        "abi.portal.start",
-        "abi.portal.accessor",
-        "abi.portal.offset",
-        "abi.portal.window.right",
-        "abi.portal.load",
-        "abi.portal.store",
-        "abi.portal.resume",
-        "abi.portal.router.global.0",
-    ] {
-        assert!(keys.contains(&key), "missing profile site {key}");
-    }
 }
 
 #[test]

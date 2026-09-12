@@ -506,24 +506,8 @@ impl PhaseMetrics {
         *self.terminal_counts.entry((phase, from, kind)).or_default() += 1;
     }
 
-    fn record_portal(
-        &mut self,
-        phase: usize,
-        continuation: ContinuationId,
-        function: FunctionId,
-        region: PortalRegion,
-        operation: PortalOperation,
-        offset: usize,
-        cells: usize,
-    ) {
-        let key = PortalRequestKey {
-            phase,
-            continuation,
-            function,
-            region,
-            operation,
-            cells,
-        };
+    fn record_portal(&mut self, key: PortalRequestKey, offset: usize) {
+        let PortalRequestKey { phase, region, .. } = key;
         let aggregate = self.portal_requests.entry(key).or_default();
         aggregate.requests += 1;
         *aggregate.offset_histogram.entry(offset).or_default() += 1;
@@ -921,10 +905,10 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
             }
             self.stats.executed_continuations += 1;
             self.stats.continuation_counts[usize::from(self.current.get())] += 1;
-            if let Some(phase) = self.current_phase() {
-                if let Some(metrics) = self.stats.phase_metrics.as_mut() {
-                    metrics.record_continuation(phase, self.current);
-                }
+            if let Some(phase) = self.current_phase()
+                && let Some(metrics) = self.stats.phase_metrics.as_mut()
+            {
+                metrics.record_continuation(phase, self.current);
             }
             self.maybe_progress(progress, false);
 
@@ -1271,13 +1255,15 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
         };
         if let Some(metrics) = self.stats.phase_metrics.as_mut() {
             metrics.record_portal(
-                phase,
-                continuation,
-                function,
-                region,
-                operation,
+                PortalRequestKey {
+                    phase,
+                    continuation,
+                    function,
+                    region,
+                    operation,
+                    cells,
+                },
                 offset,
-                cells,
             );
         }
     }

@@ -156,10 +156,8 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|error| format!("failed to read '{}': {error}", path.to_string_lossy()))?
         };
         let artifact_identity = cir_artifact_identity(&bytes, optimization_options);
-        if run_ir {
-            if let Some(cli_id) = ir_artifact_id.as_deref() {
-                validate_cli_artifact_id(cli_id, &artifact_identity)?;
-            }
+        if run_ir && let Some(cli_id) = ir_artifact_id.as_deref() {
+            validate_cli_artifact_id(cli_id, &artifact_identity)?;
         }
         let decode_started = Instant::now();
         let flat = bf_compiler::SelfhostCirProgram::decode(&bytes)?;
@@ -225,9 +223,11 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             run_ir_program(
                 &program,
                 optimization_stats,
-                "cir",
-                &artifact_identity,
-                optimization_options,
+                IrArtifactMetadata {
+                    source_kind: "cir",
+                    artifact_identity: &artifact_identity,
+                    optimization_options,
+                },
                 ir_metrics_output.as_deref(),
                 ir_progress_interval,
                 collect_ir_transitions,
@@ -330,9 +330,11 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         run_ir_program(
             &program,
             optimization_stats,
-            "source",
-            &artifact_identity,
-            optimization_options,
+            IrArtifactMetadata {
+                source_kind: "source",
+                artifact_identity: &artifact_identity,
+                optimization_options,
+            },
             ir_metrics_output.as_deref(),
             ir_progress_interval,
             collect_ir_transitions,
@@ -406,12 +408,16 @@ struct LoadedPhaseConfig {
     runtime: bf_compiler::ContinuationPhaseConfig,
 }
 
+struct IrArtifactMetadata<'a> {
+    source_kind: &'a str,
+    artifact_identity: &'a str,
+    optimization_options: bf_compiler::ContinuationOptimizationOptions,
+}
+
 fn run_ir_program(
     program: &bf_compiler::ContinuationProgram,
     optimization_stats: bf_compiler::ContinuationOptimizationStats,
-    source_kind: &str,
-    artifact_identity: &str,
-    optimization_options: bf_compiler::ContinuationOptimizationOptions,
+    artifact: IrArtifactMetadata<'_>,
     metrics_path: Option<&std::ffi::OsStr>,
     progress_interval: Duration,
     collect_transitions: bool,
@@ -496,10 +502,8 @@ fn run_ir_program(
     if let Some(path) = metrics_path {
         write_ir_metrics(
             path,
-            source_kind,
+            artifact,
             phase_config.map(|config| &config.raw),
-            artifact_identity,
-            optimization_options,
             program,
             optimization_stats,
             &stats,
@@ -643,14 +647,17 @@ fn load_phase_config(
 
 fn write_ir_metrics(
     path: &std::ffi::OsStr,
-    source_kind: &str,
+    artifact: IrArtifactMetadata<'_>,
     phase_config: Option<&Value>,
-    artifact_identity: &str,
-    optimization_options: bf_compiler::ContinuationOptimizationOptions,
     program: &bf_compiler::ContinuationProgram,
     optimization: bf_compiler::ContinuationOptimizationStats,
     run: &bf_compiler::ContinuationRunStats,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let IrArtifactMetadata {
+        source_kind,
+        artifact_identity,
+        optimization_options,
+    } = artifact;
     let mut static_in_degree = HashMap::<bf_compiler::ContinuationId, usize>::new();
     let mut static_out_degree = HashMap::<bf_compiler::ContinuationId, usize>::new();
     for continuation in program.continuations() {
@@ -911,7 +918,7 @@ fn sha256_hex(input: &[u8]) -> String {
     padded.extend_from_slice(&bit_length.to_be_bytes());
 
     let mut state = INITIAL;
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut words = [0u32; 64];
         for (index, word) in words[..16].iter_mut().enumerate() {
             let start = index * 4;
@@ -983,15 +990,15 @@ fn validate_output_path(
             return Err(format!("{option} cannot overwrite an input source").into());
         }
     }
-    if let Some(input) = cir_input.filter(|input| input.as_os_str() != "-") {
-        if equivalent_path(output_path, Path::new(input))? {
-            return Err(format!("{option} cannot overwrite the CIR input").into());
-        }
+    if let Some(input) = cir_input.filter(|input| input.as_os_str() != "-")
+        && equivalent_path(output_path, Path::new(input))?
+    {
+        return Err(format!("{option} cannot overwrite the CIR input").into());
     }
-    if let Some(input) = phase_config {
-        if equivalent_path(output_path, Path::new(input))? {
-            return Err(format!("{option} cannot overwrite the phase config input").into());
-        }
+    if let Some(input) = phase_config
+        && equivalent_path(output_path, Path::new(input))?
+    {
+        return Err(format!("{option} cannot overwrite the phase config input").into());
     }
     Ok(())
 }
