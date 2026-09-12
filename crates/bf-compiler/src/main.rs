@@ -156,9 +156,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|error| format!("failed to read '{}': {error}", path.to_string_lossy()))?
         };
         let artifact_identity = cir_artifact_identity(&bytes, optimization_options);
-        if run_ir
-            && let Some(cli_id) = ir_artifact_id.as_deref()
-        {
+        if run_ir && let Some(cli_id) = ir_artifact_id.as_deref() {
             validate_cli_artifact_id(cli_id, &artifact_identity)?;
         }
         let decode_started = Instant::now();
