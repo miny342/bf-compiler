@@ -690,7 +690,8 @@ mod tests {
             let allocated = lower(source, inline, true);
             assert_eq!(execute(&original, input), expected);
             assert_eq!(execute(&allocated, input), expected);
-            for chunk_cells in [16] {
+            {
+                let chunk_cells = 16;
                 let bf = crate::lower_continuations_with_config(
                     &allocated,
                     AbiConfig::new(chunk_cells).unwrap(),

@@ -2409,64 +2409,6 @@ impl<'a> AbiEmitter<'a> {
         self.migrate_context(delta * stride);
     }
 
-    fn shift_portal_window(&mut self, right: bool) {
-        let stride = self.config.stride() as isize;
-        let portal_chunks = self.config.portal_chunks() as isize;
-        let primary_lane = AbiField::Scratch0.index() % self.config.chunk_cells();
-        let primary = self
-            .config
-            .logical_offset_from_head(AbiField::Scratch0.index()) as isize;
-        let secondary = self
-            .config
-            .logical_offset_from_head(AbiField::Scratch3.index()) as isize;
-        let new_primary = primary + if right { stride } else { -stride };
-        let cell = |chunk: isize, lane: usize| chunk * stride + 1 + lane as isize;
-
-        for lane in 0..self.config.chunk_cells() {
-            // With D=16 the complete portal is one chunk. These protocol
-            // lanes are known zero while the window moves, so swapping a
-            // payload cell through a temporary is unnecessary: moving the
-            // adjacent payload into the zero portal lane also leaves the new
-            // portal lane zero. The consumed quotient lanes join this set on
-            // the return trip.
-            let always_zero = lane == AbiField::PcLow.index()
-                || lane == AbiField::PcHigh.index()
-                || lane == AbiField::NextPcLow.index()
-                || lane == AbiField::NextPcHigh.index()
-                || lane == AbiField::Branch.index()
-                || lane == AbiField::Scratch0.index()
-                || lane == AbiField::Scratch3.index();
-            let consumed_quotient = !right
-                && (lane == AbiField::Scratch1.index() || lane == AbiField::Scratch2.index());
-            if always_zero || consumed_quotient {
-                let adjacent = if right { portal_chunks } else { -1 };
-                self.move_value(cell(adjacent, lane), cell(0, lane));
-                continue;
-            }
-            let temporary = if lane < primary_lane {
-                primary
-            } else if lane == primary_lane {
-                secondary
-            } else {
-                new_primary
-            };
-            if right {
-                self.move_value(cell(portal_chunks, lane), temporary);
-                for chunk in (0..portal_chunks).rev() {
-                    self.move_value(cell(chunk, lane), cell(chunk + 1, lane));
-                }
-                self.move_value(temporary, cell(0, lane));
-            } else {
-                self.move_value(cell(-1, lane), temporary);
-                for chunk in 0..portal_chunks {
-                    self.move_value(cell(chunk, lane), cell(chunk - 1, lane));
-                }
-                self.move_value(temporary, cell(portal_chunks - 1, lane));
-            }
-        }
-        self.migrate_context(if right { stride } else { -stride });
-    }
-
     fn access_payload_with_remainder(
         &mut self,
         kind: PortalAccessKind,
@@ -3471,7 +3413,7 @@ mod tests {
     }
 
     #[test]
-    fn main_only_adapter_runs_with_both_chunk_sizes() {
+    fn main_only_adapter_runs_with_sixteen_cell_chunks() {
         let cell = CellId::new(0);
         let instructions = vec![
             Instruction::Set {
@@ -3480,7 +3422,8 @@ mod tests {
             },
             Instruction::Output { src: cell },
         ];
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_flat(
                     instructions.clone(),
@@ -3552,7 +3495,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"ABCD");
         }
 
@@ -3641,7 +3585,8 @@ mod tests {
         let encoding = DispatchEncoding::new(&program, &PortalPlan::new(&program).unwrap());
         assert_eq!(encoding.page_width, 33);
         let expected = order.iter().map(|v| (v % 251) as u8).collect::<Vec<_>>();
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), expected);
         }
     }
@@ -3722,7 +3667,8 @@ mod tests {
                 }),
         );
         let program = ContinuationProgram::new(original.main(), functions, continuations).unwrap();
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"\x04L");
         }
     }
@@ -3789,7 +3735,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"A");
         }
     }
@@ -3823,7 +3770,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"S");
         }
         let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
@@ -3878,7 +3826,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"ABC");
         }
         let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
@@ -3923,7 +3872,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"H");
         }
         let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
@@ -4018,7 +3968,8 @@ mod tests {
         };
         assert_eq!(maximum_branch_depth(&[empty_else]), 0);
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_flat(
                     instructions.clone(),
@@ -4031,9 +3982,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_recursion_and_caller_locals_survive_with_both_chunk_sizes() {
+    fn direct_recursion_and_caller_locals_survive_with_sixteen_cell_chunks() {
         let program = recursive_countdown_program();
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[4, b'L']);
         }
     }
@@ -4186,7 +4138,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[5]);
         }
     }
@@ -4233,7 +4186,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[0]);
         }
     }
@@ -4381,7 +4335,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[0]);
         }
     }
@@ -4457,7 +4412,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[42]);
         }
     }
@@ -4507,13 +4463,14 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"H");
         }
     }
 
     #[test]
-    fn global_addresses_work_in_transfer_loop_and_branch_for_both_geometries() {
+    fn global_addresses_work_in_transfer_loop_and_branch_for_sixteen_cell_chunks() {
         let main = FunctionId::new(0);
         let global = crate::GlobalId::new(0);
         let entry = id(1);
@@ -4589,7 +4546,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 &[2, 1, 3, b'B']
@@ -4598,7 +4556,7 @@ mod tests {
     }
 
     #[test]
-    fn global_to_frame_copy_preserves_every_value_in_both_geometries() {
+    fn global_to_frame_copy_preserves_every_value_in_sixteen_cell_chunks() {
         let main = FunctionId::new(0);
         let global = crate::GlobalId::new(0);
         let entry = id(1);
@@ -4638,7 +4596,8 @@ mod tests {
         let expected = (0..=u8::MAX)
             .flat_map(|value| [value, value])
             .collect::<Vec<_>>();
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 expected,
@@ -4775,7 +4734,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, vec![function], continuations).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 &[10, 10, 10, 20, 30]
@@ -5017,7 +4977,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 b"ABCDEQ",
@@ -5077,7 +5038,8 @@ mod tests {
         assert_eq!(portal.ordered_sites[0].resume.get(), 5);
         assert_eq!(encoding.encode(id(1)), 5);
         assert_eq!(encoding.encode(portal.ordered_sites[0].resume), 1);
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let layouts = build_layouts(&program, AbiConfig::new(chunk_cells).unwrap()).unwrap();
             assert_eq!(layouts[&main].frame.route_chunks(), 1, "D={chunk_cells}");
             assert_eq!(execute_continuations(&program, chunk_cells), b"Z");
@@ -5106,7 +5068,8 @@ mod tests {
         let plan = PortalPlan::new(&program).unwrap();
         assert_eq!(plan.accessors.len(), 2);
         assert!(plan.ordered_sites.len() < 16);
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let generated =
                 lower_continuations_with_config(&program, AbiConfig::new(chunk_cells).unwrap())
                     .unwrap()
@@ -5121,7 +5084,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_subranges_cross_call_and_return_in_both_geometries() {
+    fn aggregate_subranges_cross_call_and_return_in_sixteen_cell_chunks() {
         let main = FunctionId::new(0);
         let helper = FunctionId::new(1);
         let source = crate::FrameAggregateId::new(0);
@@ -5198,7 +5161,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"ABC");
         }
     }
@@ -5296,7 +5260,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"QAB");
         }
     }
@@ -5346,7 +5311,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"A");
         }
     }

@@ -680,10 +680,9 @@ pub enum FrameLayoutError {
 impl fmt::Display for FrameLayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedChunkCells { chunk_cells } => write!(
-                f,
-                "ABI chunk size must be 16 data cells, got {chunk_cells}"
-            ),
+            Self::UnsupportedChunkCells { chunk_cells } => {
+                write!(f, "ABI chunk size must be 16 data cells, got {chunk_cells}")
+            }
             Self::SizeOverflow => write!(f, "frame layout size exceeds the host address space"),
             Self::InvalidArrayLength { array, cells } => write!(
                 f,
@@ -943,7 +942,8 @@ mod tests {
     #[test]
     fn version_one_aggregate_crosses_legacy_and_chunk_boundaries() {
         let aggregate = FrameAggregateId::new(3);
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = FrameLayout::with_aggregates(
                 config,
@@ -982,7 +982,8 @@ mod tests {
     fn zero_sized_frame_aggregate_has_identity_without_storage() {
         let empty = FrameAggregateId::new(0);
         let full = FrameAggregateId::new(1);
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let mixed = FrameLayout::with_aggregates(
                 config,

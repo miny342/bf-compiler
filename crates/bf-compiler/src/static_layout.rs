@@ -493,14 +493,14 @@ mod tests {
         assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(0));
         assert_eq!(d16.array_chunk_count(GlobalId::new(2)), Ok(3));
         assert_eq!(d16.anchor_head(), 96);
-
     }
 
     #[test]
     fn protocol_and_payload_positions_skip_chunk_heads_for_d16() {
         let global = GlobalId::new(0);
         let descriptor = [GlobalDescriptor::array(global, 17)];
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = StaticLayout::new(config, &descriptor).unwrap();
             let base = layout.array_base_head(global).unwrap();
@@ -529,10 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn maximum_length_array_has_checked_boundaries_in_both_geometries() {
+    fn maximum_length_array_has_checked_boundaries_in_sixteen_cell_chunks() {
         let global = GlobalId::new(4);
         let descriptor = [GlobalDescriptor::array(global, 256)];
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = StaticLayout::new(config, &descriptor).unwrap();
             let expected_chunks = (PROTOCOL_CELLS + 256).div_ceil(chunk_cells);
@@ -663,7 +664,8 @@ mod tests {
     fn version_one_global_aggregate_crosses_legacy_and_chunk_boundaries() {
         let global = GlobalId::new(4);
         let descriptor = [GlobalDescriptor::aggregate(global, 299)];
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = StaticLayout::new(config, &descriptor).unwrap();
             let base = layout.aggregate_base_head(global).unwrap();
@@ -694,7 +696,8 @@ mod tests {
         let empty = GlobalId::new(0);
         let scalar = GlobalId::new(1);
         let full = GlobalId::new(2);
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let mixed = StaticLayout::new(
                 config,

@@ -417,12 +417,7 @@ struct PhaseMetrics {
 
 impl PhaseMetrics {
     fn new(program: &ContinuationProgram, config: ContinuationPhaseConfig) -> Result<Self, String> {
-        if config.chunk_cells.is_empty()
-            || config
-                .chunk_cells
-                .iter()
-                .any(|&cells| cells != 16)
-        {
+        if config.chunk_cells.is_empty() || config.chunk_cells.iter().any(|&cells| cells != 16) {
             return Err("phase config chunk_cells must contain only 16".into());
         }
         let mut phase_names = vec!["unknown".to_owned()];

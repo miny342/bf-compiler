@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn local_arrays_cross_chunks_with_both_abi_geometries() {
+    fn local_arrays_cross_chunks_with_sixteen_cell_chunks() {
         let source = r#"
             void main() {
                 cell[18] values;
@@ -606,7 +606,8 @@ mod tests {
         "#;
         let program = lower_source(source).unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let config = crate::AbiConfig::new(chunk_cells).unwrap();
             let brainfuck = crate::lower_continuations_with_config(&program, config)
                 .unwrap()
@@ -620,13 +621,14 @@ mod tests {
     }
 
     #[test]
-    fn maximum_length_local_array_runs_with_both_abi_geometries() {
+    fn maximum_length_local_array_runs_with_sixteen_cell_chunks() {
         let program = lower_source(
             "void main() { cell[256] values; values[255] = 'Z'; output(values[255]); }",
         )
         .unwrap();
 
-        for chunk_cells in [16] {
+        {
+            let chunk_cells = 16;
             let config = crate::AbiConfig::new(chunk_cells).unwrap();
             let brainfuck = crate::lower_continuations_with_config(&program, config)
                 .unwrap()
