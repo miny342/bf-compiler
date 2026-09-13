@@ -168,11 +168,11 @@ fn lower_hir_with_slot_reuse(
 }
 
 /// Estimate a candidate's persistent frame after slot reuse, including the
-/// backend's branch and portal scratch. Compare both supported geometries.
+/// backend's branch and portal scratch. Use the supported 16-cell geometry.
 pub(crate) fn allocated_frame_chunks(
     program: &HirProgram,
     function: hir::FunctionId,
-) -> Result<[usize; 2], ContinuationLoweringError> {
+) -> Result<usize, ContinuationLoweringError> {
     let function_map = (0..program.functions.len())
         .map(|index| {
             Ok(Some(LoweredFunction {
@@ -216,18 +216,14 @@ pub(crate) fn allocated_frame_chunks(
         .checked_add(branch_cells)
         .and_then(|cells| cells.checked_add(portal_cells))
         .ok_or_else(|| invalid_hir(Some(function), "frame size overflow"))?;
-    let mut chunks = [0; 2];
-    for (index, chunk_cells) in [8, 16].into_iter().enumerate() {
-        let layout = crate::FrameLayout::with_aggregates(
-            crate::AbiConfig::new(chunk_cells).unwrap(),
-            value_cells,
-            descriptor.frame_aggregates(),
-            descriptor.outbox_cells(),
-        )
-        .map_err(|error| invalid_hir(Some(function), error.to_string()))?;
-        chunks[index] = layout.frame_chunks();
-    }
-    Ok(chunks)
+    let layout = crate::FrameLayout::with_aggregates(
+        crate::AbiConfig::default(),
+        value_cells,
+        descriptor.frame_aggregates(),
+        descriptor.outbox_cells(),
+    )
+    .map_err(|error| invalid_hir(Some(function), error.to_string()))?;
+    Ok(layout.frame_chunks())
 }
 
 fn continuation_id(value: usize) -> Result<ContinuationId, ContinuationLoweringError> {

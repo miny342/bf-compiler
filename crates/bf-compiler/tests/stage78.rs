@@ -11,7 +11,7 @@ fn execute(source: &str, input: &[u8], chunk_cells: usize) -> Vec<u8> {
 }
 
 fn assert_executes_for_both_chunk_sizes(source: &str, input: &[u8], expected: &[u8]) {
-    for chunk_cells in [8, 16] {
+    for chunk_cells in [16] {
         assert_eq!(
             execute(source, input, chunk_cells),
             expected,

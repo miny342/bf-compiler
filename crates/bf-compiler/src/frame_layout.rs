@@ -28,10 +28,10 @@ pub struct AbiConfig {
 }
 
 impl AbiConfig {
-    /// Creates a supported ABI configuration.
+    /// Creates the supported 16-data-cell ABI configuration.
     pub const fn new(chunk_cells: usize) -> Result<Self, FrameLayoutError> {
         match chunk_cells {
-            8 | 16 => Ok(Self { chunk_cells }),
+            16 => Ok(Self { chunk_cells }),
             _ => Err(FrameLayoutError::UnsupportedChunkCells { chunk_cells }),
         }
     }
@@ -682,7 +682,7 @@ impl fmt::Display for FrameLayoutError {
         match self {
             Self::UnsupportedChunkCells { chunk_cells } => write!(
                 f,
-                "ABI chunk size must be 8 or 16 data cells, got {chunk_cells}"
+                "ABI chunk size must be 16 data cells, got {chunk_cells}"
             ),
             Self::SizeOverflow => write!(f, "frame layout size exceeds the host address space"),
             Self::InvalidArrayLength { array, cells } => write!(
@@ -764,10 +764,13 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_chunk_sizes() {
-        assert_eq!(
-            AbiConfig::new(12),
-            Err(FrameLayoutError::UnsupportedChunkCells { chunk_cells: 12 })
-        );
+        for chunk_cells in [0, 1, 8, 12, 17, 32, usize::MAX] {
+            assert_eq!(
+                AbiConfig::new(chunk_cells),
+                Err(FrameLayoutError::UnsupportedChunkCells { chunk_cells })
+            );
+        }
+        assert_eq!(AbiConfig::new(16), Ok(AbiConfig::default()));
     }
 
     #[test]
@@ -806,45 +809,19 @@ mod tests {
     }
 
     #[test]
-    fn exact_layout_for_eight_cell_chunks() {
-        let config = AbiConfig::new(8).unwrap();
-        let layout = FrameLayout::new(config, 9, 0).unwrap();
-
-        assert_eq!(config.stride(), 9);
-        assert_eq!(config.portal_chunks(), 2);
-        assert_eq!(layout.value_chunks(), 2);
-        assert_eq!(layout.value_padding_cells(), 7);
-        assert_eq!(layout.context_chunks(), 2);
-        assert_eq!(layout.frame_chunks(), 4);
-        assert_eq!(layout.physical_cells(), 36);
-
-        assert_eq!(layout.frame_offset(FrameSlot::new(0)), -17);
-        assert_eq!(layout.frame_offset(FrameSlot::new(7)), -10);
-        assert_eq!(layout.frame_offset(FrameSlot::new(8)), -8);
-        assert_eq!(layout.context_offset_from_frontier(), -18);
-        assert_eq!(layout.frame_offset_from_frontier(FrameSlot::new(0)), -35);
-        assert_eq!(layout.abi_offset(AbiField::Value), 1);
-        assert_eq!(layout.abi_offset(AbiField::Restore), 8);
-        assert_eq!(layout.abi_offset(AbiField::Branch), 10);
-        assert_eq!(layout.abi_offset(AbiField::Scratch3), 17);
-        assert_eq!(layout.abi_offset_from_frontier(AbiField::Value), -17);
-        assert_eq!(layout.abi_offset_from_frontier(AbiField::Scratch3), -1);
-    }
-
-    #[test]
     fn outbox_is_reversed_below_context_and_disjoint_from_values() {
-        let layout = FrameLayout::new(AbiConfig::new(8).unwrap(), 9, 10).unwrap();
+        let layout = FrameLayout::new(AbiConfig::default(), 17, 18).unwrap();
 
         assert_eq!(layout.value_chunks(), 2);
         assert_eq!(layout.outbox_chunks(), 2);
-        assert_eq!(layout.outbox_padding_cells(), 6);
-        assert_eq!(layout.frame_chunks(), 6);
-        assert_eq!(layout.frame_offset(FrameSlot::new(8)), -26);
-        assert_eq!(layout.outbox_offset(0), Ok(-8));
-        assert_eq!(layout.outbox_offset(7), Ok(-1));
-        assert_eq!(layout.outbox_offset(8), Ok(-17));
-        assert_eq!(layout.outbox_offset(9), Ok(-16));
-        assert!(layout.frame_offset(FrameSlot::new(8)) < layout.outbox_offset(9).unwrap());
+        assert_eq!(layout.outbox_padding_cells(), 14);
+        assert_eq!(layout.frame_chunks(), 5);
+        assert_eq!(layout.frame_offset(FrameSlot::new(16)), -50);
+        assert_eq!(layout.outbox_offset(0), Ok(-16));
+        assert_eq!(layout.outbox_offset(15), Ok(-1));
+        assert_eq!(layout.outbox_offset(16), Ok(-33));
+        assert_eq!(layout.outbox_offset(17), Ok(-32));
+        assert!(layout.frame_offset(FrameSlot::new(16)) < layout.outbox_offset(17).unwrap());
         assert!(layout.outbox_offset(0).unwrap() < layout.abi_offset(AbiField::Value));
     }
 
@@ -877,28 +854,6 @@ mod tests {
         assert_eq!(layout.array_element_offset(first, 16), Ok(-101));
         assert_eq!(layout.array_base_offset(second), Ok(-85));
         assert_eq!(layout.outbox_offset(0), Ok(-16));
-    }
-
-    #[test]
-    fn aligned_array_offsets_skip_heads_for_d8() {
-        let array = FrameArrayId::new(7);
-        let layout = FrameLayout::with_arrays(
-            AbiConfig::new(8).unwrap(),
-            1,
-            &[FrameArrayDescriptor::new(array, 9)],
-            10,
-        )
-        .unwrap();
-
-        assert_eq!(layout.array_chunk_count(array), Ok(4));
-        assert_eq!(layout.frame_chunks(), 9);
-        assert_eq!(layout.frame_offset(FrameSlot::new(0)), -26);
-        assert_eq!(layout.array_base_offset(array), Ok(-63));
-        assert_eq!(layout.array_portal_offset(array, AbiField::Branch), Ok(-53));
-        assert_eq!(layout.array_element_offset(array, 0), Ok(-44));
-        assert_eq!(layout.array_element_offset(array, 8), Ok(-35));
-        assert_eq!(layout.array_base_offset_from_frontier(array), Ok(-81));
-        assert_eq!(layout.array_element_offset_from_frontier(array, 8), Ok(-53));
     }
 
     #[test]
@@ -963,12 +918,9 @@ mod tests {
     #[test]
     fn minimum_main_capacity_includes_anchor_frame_and_frontier() {
         let d16 = FrameLayout::new(AbiConfig::new(16).unwrap(), 0, 0).unwrap();
-        let d8 = FrameLayout::new(AbiConfig::new(8).unwrap(), 0, 0).unwrap();
 
         // D=16: anchor chunk 0..16, frame 17..33, frontier head 34.
         assert_eq!(d16.minimum_main_tape_cells(0), Ok(35));
-        // D=8: anchor chunk 0..8, two context chunks 9..26, frontier 27.
-        assert_eq!(d8.minimum_main_tape_cells(0), Ok(28));
 
         assert_eq!(d16.validate_main_capacity_in(29_965, 30_000), Ok(()));
         assert_eq!(
@@ -991,7 +943,7 @@ mod tests {
     #[test]
     fn version_one_aggregate_crosses_legacy_and_chunk_boundaries() {
         let aggregate = FrameAggregateId::new(3);
-        for chunk_cells in [8, 16] {
+        for chunk_cells in [16] {
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = FrameLayout::with_aggregates(
                 config,
@@ -1030,7 +982,7 @@ mod tests {
     fn zero_sized_frame_aggregate_has_identity_without_storage() {
         let empty = FrameAggregateId::new(0);
         let full = FrameAggregateId::new(1);
-        for chunk_cells in [8, 16] {
+        for chunk_cells in [16] {
             let config = AbiConfig::new(chunk_cells).unwrap();
             let mixed = FrameLayout::with_aggregates(
                 config,

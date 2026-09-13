@@ -66,7 +66,7 @@ fn binary_cir_relations_cover_every_pair() {
     }
     input.push(0);
     let program = bfc::lower_selfhost_cir(&cir).unwrap();
-    for chunk in [8, 16] {
+    for chunk in [16] {
         let bf = bfc::optimize_bf(
             &bfc::lower_continuations_with_config(&program, bfc::AbiConfig::new(chunk).unwrap())
                 .unwrap(),
@@ -127,7 +127,7 @@ fn all_unsigned_pairs_preserve_source_operands_and_relational_results() {
         )
         .unwrap();
         assert_eq!(actual, expected);
-        for chunk in [8, 16] {
+        for chunk in [16] {
             let bf = bfc::optimize_bf(
                 &bfc::lower_continuations_with_config(
                     &program,
@@ -215,7 +215,7 @@ fn compare_snapshots_allow_aliases_and_clear_operands_before_writing_result() {
         )],
     )
     .unwrap();
-    for chunk in [8, 16] {
+    for chunk in [16] {
         let bf = bfc::optimize_bf(
             &bfc::lower_continuations_with_config(&program, bfc::AbiConfig::new(chunk).unwrap())
                 .unwrap(),

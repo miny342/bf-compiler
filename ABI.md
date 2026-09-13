@@ -45,13 +45,12 @@ P = DISPATCH_PORTAL_CHUNKS = ceil(R / D)
 
 - `D`はコンパイラbackend全体で一つの値を使用する。
 - 一つの生成BF内で異なる`D`を混在させない。
-- version 0のdefaultは`D = 16`とする。
-- `D = 8`を互換なbackend構成として維持し、layout testを通す。
-- version 0でbackendが受け付ける値は8または16とする。
+- backendが受け付けるchunk幅は`D = 16`のみとする。
+- `AbiConfig::new`は16以外の値を拒否する。
 - `R = 16`とする。
 - `R`は各配列regionと各frame contextの先頭に置くcompiler-owned protocol cell数である。
 - `R`の先頭cellはversion 0 array、version 1 aggregate load/storeの`VALUE_PORT`である。
-- `P`は`D = 16`で1 chunk、`D = 8`で2 chunkになる。
+- `P`は1 chunkになる。
 
 `D`はBFCソースから観測できる値ではない。変更すると物理配置と生成BFは変わるが、
 ソースプログラムの意味は変わらない。
@@ -313,8 +312,7 @@ j=14  SCRATCH_2
 j=15  SCRATCH_3
 ```
 
-このlogical field順とarray portalのfield順を共通化する。`D = 8`では途中に2個目の
-stack flagまたはglobal aux headを挟むが、`field_address`がそれを飛ばす。
+このlogical field順とarray portalのfield順を共通化し、16個のfieldを1 chunkに配置する。
 
 ### `ACTIVE`
 
@@ -1030,7 +1028,7 @@ arityと型、outbox容量、continuation ownership、return型、portal success
 
 ## Version 1適合条件
 
-version 1実装は少なくとも次を`D = 8`と`D = 16`の両方で検証する。
+version 1実装は少なくとも次を`D = 16`で検証する。
 
 - struct field、array-of-struct、struct内array、多次元arrayの定数projectionが同じlogical
   layoutへ解決される。

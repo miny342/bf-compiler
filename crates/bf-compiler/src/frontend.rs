@@ -606,7 +606,7 @@ mod tests {
         "#;
         let program = lower_source(source).unwrap();
 
-        for chunk_cells in [8, 16] {
+        for chunk_cells in [16] {
             let config = crate::AbiConfig::new(chunk_cells).unwrap();
             let brainfuck = crate::lower_continuations_with_config(&program, config)
                 .unwrap()
@@ -626,7 +626,7 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        for chunk_cells in [16] {
             let config = crate::AbiConfig::new(chunk_cells).unwrap();
             let brainfuck = crate::lower_continuations_with_config(&program, config)
                 .unwrap()

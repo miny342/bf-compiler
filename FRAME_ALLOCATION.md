@@ -33,7 +33,7 @@ parameterとlocalをfresh IDへrenameし、引数の左から右への評価順�
 到達可能性とcall siteの収集は同じHIR walkerを使用する。
 
 候補を試験的にCIRへloweringして領域を再利用し、callerのframe chunk数を変更前と比較する。
-D=8とD=16の両方で増加しない場合だけ採用する。見積もりにはbranch temporary、portal temporary、
+D=16で増加しない場合だけ採用する。見積もりにはbranch temporary、portal temporary、
 outbox、aggregate protocolとalignmentを含める。program全体で共通のroute領域は比較から省く。
 採用したcallerの見積もりはcacheする。
 
@@ -44,7 +44,7 @@ frame chunkを走査するため、caller自身のframe増加を抑える。
 ## 回帰テスト
 
 `frame_allocation`のテストは、同じsourceを再利用前・再利用後、inline化前・後のCIRへloweringする。
-CIR VMの結果を比較し、割り当て後はD=8/16のBrainfuckでも期待する出力を確認する。
+CIR VMの結果を比較し、割り当て後はD=16のBrainfuckでも期待する出力を確認する。
 loop back edge、再帰callをまたぐ値、短絡評価、aggregateの部分更新、argument snapshot、
 portal offset、繰り返す初期化、inline化によるframe膨張の抑止を含む。
 100個の独立したscalar scopeでは、300以上のvirtual slotが4以下のphysical slotへ収まることも確認する。

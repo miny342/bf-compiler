@@ -64,7 +64,7 @@ fn repeat_256_has_two_slots_and_a_minimal_bf_loop_without_inlining() {
             i,
             FrameInstruction::Branch { .. } | FrameInstruction::Copy { .. }
         )));
-        for chunk in [8, 16] {
+        for chunk in [16] {
             let bf = bfc::optimize_bf(
                 &bfc::lower_continuations_with_config(
                     &program,

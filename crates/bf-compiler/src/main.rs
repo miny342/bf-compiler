@@ -577,8 +577,8 @@ fn load_phase_config(
     let mut expected_chunks = chunk_cells.clone();
     expected_chunks.sort_unstable();
     expected_chunks.dedup();
-    if expected_chunks != [8, 16] {
-        return Err("phase config chunk_cells must contain exactly 8 and 16".into());
+    if expected_chunks != [16] {
+        return Err("phase config chunk_cells must contain exactly 16".into());
     }
     let phase_entries = object
         .get("phases")

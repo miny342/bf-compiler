@@ -329,7 +329,7 @@ fn inline_function(
     hir: &mut HirProgram,
     graph: &CallGraph,
     function: FunctionId,
-    costs: &mut [Option<[usize; 2]>],
+    costs: &mut [Option<usize>],
 ) -> bool {
     if function == hir.entry
         || !graph.reachable.contains(function)
@@ -366,10 +366,7 @@ fn inline_function(
     }
     caller_function.locals.extend(locals);
     if let Ok(after) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
-        && after
-            .iter()
-            .zip(before)
-            .all(|(&after, before)| after <= before)
+        && after <= before
     {
         costs[caller.index()] = Some(after);
         return true;

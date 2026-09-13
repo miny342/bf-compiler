@@ -79,7 +79,7 @@ self-host compilerへも移植しにくいため主方式にしない。
 
 ### ABIは比較対象であり固定条件ではない
 
-初期のtemplate改善は現行ABIのframe field、portal layout、`D = 8/16`を保ったまま行う。ただし、
+初期のtemplate改善は現行ABIのframe field、portal layout、`D = 16`を保ったまま行う。ただし、
 profilingによってABI固有の走査、往復、materializationが支配的と判明した場合は、現行ABIとの互換性を
 絶対条件にしない。新方式は`AbiConfig`または明示的なABI versionとして旧方式と比較可能にする。
 
@@ -97,7 +97,7 @@ objectをlinkする仕組みは現在存在しないため、一つの生成BF�
 - 初期値0を要求するscratch cell。
 - 終了時に0であるべきcell。
 - entryとexitのBF data pointer位置。
-- `D = 8/16`による差。
+- `D = 16`でのchunk境界の影響。
 - source bytes、raw steps、RLE steps、wall time、追加cell数。
 
 RustとBFCで同一のBF文字列を生成する必要はないが、同一の契約testを通し、同じABI上の状態遷移を
@@ -215,7 +215,7 @@ logical offsetからchunkとremainderを求める処理では、除数`D`は8ま
 - page/slot countdownへ直接つなぎ、中間値をmaterializeしない方式。
 - `D`が2の冪であることを利用する専用方式。
 
-`D = 8/16`、low byte全256値、high byteを含む有効offset境界で検証する。
+`D = 16`、low byte全256値、high byteを含む有効offset境界で検証する。
 
 ### Moving-index accessor
 
@@ -322,7 +322,7 @@ peephole optimizationはtape boundaryのerror semanticsを不用意に変えな�
 - global accessとstack depth。
 - branch body距離、conditionの0/nonzero分布。
 - comparison全入力。
-- `D = 8/16`。
+- `D = 16`。
 
 ### Repository workload
 
@@ -345,7 +345,7 @@ peephole optimizationはtape boundaryのerror semanticsを不用意に変えな�
 
 - old/new backendでprogram outputが一致する。
 - expected error markerと停止条件が一致する。
-- `D = 8/16`の両方を検証する。
+- `D = 16`を検証する。
 - bounded/unbounded tapeの両方を検証する。
 - direct/mutual recursionとaggregate call/returnを含む。
 - profile有無で実行する8種類のBF命令列が完全一致する。

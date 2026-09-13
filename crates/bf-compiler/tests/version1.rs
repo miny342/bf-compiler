@@ -16,7 +16,7 @@ fn execute(source: &str, input: &[u8], chunk_cells: usize) -> Vec<u8> {
 }
 
 fn assert_both(source: &str, input: &[u8], expected: &[u8]) {
-    for chunk_cells in [8, 16] {
+    for chunk_cells in [16] {
         assert_eq!(
             execute(source, input, chunk_cells),
             expected,
@@ -203,10 +203,10 @@ fn overlapping_dynamic_copy_preserves_value_and_region_non_payload_cells() {
     "#;
 
     // Packet 2 occupies flattened offsets 14..=20. Thus its dynamic aggregate
-    // copy crosses a payload chunk boundary for both D=8 and D=16, and byte 6
+    // copy crosses a payload chunk boundary for D=16, and byte 6
     // is the root payload's final cell. The root also has tail padding in both
-    // geometries (3 cells for D=8, 11 for D=16).
-    for chunk_cells in [8, 16] {
+    // geometry (11 cells for D=16).
+    for chunk_cells in [16] {
         let (actual, expected) =
             execute_with_global_region_canaries(source, b"AFZAFZXZ", chunk_cells);
         assert_eq!(actual, expected, "D={chunk_cells}");
