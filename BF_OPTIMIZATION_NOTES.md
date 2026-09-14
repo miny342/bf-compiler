@@ -1,5 +1,7 @@
 # Brainfuck backend最適化メモ
 
+> 現在のABIはD=16のみをサポートする。以下のD=8への言及は実験当時の記録である。
+
 この文書は、source language semanticsと現行ABI contractを変更しないbackend最適化、および今後の
 候補を記録する。
 隣接する移動・加算の統合、zero命令の除去、clear loopの標準化など、意味を局所的に判定できる

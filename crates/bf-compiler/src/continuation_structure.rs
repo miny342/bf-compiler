@@ -257,7 +257,8 @@ mod tests {
                 after.aggregate_stores
             )
         );
-        for d in [8, 16] {
+        {
+            let d = 16;
             let bf = crate::optimize_bf(
                 &crate::lower_continuations_with_config(&candidate, AbiConfig::new(d).unwrap())
                     .unwrap(),

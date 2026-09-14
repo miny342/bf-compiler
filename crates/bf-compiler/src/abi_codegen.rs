@@ -210,7 +210,6 @@ struct FunctionLayout {
     portal_temporary_cells: usize,
 }
 
-const GLOBAL_ROUTE_PROTOCOL_CELLS: usize = 7;
 const GLOBAL_ROUTE_NIBBLE_CELLS: usize = 16;
 const ROUTE_OFFSET_LOW: usize = 0;
 const ROUTE_OFFSET_HIGH: usize = 1;
@@ -251,10 +250,8 @@ fn build_layouts(
             }
         )
     });
-    let route_cells = if has_global_portal && config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS {
+    let route_cells = if has_global_portal {
         GLOBAL_ROUTE_NIBBLE_CELLS
-    } else if has_global_portal {
-        GLOBAL_ROUTE_PROTOCOL_CELLS
     } else {
         0
     };
@@ -1429,7 +1426,6 @@ impl<'a> AbiEmitter<'a> {
                 let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
                 if matches!(source_address, Address::Global(_))
                     && let (Location::Global(source), Location::Relative(destination)) = (src, dst)
-                    && self.config.chunk_cells() >= 9
                 {
                     self.copy_global_to_relative_bits(source, destination);
                 } else {
@@ -2094,7 +2090,7 @@ impl<'a> AbiEmitter<'a> {
                 route,
                 ROUTE_OFFSET_LOW | ROUTE_ACCESSOR_LOW | ROUTE_RESUME_LOW
             );
-            if self.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS && use_nibbles {
+            if use_nibbles {
                 let Location::Relative(source) = source else {
                     unreachable!("route staging is frame-relative")
                 };
@@ -2332,62 +2328,22 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn shift_portal_by_offset(&mut self, right: bool) -> Result<(), AbiCodegenError> {
-        if self.config.chunk_cells() == 16 {
-            let digits = if right {
-                [
-                    (AbiField::Scratch1, 1),
-                    (AbiField::PcLow, 16),
-                    (AbiField::Scratch2, 256),
-                ]
-            } else {
-                [
-                    (AbiField::PcHigh, 256),
-                    (AbiField::Condition, 16),
-                    (AbiField::Restore, 1),
-                ]
-            };
-            for (digit, chunks) in digits {
-                self.jump_portal_by_digit(digit, chunks, right)?;
-            }
-            return Ok(());
-        }
-
-        let (low, high) = if right {
-            (AbiField::Scratch1, AbiField::Scratch2)
+        let digits = if right {
+            [
+                (AbiField::Scratch1, 1),
+                (AbiField::PcLow, 16),
+                (AbiField::Scratch2, 256),
+            ]
         } else {
-            (AbiField::Condition, AbiField::Restore)
+            [
+                (AbiField::PcHigh, 256),
+                (AbiField::Condition, 16),
+                (AbiField::Restore, 1),
+            ]
         };
-        let low_offset = self.current_abi_offset(low)?;
-        self.move_to(low_offset);
-        let low_body = self.capture_infallible(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.shift_portal_window(right);
-            emitter.move_to(low_offset);
-        });
-        self.emit_loop(low_body);
-        self.move_to(0);
-
-        let high_offset = self.current_abi_offset(high)?;
-        self.move_to(high_offset);
-        let high_body = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.shift_portal_window(right);
-            emitter.set_abi_field(low, u8::MAX)?;
-            emitter.move_to(low_offset);
-            let low_255 = emitter.capture_infallible(|emitter| {
-                emitter.adjust(255);
-                emitter.move_to(0);
-                emitter.shift_portal_window(right);
-                emitter.move_to(low_offset);
-            });
-            emitter.emit_loop(low_255);
-            emitter.move_to(high_offset);
-            Ok(())
-        })?;
-        self.emit_loop(high_body);
-        self.move_to(0);
+        for (digit, chunks) in digits {
+            self.jump_portal_by_digit(digit, chunks, right)?;
+        }
         Ok(())
     }
 
@@ -2451,64 +2407,6 @@ impl<'a> AbiEmitter<'a> {
             self.move_value(temporary, local);
         }
         self.migrate_context(delta * stride);
-    }
-
-    fn shift_portal_window(&mut self, right: bool) {
-        let stride = self.config.stride() as isize;
-        let portal_chunks = self.config.portal_chunks() as isize;
-        let primary_lane = AbiField::Scratch0.index() % self.config.chunk_cells();
-        let primary = self
-            .config
-            .logical_offset_from_head(AbiField::Scratch0.index()) as isize;
-        let secondary = self
-            .config
-            .logical_offset_from_head(AbiField::Scratch3.index()) as isize;
-        let new_primary = primary + if right { stride } else { -stride };
-        let cell = |chunk: isize, lane: usize| chunk * stride + 1 + lane as isize;
-
-        for lane in 0..self.config.chunk_cells() {
-            // With D=16 the complete portal is one chunk. These protocol
-            // lanes are known zero while the window moves, so swapping a
-            // payload cell through a temporary is unnecessary: moving the
-            // adjacent payload into the zero portal lane also leaves the new
-            // portal lane zero. The consumed quotient lanes join this set on
-            // the return trip. D=8 keeps the general two-chunk rotation.
-            let always_zero = lane == AbiField::PcLow.index()
-                || lane == AbiField::PcHigh.index()
-                || lane == AbiField::NextPcLow.index()
-                || lane == AbiField::NextPcHigh.index()
-                || lane == AbiField::Branch.index()
-                || lane == AbiField::Scratch0.index()
-                || lane == AbiField::Scratch3.index();
-            let consumed_quotient = !right
-                && (lane == AbiField::Scratch1.index() || lane == AbiField::Scratch2.index());
-            if self.config.chunk_cells() == 16 && (always_zero || consumed_quotient) {
-                let adjacent = if right { portal_chunks } else { -1 };
-                self.move_value(cell(adjacent, lane), cell(0, lane));
-                continue;
-            }
-            let temporary = if lane < primary_lane {
-                primary
-            } else if lane == primary_lane {
-                secondary
-            } else {
-                new_primary
-            };
-            if right {
-                self.move_value(cell(portal_chunks, lane), temporary);
-                for chunk in (0..portal_chunks).rev() {
-                    self.move_value(cell(chunk, lane), cell(chunk + 1, lane));
-                }
-                self.move_value(temporary, cell(0, lane));
-            } else {
-                self.move_value(cell(-1, lane), temporary);
-                for chunk in 0..portal_chunks {
-                    self.move_value(cell(chunk, lane), cell(chunk - 1, lane));
-                }
-                self.move_value(temporary, cell(portal_chunks - 1, lane));
-            }
-        }
-        self.migrate_context(if right { stride } else { -stride });
     }
 
     fn access_payload_with_remainder(
@@ -3008,8 +2906,7 @@ impl<'a> AbiEmitter<'a> {
     /// stack once per source unit.  Nine shared static cells hold a temporary
     /// carry and eight binary digits.  The bits are folded into two nibbles,
     /// bounding stack crossings by the sum of those digits (at most 30)
-    /// instead of expanding eight separate navigation templates.  The D=8
-    /// compatibility layout reserves no scratch and uses the generic copy.
+    /// instead of expanding eight separate navigation templates.
     fn copy_global_to_relative_bits(&mut self, source: usize, destination: isize) {
         debug_assert!(self.config.chunk_cells() >= 9);
         let context_chunks = self.config.portal_chunks();
@@ -3516,7 +3413,7 @@ mod tests {
     }
 
     #[test]
-    fn main_only_adapter_runs_with_both_chunk_sizes() {
+    fn main_only_adapter_runs_with_sixteen_cell_chunks() {
         let cell = CellId::new(0);
         let instructions = vec![
             Instruction::Set {
@@ -3525,7 +3422,8 @@ mod tests {
             },
             Instruction::Output { src: cell },
         ];
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_flat(
                     instructions.clone(),
@@ -3597,7 +3495,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"ABCD");
         }
 
@@ -3686,7 +3585,8 @@ mod tests {
         let encoding = DispatchEncoding::new(&program, &PortalPlan::new(&program).unwrap());
         assert_eq!(encoding.page_width, 33);
         let expected = order.iter().map(|v| (v % 251) as u8).collect::<Vec<_>>();
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), expected);
         }
     }
@@ -3767,7 +3667,8 @@ mod tests {
                 }),
         );
         let program = ContinuationProgram::new(original.main(), functions, continuations).unwrap();
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"\x04L");
         }
     }
@@ -3834,7 +3735,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"A");
         }
     }
@@ -3868,7 +3770,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"S");
         }
         let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
@@ -3923,7 +3826,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"ABC");
         }
         let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
@@ -3968,7 +3872,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"H");
         }
         let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
@@ -4063,7 +3968,8 @@ mod tests {
         };
         assert_eq!(maximum_branch_depth(&[empty_else]), 0);
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_flat(
                     instructions.clone(),
@@ -4076,9 +3982,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_recursion_and_caller_locals_survive_with_both_chunk_sizes() {
+    fn direct_recursion_and_caller_locals_survive_with_sixteen_cell_chunks() {
         let program = recursive_countdown_program();
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[4, b'L']);
         }
     }
@@ -4231,7 +4138,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[5]);
         }
     }
@@ -4278,7 +4186,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[0]);
         }
     }
@@ -4426,7 +4335,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[0]);
         }
     }
@@ -4502,7 +4412,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), &[42]);
         }
     }
@@ -4552,13 +4463,14 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"H");
         }
     }
 
     #[test]
-    fn global_addresses_work_in_transfer_loop_and_branch_for_both_geometries() {
+    fn global_addresses_work_in_transfer_loop_and_branch_for_sixteen_cell_chunks() {
         let main = FunctionId::new(0);
         let global = crate::GlobalId::new(0);
         let entry = id(1);
@@ -4634,7 +4546,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 &[2, 1, 3, b'B']
@@ -4643,7 +4556,7 @@ mod tests {
     }
 
     #[test]
-    fn global_to_frame_copy_preserves_every_value_in_both_geometries() {
+    fn global_to_frame_copy_preserves_every_value_in_sixteen_cell_chunks() {
         let main = FunctionId::new(0);
         let global = crate::GlobalId::new(0);
         let entry = id(1);
@@ -4683,7 +4596,8 @@ mod tests {
         let expected = (0..=u8::MAX)
             .flat_map(|value| [value, value])
             .collect::<Vec<_>>();
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 expected,
@@ -4820,7 +4734,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, vec![function], continuations).unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 &[10, 10, 10, 20, 30]
@@ -4961,15 +4876,9 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, vec![function], continuations).unwrap();
 
-        let d8 = execute_continuations_with_stats(&program, 8);
-        let d16 = execute_continuations_with_stats(&program, 16);
-        assert_eq!(d8.output, b"Q", "D=8");
-        assert_eq!(d16.output, b"Q", "D=16");
-        assert!(
-            d16.stats.optimization.executed_native_operations * 10
-                < d8.stats.optimization.executed_native_operations,
-            "D=16 fixed-distance jumps should remain substantially cheaper than the D=8 compatibility walk"
-        );
+        let result = execute_continuations_with_stats(&program, 16);
+        assert_eq!(result.output, b"Q");
+        assert!(result.stats.optimization.executed_native_operations < 40_000);
     }
 
     #[test]
@@ -5068,7 +4977,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(
                 execute_continuations(&program, chunk_cells),
                 b"ABCDEQ",
@@ -5128,7 +5038,8 @@ mod tests {
         assert_eq!(portal.ordered_sites[0].resume.get(), 5);
         assert_eq!(encoding.encode(id(1)), 5);
         assert_eq!(encoding.encode(portal.ordered_sites[0].resume), 1);
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             let layouts = build_layouts(&program, AbiConfig::new(chunk_cells).unwrap()).unwrap();
             assert_eq!(layouts[&main].frame.route_chunks(), 1, "D={chunk_cells}");
             assert_eq!(execute_continuations(&program, chunk_cells), b"Z");
@@ -5157,7 +5068,8 @@ mod tests {
         let plan = PortalPlan::new(&program).unwrap();
         assert_eq!(plan.accessors.len(), 2);
         assert!(plan.ordered_sites.len() < 16);
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             let generated =
                 lower_continuations_with_config(&program, AbiConfig::new(chunk_cells).unwrap())
                     .unwrap()
@@ -5172,7 +5084,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_subranges_cross_call_and_return_in_both_geometries() {
+    fn aggregate_subranges_cross_call_and_return_in_sixteen_cell_chunks() {
         let main = FunctionId::new(0);
         let helper = FunctionId::new(1);
         let source = crate::FrameAggregateId::new(0);
@@ -5249,7 +5161,8 @@ mod tests {
         ];
         let program = ContinuationProgram::new(main, functions, continuations).unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"ABC");
         }
     }
@@ -5347,7 +5260,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"QAB");
         }
     }
@@ -5397,7 +5311,8 @@ mod tests {
         )
         .unwrap();
 
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"A");
         }
     }

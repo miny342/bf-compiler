@@ -69,7 +69,7 @@ write(
             "identity_version": "bfc-ir-artifact-v4",
             "lowering_options": lowering_options,
         },
-        "chunk_cells": [8, 16],
+        "chunk_cells": [16],
         "phases": [
             {"name": "lexer", "function_name": "next_token"},
             {"name": "parser", "function_name": "parse_ast_program"},
@@ -90,7 +90,7 @@ write(
             "identity_version": "bfc-ir-artifact-v3",
             "lowering_options": lowering_options,
         },
-        "chunk_cells": [8, 16],
+        "chunk_cells": [16],
         "phases": [
             {"name": name, "function_id": function_id}
             for name, function_id in cir_phases

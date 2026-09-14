@@ -118,13 +118,9 @@ impl StaticLayout {
                     .ok_or(StaticLayoutError::SizeOverflow)?;
             }
         }
-        let remote_copy_scratch_start =
-            (config.chunk_cells() >= REMOTE_COPY_SCRATCH_CELLS).then_some(scalar_position);
-        let scratch_cells = remote_copy_scratch_start
-            .map(|_| REMOTE_COPY_SCRATCH_CELLS)
-            .unwrap_or(0);
+        let remote_copy_scratch_start = Some(scalar_position);
         next_head = scalar_position
-            .checked_add(scratch_cells)
+            .checked_add(REMOTE_COPY_SCRATCH_CELLS)
             .ok_or(StaticLayoutError::SizeOverflow)?;
 
         let layout = Self {
@@ -497,23 +493,14 @@ mod tests {
         assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(0));
         assert_eq!(d16.array_chunk_count(GlobalId::new(2)), Ok(3));
         assert_eq!(d16.anchor_head(), 96);
-
-        let d8 = StaticLayout::new(AbiConfig::new(8).unwrap(), &descriptors).unwrap();
-        assert_eq!(d8.remote_copy_scratch_position(0), None);
-        assert_eq!(d8.scalar_position(GlobalId::new(1)), Ok(72));
-        assert_eq!(d8.scalar_position(GlobalId::new(3)), Ok(73));
-        assert_eq!(d8.array_base_head(GlobalId::new(0)), Ok(45));
-        assert_eq!(d8.array_chunk_count(GlobalId::new(0)), Ok(3));
-        assert_eq!(d8.array_base_head(GlobalId::new(2)), Ok(0));
-        assert_eq!(d8.array_chunk_count(GlobalId::new(2)), Ok(5));
-        assert_eq!(d8.anchor_head(), 74);
     }
 
     #[test]
-    fn protocol_and_payload_positions_skip_chunk_heads_for_d8_and_d16() {
+    fn protocol_and_payload_positions_skip_chunk_heads_for_d16() {
         let global = GlobalId::new(0);
         let descriptor = [GlobalDescriptor::array(global, 17)];
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = StaticLayout::new(config, &descriptor).unwrap();
             let base = layout.array_base_head(global).unwrap();
@@ -542,10 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn maximum_length_array_has_checked_boundaries_in_both_geometries() {
+    fn maximum_length_array_has_checked_boundaries_in_sixteen_cell_chunks() {
         let global = GlobalId::new(4);
         let descriptor = [GlobalDescriptor::array(global, 256)];
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = StaticLayout::new(config, &descriptor).unwrap();
             let expected_chunks = (PROTOCOL_CELLS + 256).div_ceil(chunk_cells);
@@ -642,19 +630,19 @@ mod tests {
     #[test]
     fn capacity_includes_the_complete_anchor_chunk() {
         let layout = StaticLayout::new(
-            AbiConfig::new(8).unwrap(),
+            AbiConfig::default(),
             &[GlobalDescriptor::cell(GlobalId::new(0))],
         )
         .unwrap();
-        assert_eq!(layout.anchor_head(), 1);
-        assert_eq!(layout.minimum_tape_cells(), Ok(10));
-        assert_eq!(layout.validate_capacity_in(10), Ok(()));
+        assert_eq!(layout.anchor_head(), 10);
+        assert_eq!(layout.minimum_tape_cells(), Ok(27));
+        assert_eq!(layout.validate_capacity_in(27), Ok(()));
         assert_eq!(
-            layout.validate_capacity_in(9),
+            layout.validate_capacity_in(26),
             Err(StaticLayoutError::StaticAreaTooLarge {
-                anchor_head: 1,
-                required_cells: 10,
-                tape_cells: 9,
+                anchor_head: 10,
+                required_cells: 27,
+                tape_cells: 26,
             })
         );
     }
@@ -676,7 +664,8 @@ mod tests {
     fn version_one_global_aggregate_crosses_legacy_and_chunk_boundaries() {
         let global = GlobalId::new(4);
         let descriptor = [GlobalDescriptor::aggregate(global, 299)];
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let layout = StaticLayout::new(config, &descriptor).unwrap();
             let base = layout.aggregate_base_head(global).unwrap();
@@ -707,7 +696,8 @@ mod tests {
         let empty = GlobalId::new(0);
         let scalar = GlobalId::new(1);
         let full = GlobalId::new(2);
-        for chunk_cells in [8, 16] {
+        {
+            let chunk_cells = 16;
             let config = AbiConfig::new(chunk_cells).unwrap();
             let mixed = StaticLayout::new(
                 config,

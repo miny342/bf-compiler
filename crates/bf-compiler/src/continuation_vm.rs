@@ -417,13 +417,8 @@ struct PhaseMetrics {
 
 impl PhaseMetrics {
     fn new(program: &ContinuationProgram, config: ContinuationPhaseConfig) -> Result<Self, String> {
-        if config.chunk_cells.is_empty()
-            || config
-                .chunk_cells
-                .iter()
-                .any(|&cells| cells != 8 && cells != 16)
-        {
-            return Err("phase config chunk_cells must contain only 8 or 16".into());
+        if config.chunk_cells.is_empty() || config.chunk_cells.iter().any(|&cells| cells != 16) {
+            return Err("phase config chunk_cells must contain only 16".into());
         }
         let mut phase_names = vec!["unknown".to_owned()];
         let mut function_phases = HashMap::new();
@@ -1822,7 +1817,7 @@ mod tests {
                     function: recurse.id(),
                 },
             ],
-            chunk_cells: vec![8, 16],
+            chunk_cells: vec![16],
         };
         let run = |phase_config| {
             let mut input = &[][..];
@@ -1941,7 +1936,7 @@ mod tests {
                         phase: "main".into(),
                         function: FunctionId::new(0),
                     }],
-                    chunk_cells: vec![8, 16],
+                    chunk_cells: vec![16],
                 }),
                 ..ContinuationRunOptions::default()
             },
@@ -1979,7 +1974,7 @@ mod tests {
                         phase: "main".into(),
                         function: main.id(),
                     }],
-                    chunk_cells: vec![8, 16],
+                    chunk_cells: vec![16],
                 }),
                 ..ContinuationRunOptions::default()
             },

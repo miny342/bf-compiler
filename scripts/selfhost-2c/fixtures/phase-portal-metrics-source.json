@@ -9,7 +9,7 @@
       "structure_local_control_flow": false
     }
   },
-  "chunk_cells": [8, 16],
+  "chunk_cells": [16],
   "phases": [
     {"name": "main", "function_name": "main"},
     {"name": "recursive", "function_name": "recurse"}

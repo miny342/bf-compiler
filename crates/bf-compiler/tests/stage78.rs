@@ -10,8 +10,9 @@ fn execute(source: &str, input: &[u8], chunk_cells: usize) -> Vec<u8> {
     run(brainfuck.as_bytes(), input).expect("generated Brainfuck must execute")
 }
 
-fn assert_executes_for_both_chunk_sizes(source: &str, input: &[u8], expected: &[u8]) {
-    for chunk_cells in [8, 16] {
+fn assert_executes_for_sixteen_cell_chunks(source: &str, input: &[u8], expected: &[u8]) {
+    {
+        let chunk_cells = 16;
         assert_eq!(
             execute(source, input, chunk_cells),
             expected,
@@ -22,7 +23,7 @@ fn assert_executes_for_both_chunk_sizes(source: &str, input: &[u8], expected: &[
 
 #[test]
 fn repository_self_test_program_reports_all_ok() {
-    assert_executes_for_both_chunk_sizes(
+    assert_executes_for_sixteen_cell_chunks(
         include_str!("../../../test.bfc"),
         &[],
         b"ok\nok\nok\nok\nok\nok\nok\nok\n",
@@ -37,7 +38,7 @@ fn repository_self_test_harness_aborts_after_the_first_failure() {
         failing, source,
         "the harness call used by this probe must exist"
     );
-    assert_executes_for_both_chunk_sizes(&failing, &[], b"ok\nok\nok\nok\nok\nok\nok\nng\n");
+    assert_executes_for_sixteen_cell_chunks(&failing, &[], b"ok\nok\nok\nok\nok\nok\nok\nng\n");
 }
 
 #[test]
@@ -68,7 +69,7 @@ fn globals_initialize_in_declaration_order_and_survive_recursion() {
     assert_eq!(program.globals().len(), 4);
     assert_eq!(program.globals()[0].value_type(), ValueType::Cell);
     assert_eq!(program.globals()[1].value_type(), ValueType::Cell);
-    assert_executes_for_both_chunk_sizes(source, &[5, 9], &[5, 9, 14, 4]);
+    assert_executes_for_sixteen_cell_chunks(source, &[5, 9], &[5, 9, 14, 4]);
 }
 
 #[test]
@@ -90,7 +91,7 @@ fn later_default_initializer_overwrites_an_earlier_initializer_call() {
 
     // `later` is visible to the initializer call, but its own declaration is
     // initialized afterward and therefore replaces 99 with the default zero.
-    assert_executes_for_both_chunk_sizes(source, &[], &[7, 0]);
+    assert_executes_for_sixteen_cell_chunks(source, &[], &[7, 0]);
 }
 
 #[test]
@@ -111,7 +112,7 @@ fn later_global_array_declaration_clears_initializer_call_writes() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[], &[7, 0]);
+    assert_executes_for_sixteen_cell_chunks(source, &[], &[7, 0]);
 }
 
 #[test]
@@ -140,7 +141,7 @@ fn global_and_local_array_portals_load_store_and_preserve_indices() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[7, 16], &[23, 10, 10, 16, 7, 16]);
+    assert_executes_for_sixteen_cell_chunks(source, &[7, 16], &[23, 10, 10, 16, 7, 16]);
 }
 
 #[test]
@@ -158,7 +159,7 @@ fn dynamic_portals_cover_the_full_cell_index_domain() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[255], &[b'Z', 255]);
+    assert_executes_for_sixteen_cell_chunks(source, &[255], &[b'Z', 255]);
 }
 
 #[test]
@@ -173,7 +174,7 @@ fn dynamic_assignment_evaluates_rhs_before_its_index() {
     "#;
 
     // The right-hand input yields 3 first; the index input then yields 2.
-    assert_executes_for_both_chunk_sizes(source, &[3, 2], &[3, 0]);
+    assert_executes_for_sixteen_cell_chunks(source, &[3, 2], &[3, 0]);
 }
 
 #[test]
@@ -190,7 +191,7 @@ fn dynamic_compound_assignments_evaluate_rhs_then_index_once() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[3, 2, 4, 2, b'X'], &[13, 9, b'X']);
+    assert_executes_for_sixteen_cell_chunks(source, &[3, 2, 4, 2, b'X'], &[13, 9, b'X']);
 }
 
 #[test]
@@ -208,7 +209,7 @@ fn local_array_declarations_clear_storage_on_every_execution() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[], &[0, 0]);
+    assert_executes_for_sixteen_cell_chunks(source, &[], &[0, 0]);
 }
 
 #[test]
@@ -238,7 +239,7 @@ fn whole_array_copy_arguments_and_returns_have_value_semantics() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[], &[10, 10, 0, 11, 13]);
+    assert_executes_for_sixteen_cell_chunks(source, &[], &[10, 10, 0, 11, 13]);
 }
 
 #[test]
@@ -268,7 +269,7 @@ fn recursive_aggregate_returns_use_an_outbox_per_activation() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[], &[9, 41, 42, 43, 0, 0, 0]);
+    assert_executes_for_sixteen_cell_chunks(source, &[], &[9, 41, 42, 43, 0, 0, 0]);
 }
 
 #[test]
@@ -308,7 +309,7 @@ fn one_caller_outbox_handles_different_aggregate_return_lengths() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[], b"ABabcdCD");
+    assert_executes_for_sixteen_cell_chunks(source, &[], b"ABabcdCD");
 }
 
 #[test]
@@ -334,7 +335,7 @@ fn aggregate_arguments_snapshot_each_left_to_right_value() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[], &[1, 9]);
+    assert_executes_for_sixteen_cell_chunks(source, &[], &[1, 9]);
 }
 
 #[test]
@@ -353,7 +354,7 @@ fn explicit_main_return_halts_before_following_statements() {
         }
     "#;
 
-    assert_executes_for_both_chunk_sizes(source, &[], &[1]);
+    assert_executes_for_sixteen_cell_chunks(source, &[], &[1]);
 }
 
 #[test]

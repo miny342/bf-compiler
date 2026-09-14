@@ -208,7 +208,7 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     let mut config = json!({"format": "bfc-ir-phase-config-v1",
         "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v4",
             "lowering_options": options},
-        "chunk_cells": [8, 16], "phases": [{"name": "main", "function_name": "main"}]});
+        "chunk_cells": [16], "phases": [{"name": "main", "function_name": "main"}]});
     fs::write(root.join("phase.json"), config.to_string()).unwrap();
     let measured = run_bfc_with_stdin(
         &root,
@@ -581,7 +581,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             .unwrap()
             .iter()
             .any(|phase| {
-                phase["start_chunk_revisits"]["8"]["requests"]
+                phase["start_chunk_revisits"]["16"]["requests"]
                     .as_u64()
                     .unwrap_or(0)
                     > 0

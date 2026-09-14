@@ -33,7 +33,7 @@ path.write_text(
                 "lowering_options": {"inline_branch_successors": True,
                                      "structure_local_control_flow": args.local},
             },
-            "chunk_cells": [8, 16],
+            "chunk_cells": [16],
             "phases": [{"name": "main", "function_name": "main"}],
         },
         indent=2,
