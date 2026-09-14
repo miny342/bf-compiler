@@ -474,14 +474,14 @@ void emit_array_case_operation(
         } else if (kind == IR_ARRAY_SUBTRACT) {
             emit_transfer_to_global(data_slot, global, 1, 0, frame_cells);
         } else {
-            fail();
+            fail('H', 'N');
         }
         return;
     }
 
     if (base.mid != 0 || base.high != 0
         || element.mid != 0 || element.high != 0) {
-        fail();
+        fail('H', 'O');
     }
     cell array_slot = physical_frame_slot(base.low + element.low);
     if (kind == IR_ARRAY_LOAD) {
@@ -494,7 +494,7 @@ void emit_array_case_operation(
     } else if (kind == IR_ARRAY_SUBTRACT) {
         emit_transfer(data_slot, array_slot, 1);
     } else {
-        fail();
+        fail('H', 'P');
     }
 }
 
@@ -661,7 +661,7 @@ void emit_array_instruction(NodeId instruction) {
     length.high = arena_read(instruction, FIELD_C_BANK);
     cell storage = arena_read(instruction, FIELD_B_PAGE);
     if (wide_is_zero(length) || length.high != 0) {
-        fail();
+        fail('H', 'Q');
     }
     if (kind == IR_ARRAY_LOAD) {
         emit_clear(physical_frame_slot(data));
@@ -790,7 +790,7 @@ void emit_ir_instruction(NodeId instruction) {
             emit_frame_not(destination);
         }
     } else {
-        fail();
+        fail('H', 'R');
     }
     emit_move_to(0);
 }
@@ -916,7 +916,7 @@ void emit_continuation_terminator(NodeId continuation) {
     } else if (kind == TERM_ABORT) {
         emit_clear(FRAME_ACTIVE);
     } else {
-        fail();
+        fail('H', 'S');
     }
 }
 
@@ -1042,7 +1042,7 @@ void calculate_stage8_frame_size() {
     }
     if (stage8_outbox_cells > 0xef
         || maximum > 0xef - stage8_outbox_cells) {
-        fail();
+        fail('H', 'T');
     }
     stage8_outbox_base = maximum;
     stage8_frame_cells = FRAME_DATA_BASE + maximum + stage8_outbox_cells;

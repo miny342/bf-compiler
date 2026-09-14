@@ -193,7 +193,7 @@ void append_offset_ir_instruction(
     arena_write(instruction, FIELD_A_SLOT, amount.low);
     arena_write(instruction, FIELD_A_BANK, amount.mid);
     if (amount.high != 0) {
-        fail();
+        fail('H', 'C');
     }
     if (node_is_null(node_a(lowering_current_continuation))) {
         node_set_a(lowering_current_continuation, instruction);
@@ -205,7 +205,7 @@ void append_offset_ir_instruction(
 
 cell allocate_lowering_temp() {
     if (lowering_temp_next == 0xef) {
-        fail();
+        fail('H', 'D');
     }
     cell result = lowering_temp_next;
     lowering_temp_next += 1;
@@ -217,7 +217,7 @@ cell allocate_lowering_temp() {
 
 cell allocate_lowering_cells(cell count) {
     if (count > 0xef || lowering_temp_next > 0xef - count) {
-        fail();
+        fail('H', 'E');
     }
     cell result = lowering_temp_next;
     lowering_temp_next += count;
@@ -308,7 +308,7 @@ void lower_ast_call(NodeId expression) {
 cell bounded_type_cells(NodeId ty) {
     WideValue cells = type_cells(ty);
     if (cells.mid != 0 || cells.high != 0) {
-        fail();
+        fail('H', 'F');
     }
     return cells.low;
 }
@@ -351,7 +351,7 @@ void lower_dynamic_offset(NodeId expression, cell low, cell high) {
             amount
         );
     } else {
-        fail();
+        fail('H', 'G');
     }
 }
 
@@ -481,7 +481,7 @@ void lower_aggregate_expression(NodeId expression, cell destination, cell length
         release_lowering_temp(temporary);
         return;
     }
-    fail();
+    fail('H', 'H');
 }
 
 void lower_ast_expression(NodeId expression, cell destination) {
@@ -541,7 +541,7 @@ void lower_ast_expression(NodeId expression, cell destination) {
             release_lowering_temp(temporary);
             return;
         }
-        fail();
+        fail('H', 'I');
     }
     if (kind == NODE_FIELD_EXPRESSION
         && node_tag(expression) == RESOLVED_VALUE_PROJECT) {
@@ -639,7 +639,7 @@ void lower_ast_expression(NodeId expression, cell destination) {
         release_lowering_temp(right_slot);
         return;
     }
-    fail();
+    fail('H', 'J');
 }
 
 void lower_ast_statement(NodeId statement) {
@@ -880,7 +880,7 @@ void lower_ast_statement(NodeId statement) {
         select_continuation(exit_continuation);
         return;
     }
-    fail();
+    fail('H', 'K');
 }
 
 void lower_global_initializers() {
@@ -901,7 +901,7 @@ void lower_global_initializers() {
             if (node_tag(global) == AST_DECLARATION_ARRAY) {
                 WideValue wide_cells = global_cells(global);
                 if (wide_cells.mid != 0 || wide_cells.high != 0) {
-                    fail();
+                    fail('H', 'L');
                 }
                 cell cells = wide_cells.low;
                 cell source = allocate_lowering_cells(cells);
@@ -948,7 +948,7 @@ void lower_ast_program() {
             if (node_tag(function) == AST_TYPE_VOID) {
                 finish_return(VOID_RETURN_SLOT);
             } else {
-                fail();
+                fail('H', 'M');
             }
         }
         node_set_value(descriptor, lowering_temp_max);

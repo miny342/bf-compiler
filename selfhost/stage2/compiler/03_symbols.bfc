@@ -108,7 +108,7 @@ cell token_is_reserved() {
 
 void consume(TokenKind expected) {
     if (token_kind != expected) {
-        fail();
+        fail('A', 'Z');
     }
     next_token();
 }

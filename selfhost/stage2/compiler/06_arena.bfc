@@ -62,12 +62,12 @@ WideValue wide_add(WideValue left, WideValue right) {
     }
     result.high = left.high + right.high;
     if (result.high < left.high) {
-        fail();
+        fail('B', 'L');
     }
     before_carry = result.high;
     result.high += next_carry;
     if (result.high < before_carry) {
-        fail();
+        fail('B', 'M');
     }
     return result;
 }
@@ -85,12 +85,12 @@ WideValue wide_subtract(WideValue left, WideValue right) {
         result.mid -= 1;
     }
     if (left.high < right.high) {
-        fail();
+        fail('B', 'N');
     }
     result.high = left.high - right.high;
     if (next_borrow) {
         if (result.high == 0) {
-            fail();
+            fail('B', 'O');
         }
         result.high -= 1;
     }
@@ -218,7 +218,7 @@ NodeId arena_advance(NodeId position, cell amount) {
     while (amount != 0) {
         if (position.bank == ARENA_LAST_BANK
             && position.page == ARENA_LAST_PAGE && position.slot == 0xff) {
-            fail();
+            fail('B', 'P');
         }
         if (position.slot == 0xff) {
             position.slot = 0;
@@ -299,7 +299,7 @@ cell arena_cell_read(NodeId position) {
     if (position.bank == 15) {
         return arena_cells_15[position.page][position.slot];
     }
-    fail();
+    fail('B', 'Q');
     return 0;
 }
 
@@ -337,7 +337,7 @@ void arena_cell_write(NodeId position, cell value) {
     } else if (position.bank == 15) {
         arena_cells_15[position.page][position.slot] = value;
     } else {
-        fail();
+        fail('B', 'R');
     }
 }
 
@@ -376,7 +376,7 @@ void reset_ast_arena() {
 
 NodeId allocate_cells(cell count) {
     if (arena_exhausted || count == 0) {
-        fail();
+        fail('B', 'S');
     }
     NodeId position = arena_next;
     NodeId result = position;
@@ -387,7 +387,7 @@ NodeId allocate_cells(cell count) {
             arena_exhausted = 1;
             count -= 1;
             if (count != 0) {
-                fail();
+                fail('B', 'T');
             }
         } else {
             position = arena_advance(position, 1);
@@ -446,7 +446,7 @@ cell node_cell_count(cell kind) {
         || kind == NODE_FIELD_EXPRESSION) {
         return 20;
     }
-    fail();
+    fail('B', 'U');
     return 0;
 }
 

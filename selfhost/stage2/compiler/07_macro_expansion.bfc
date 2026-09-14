@@ -25,7 +25,7 @@ NodeId find_macro_by_name(NodeId name) {
         }
         definition = node_next(definition);
     }
-    fail();
+    fail('D', 'G');
     return null_node();
 }
 
@@ -44,7 +44,7 @@ void validate_macro_expression_names(NodeId expression) {
     cell kind = node_kind(expression);
     if (kind == NODE_CALL_EXPRESSION) {
         if (macro_validation_name_is_parameter(node_name(expression))) {
-            fail();
+            fail('D', 'H');
         }
         NodeId argument = node_a(expression);
         while (!node_is_null(argument)) {
@@ -53,13 +53,13 @@ void validate_macro_expression_names(NodeId expression) {
         }
     } else if (kind == NODE_FIELD_EXPRESSION) {
         if (macro_validation_name_is_parameter(node_name(expression))) {
-            fail();
+            fail('D', 'I');
         }
         validate_macro_expression_names(node_a(expression));
     } else if (kind == NODE_ENUM_EXPRESSION) {
         if (macro_validation_name_is_parameter(node_name(expression))
             || macro_validation_name_is_parameter(node_a(expression))) {
-            fail();
+            fail('D', 'J');
         }
     } else if (kind == NODE_UNARY_EXPRESSION
         || kind == NODE_LEN_EXPRESSION) {
@@ -78,12 +78,12 @@ void validate_macro_definition(NodeId definition) {
     cell index;
     while (index < macro_validation_depth) {
         if (node_equals(macro_active[index], definition)) {
-            fail();
+            fail('D', 'K');
         }
         index += 1;
     }
     if (macro_validation_depth == 16) {
-        fail();
+        fail('D', 'L');
     }
     macro_active[macro_validation_depth] = definition;
     macro_validation_depth += 1;
@@ -98,7 +98,7 @@ void validate_macro_statement(NodeId statement) {
     cell kind = node_kind(statement);
     if (kind == NODE_MACRO_INVOCATION) {
         if (macro_validation_name_is_parameter(node_name(statement))) {
-            fail();
+            fail('D', 'M');
         }
         NodeId target = find_macro_by_name(node_name(statement));
         NodeId parameter = node_a(target);
@@ -109,7 +109,7 @@ void validate_macro_statement(NodeId statement) {
             argument = node_next(argument);
         }
         if (!node_is_null(parameter) || !node_is_null(argument)) {
-            fail();
+            fail('D', 'N');
         }
         validate_macro_definition(target);
     } else if (kind == NODE_BLOCK) {
@@ -124,7 +124,7 @@ void validate_macro_statement(NodeId statement) {
                 && macro_validation_name_is_parameter(
                     node_name(node_b(statement))
                 ))) {
-            fail();
+            fail('D', 'O');
         }
         if (!node_is_null(node_a(statement))) {
             validate_macro_expression_names(node_a(statement));
@@ -156,7 +156,7 @@ void validate_macro_declarations() {
         NodeId earlier = first_macro;
         while (!node_equals(earlier, definition)) {
             if (node_equals(node_name(earlier), node_name(definition))) {
-                fail();
+                fail('D', 'P');
             }
             earlier = node_next(earlier);
         }
@@ -164,28 +164,28 @@ void validate_macro_declarations() {
         while (!node_is_null(ty)) {
             if (node_tag(ty) != TYPE_ARRAY && !node_is_null(node_name(ty))
                 && node_equals(node_name(ty), node_name(definition))) {
-                fail();
+                fail('D', 'Q');
             }
             ty = node_next(ty);
         }
         NodeId constant = first_constant;
         while (!node_is_null(constant)) {
             if (node_equals(node_name(constant), node_name(definition))) {
-                fail();
+                fail('D', 'R');
             }
             constant = node_next(constant);
         }
         NodeId global = first_global;
         while (!node_is_null(global)) {
             if (node_equals(node_name(global), node_name(definition))) {
-                fail();
+                fail('D', 'S');
             }
             global = node_next(global);
         }
         NodeId function = first_function;
         while (!node_is_null(function)) {
             if (node_equals(node_name(function), node_name(definition))) {
-                fail();
+                fail('D', 'T');
             }
             function = node_next(function);
         }
@@ -331,7 +331,7 @@ NodeId clone_macro_expression(NodeId expression, cell preserve_names) {
             clone_macro_expression(node_a(expression), preserve_names)
         );
     } else {
-        fail();
+        fail('D', 'U');
     }
     return result;
 }
@@ -341,12 +341,12 @@ NodeId instantiate_macro(NodeId invocation) {
     cell active_index;
     while (active_index < macro_expansion_depth) {
         if (node_equals(macro_active[active_index], definition)) {
-            fail();
+            fail('D', 'V');
         }
         active_index += 1;
     }
     if (macro_expansion_depth == 16) {
-        fail();
+        fail('D', 'W');
     }
 
     NodeId parameter = node_a(definition);
@@ -354,7 +354,7 @@ NodeId instantiate_macro(NodeId invocation) {
     cell parameter_base = macro_parameter_count;
     while (!node_is_null(parameter) && !node_is_null(argument)) {
         if (macro_parameter_count == 64) {
-            fail();
+            fail('D', 'X');
         }
         macro_parameter_names[macro_parameter_count] = node_name(parameter);
         macro_parameter_arguments[macro_parameter_count] = argument;
@@ -363,7 +363,7 @@ NodeId instantiate_macro(NodeId invocation) {
         argument = node_next(argument);
     }
     if (!node_is_null(parameter) || !node_is_null(argument)) {
-        fail();
+        fail('D', 'Y');
     }
 
     cell saved_binding_count = macro_binding_count;
@@ -408,7 +408,7 @@ NodeId clone_macro_statement(NodeId statement) {
     }
     if (kind == NODE_BLOCK) {
         if (macro_scope_depth == 32) {
-            fail();
+            fail('D', 'Z');
         }
         macro_scope_base[macro_scope_depth] = macro_binding_count;
         macro_scope_depth += 1;
@@ -435,7 +435,7 @@ NodeId clone_macro_statement(NodeId statement) {
         }
         if (macro_parameter_index_or_zero(node_name(statement)) != 0
             || macro_binding_count == 0xff) {
-            fail();
+            fail('E', 'A');
         }
         cell duplicate = macro_scope_base[macro_scope_depth - 1];
         while (duplicate < macro_binding_count) {
@@ -443,7 +443,7 @@ NodeId clone_macro_statement(NodeId statement) {
                 macro_binding_names[duplicate],
                 node_name(statement)
             )) {
-                fail();
+                fail('E', 'B');
             }
             duplicate += 1;
         }
@@ -475,7 +475,7 @@ NodeId clone_macro_statement(NodeId statement) {
         node_set_a(result, clone_macro_expression(node_a(statement), 0));
         node_set_b(result, clone_macro_statement(node_b(statement)));
     } else {
-        fail();
+        fail('E', 'C');
     }
     return result;
 }

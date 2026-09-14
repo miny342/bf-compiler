@@ -25,13 +25,13 @@ void emit_copy(cell source, cell destination) {
 
 void check_scratch(cell destination) {
     if (destination >= RESTORE_CELL) {
-        fail();
+        fail('B', 'A');
     }
 }
 
 cell allocate_control_pair() {
     if (control_depth == MAX_CONTROL_DEPTH) {
-        fail();
+        fail('B', 'B');
     }
     cell first = CONTROL_BASE + control_depth + control_depth;
     control_depth += 1;

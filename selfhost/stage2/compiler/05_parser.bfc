@@ -21,7 +21,7 @@ void parse_primary(cell destination) {
         parse_expression(destination);
         consume(TokenKind::RightParen);
     } else {
-        fail();
+        fail('B', 'C');
     }
 }
 
@@ -139,7 +139,7 @@ void parse_declaration() {
     // The current token is "cell".
     next_token();
     if (token_kind != TokenKind::Identifier) {
-        fail();
+        fail('B', 'D');
     }
     cell destination = add_symbol();
     next_token();
@@ -173,7 +173,7 @@ void parse_assignment() {
     if (operator != TokenKind::Assign
         && operator != TokenKind::PlusAssign
         && operator != TokenKind::MinusAssign) {
-        fail();
+        fail('B', 'E');
     }
     next_token();
     parse_expression(SCRATCH_BASE);
@@ -248,14 +248,14 @@ void parse_while_statement() {
 void parse_block() {
     consume(TokenKind::LeftBrace);
     if (scope_depth == MAX_SCOPES) {
-        fail();
+        fail('B', 'F');
     }
     scope_base[scope_depth] = symbol_count;
     scope_depth += 1;
 
     while (token_kind != TokenKind::RightBrace) {
         if (token_kind == TokenKind::Eof) {
-            fail();
+            fail('B', 'G');
         }
         if (token_kind == TokenKind::Identifier && token_is_cell()) {
             parse_declaration();
@@ -285,7 +285,7 @@ void parse_statement() {
             parse_assignment();
         }
     } else {
-        fail();
+        fail('B', 'H');
     }
 }
 
@@ -295,11 +295,11 @@ void compile_program_stage4() {
     next_token();
 
     if (token_kind != TokenKind::Identifier || !token_is_void()) {
-        fail();
+        fail('B', 'I');
     }
     next_token();
     if (token_kind != TokenKind::Identifier || !token_is_main()) {
-        fail();
+        fail('B', 'J');
     }
     next_token();
     consume(TokenKind::LeftParen);
@@ -307,6 +307,6 @@ void compile_program_stage4() {
     parse_block();
 
     if (token_kind != TokenKind::Eof) {
-        fail();
+        fail('B', 'K');
     }
 }

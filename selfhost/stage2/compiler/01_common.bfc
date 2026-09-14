@@ -1,8 +1,9 @@
 // エラー終了、文字分類、lexerで使う小さな算術補助。
 
-void fail() {
+void fail(cell site_first, cell site_second) {
     // None of these bytes are Brainfuck instructions.  The verification
-    // harness treats this marker as a compilation error.
+    // harness treats this marker as a compilation error. Each caller has a
+    // stable, unique pair of uppercase ASCII letters; search its fail call.
     compiler_output!('B');
     compiler_output!('F');
     compiler_output!('C');
@@ -20,6 +21,9 @@ void fail() {
     compiler_output!('R');
     compiler_output!('O');
     compiler_output!('R');
+    compiler_output!(':');
+    compiler_output!(site_first);
+    compiler_output!(site_second);
     compiler_output!('\n');
     abort();
 }
@@ -58,7 +62,7 @@ cell hex_digit_value(cell value) {
     if (value >= 'A' && value <= 'F') {
         return value - 'A' + 10;
     }
-    fail();
+    fail('A', 'A');
     return 0;
 }
 

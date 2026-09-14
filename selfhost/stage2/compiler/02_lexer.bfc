@@ -22,7 +22,7 @@ void skip_trivia() {
                 cell closed;
                 while (!closed) {
                     if (current_char == 0) {
-                        fail();
+                        fail('A', 'B');
                     }
                     if (current_char == '*') {
                         read_character();
@@ -37,7 +37,7 @@ void skip_trivia() {
                 again = 1;
             } else {
                 // Division is not part of stages 1 through 3.
-                fail();
+                fail('A', 'C');
             }
         }
     }
@@ -47,7 +47,7 @@ void read_name() {
     token_length = 0;
     while (is_name_continue(current_char)) {
         if (token_length == MAX_NAME) {
-            fail();
+            fail('A', 'D');
         }
         token_text[token_length] = current_char;
         token_length += 1;
@@ -64,14 +64,14 @@ void read_number() {
         if (current_char == 'x' || current_char == 'X') {
             read_character();
             if (!is_hex_digit(current_char)) {
-                fail();
+                fail('A', 'E');
             }
             while (is_hex_digit(current_char)) {
                 cell digit = hex_digit_value(current_char);
                 // Tokenization preserves exactly 256 for an array length.
                 if (token_number_is_256 || token_value > 16
                     || (token_value == 16 && digit != 0)) {
-                    fail();
+                    fail('A', 'F');
                 }
                 if (token_value == 16) {
                     token_value = 0;
@@ -82,7 +82,7 @@ void read_number() {
                 read_character();
             }
             if (is_name_continue(current_char)) {
-                fail();
+                fail('A', 'G');
             }
             token_kind = TokenKind::Number;
             return;
@@ -93,7 +93,7 @@ void read_number() {
         cell digit = current_char - '0';
         if (token_number_is_256 || token_value > 25
             || (token_value == 25 && digit > 6)) {
-            fail();
+            fail('A', 'H');
         }
         if (token_value == 25 && digit == 6) {
             token_value = 0;
@@ -104,7 +104,7 @@ void read_number() {
         read_character();
     }
     if (is_name_continue(current_char)) {
-        fail();
+        fail('A', 'I');
     }
     token_kind = TokenKind::Number;
 }
@@ -126,17 +126,17 @@ cell read_escape() {
     } else if (current_char == 'x') {
         read_character();
         if (!is_hex_digit(current_char)) {
-            fail();
+            fail('A', 'J');
         }
         value = times_sixteen(hex_digit_value(current_char));
         read_character();
         if (!is_hex_digit(current_char)) {
-            fail();
+            fail('A', 'K');
         }
         value += hex_digit_value(current_char);
         return value;
     } else {
-        fail();
+        fail('A', 'L');
     }
     return value;
 }
@@ -145,7 +145,7 @@ void read_character_literal() {
     // Consume the opening quote.
     read_character();
     if (current_char == 0 || current_char == '\n' || current_char == '\r') {
-        fail();
+        fail('A', 'M');
     }
 
     if (current_char == '\\') {
@@ -153,14 +153,14 @@ void read_character_literal() {
         token_value = read_escape();
     } else {
         if (current_char < 32 || current_char > 126 || current_char == '\'') {
-            fail();
+            fail('A', 'N');
         }
         token_value = current_char;
     }
 
     read_character();
     if (current_char != '\'') {
-        fail();
+        fail('A', 'O');
     }
     read_character();
     token_kind = TokenKind::Number;
@@ -169,7 +169,7 @@ void read_character_literal() {
 
 void append_string_byte(cell value) {
     if (token_string_is_256) {
-        fail();
+        fail('A', 'P');
     }
     token_string[token_string_length] = value;
     if (token_string_length == 0xff) {
@@ -187,7 +187,7 @@ void read_string_literal() {
     while (current_char != '"') {
         if (current_char == 0 || current_char == '\n'
             || current_char == '\r') {
-            fail();
+            fail('A', 'Q');
         }
         cell value;
         if (current_char == '\\') {
@@ -199,7 +199,7 @@ void read_string_literal() {
             }
         } else {
             if (current_char < 32 || current_char > 126) {
-                fail();
+                fail('A', 'R');
             }
             value = current_char;
         }
@@ -300,14 +300,14 @@ void next_token() {
     } else if (current_char == '&') {
         read_character();
         if (current_char != '&') {
-            fail();
+            fail('A', 'S');
         }
         token_kind = TokenKind::AmpAmp;
         read_character();
     } else if (current_char == '|') {
         read_character();
         if (current_char != '|') {
-            fail();
+            fail('A', 'T');
         }
         token_kind = TokenKind::PipePipe;
         read_character();
@@ -317,11 +317,11 @@ void next_token() {
     } else if (current_char == ':') {
         read_character();
         if (current_char != ':') {
-            fail();
+            fail('A', 'U');
         }
         token_kind = TokenKind::ColonColon;
         read_character();
     } else {
-        fail();
+        fail('A', 'V');
     }
 }

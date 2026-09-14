@@ -123,6 +123,14 @@ local宣言を開始するnominal型定義がそのfunctionより前に現れる
 frameへmaterializeできる239 cell以下の値だけに対応する。旧第4段階direct parserは内部回帰test用に
 残している。
 
+エラーは`BFC_STAGE12_ERROR:AA`のように、呼び出し箇所を示す英大文字2文字と改行を付けて
+出力する。圧縮entryでは先頭の`@BFCRLE1;`に続いてこの診断が出る。例えば`AA`の場所は
+`rg -n "fail\('A', 'A'\)" selfhost/stage2/compiler`で検索できる。各`fail`呼び出しには
+固有の`fail('A', 'A')`形式のIDを割り当て、既存IDは行の移動やcallの追加で振り直さない。
+新しい箇所には未使用の組を使う（`AA`〜`ZZ`の676通り）。削除したIDも過去のログのために
+再利用しない。初回は`AA`〜`IA`の209組を使用しており、次の追加は`IB`から始める。
+既存の`BFC_STAGE12_ERROR`によるエラー検出はそのまま利用できる。
+
 Continuationにはarena上の`NodeId`とは別に1始まりの密な16-bit dispatch IDを割り当てる。
 ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的countdownでdispatchし、
 caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
@@ -150,6 +158,14 @@ repository rootで次を実行する。
 
 ```console
 scripts/verify-stage2-selfhost.sh
+```
+
+診断だけの短い回帰検証は次で実行する。全call siteのID重複・引数漏れと、lexer・semantic・
+内部算術helperのエラー表示および停止を確認する。compiler自身を入力する実験は行わない。
+
+```console
+python3 scripts/verify-stage2-fail-sites.py --compiler target/release/bfc \
+  --interpreter target/release/bf-interpreter
 ```
 
 巨大なbootstrap BFを生成・実行する前に、同じBFC製compilerをContinuation IR上で直接動かせる。

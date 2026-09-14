@@ -98,12 +98,12 @@ NodeId make_array_type(
 
 NodeId parse_ast_complete_type(cell allow_void, cell allow_inferred) {
     if (token_kind != TokenKind::Identifier) {
-        fail();
+        fail('B', 'V');
     }
     NodeId ty;
     if (token_is_void()) {
         if (!allow_void) {
-            fail();
+            fail('B', 'W');
         }
         ty = void_type;
         next_token();
@@ -113,7 +113,7 @@ NodeId parse_ast_complete_type(cell allow_void, cell allow_inferred) {
         ty = cell_type;
     } else {
         if (token_is_reserved()) {
-            fail();
+            fail('B', 'X');
         }
         ty = get_or_create_named_type(intern_token_name());
     }
@@ -125,17 +125,17 @@ NodeId parse_ast_complete_type(cell allow_void, cell allow_inferred) {
     cell dimension_count;
     while (token_kind == TokenKind::LeftBracket) {
         if (dimension_count == 16) {
-            fail();
+            fail('B', 'Y');
         }
         next_token();
         if (token_kind == TokenKind::RightBracket) {
             if (!allow_inferred || !node_equals(ty, cell_type)
                 || dimension_count != 0) {
-                fail();
+                fail('B', 'Z');
             }
             next_token();
             if (token_kind == TokenKind::LeftBracket) {
-                fail();
+                fail('C', 'A');
             }
             return inferred_type;
         }
@@ -149,7 +149,7 @@ NodeId parse_ast_complete_type(cell allow_void, cell allow_inferred) {
             length_kinds[dimension_count] = ARRAY_LENGTH_CONSTANT;
             length_names[dimension_count] = intern_token_name();
         } else {
-            fail();
+            fail('C', 'B');
         }
         dimension_count += 1;
         next_token();
@@ -191,7 +191,7 @@ cell fold_unary_literal(cell operator, cell value) {
     if (operator == AST_UNARY_NOT) {
         return value == 0;
     }
-    fail();
+    fail('C', 'C');
     return 0;
 }
 
@@ -226,7 +226,7 @@ cell fold_binary_literals(cell operator, cell left, cell right) {
     if (operator == AST_BINARY_LOGICAL_OR) {
         return left != 0 || right != 0;
     }
-    fail();
+    fail('C', 'D');
     return 0;
 }
 
@@ -314,7 +314,7 @@ NodeId parse_ast_call(NodeId name) {
 NodeId parse_ast_primary() {
     if (token_kind == TokenKind::Number) {
         if (token_number_is_256) {
-            fail();
+            fail('C', 'E');
         }
         NodeId result = allocate_node(NODE_LITERAL_EXPRESSION);
         set_literal_value(result, token_value);
@@ -383,7 +383,7 @@ NodeId parse_ast_primary() {
         if (token_kind == TokenKind::ColonColon) {
             next_token();
             if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-                fail();
+                fail('C', 'F');
             }
             NodeId result = allocate_node(NODE_ENUM_EXPRESSION);
             node_set_name(result, name);
@@ -404,7 +404,7 @@ NodeId parse_ast_primary() {
         consume(TokenKind::RightParen);
         return result;
     }
-    fail();
+    fail('C', 'G');
     return null_node();
 }
 
@@ -422,7 +422,7 @@ NodeId parse_ast_postfix() {
         } else if (token_kind == TokenKind::Dot) {
             next_token();
             if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-                fail();
+                fail('C', 'H');
             }
             NodeId member_name = intern_token_name();
             next_token();
@@ -548,7 +548,7 @@ NodeId parse_ast_statement() {
         NodeId last;
         while (token_kind != TokenKind::RightBrace) {
             if (token_kind == TokenKind::Eof) {
-                fail();
+                fail('C', 'I');
             }
             NodeId statement = parse_ast_statement();
             if (node_is_null(first)) {
@@ -566,7 +566,7 @@ NodeId parse_ast_statement() {
         && (token_is_cell() || token_is_known_type())) {
         NodeId declaration_type = parse_ast_complete_type(0, 1);
         if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-            fail();
+            fail('C', 'J');
         }
         NodeId declaration = allocate_node(NODE_DECLARATION);
         node_set_b(declaration, declaration_type);
@@ -633,7 +633,7 @@ NodeId parse_ast_statement() {
         if (node_kind(left) != NODE_NAME_EXPRESSION
             && node_kind(left) != NODE_INDEX_EXPRESSION
             && node_kind(left) != NODE_FIELD_EXPRESSION) {
-            fail();
+            fail('C', 'K');
         }
         TokenKind operator = token_kind;
         next_token();
@@ -653,7 +653,7 @@ NodeId parse_ast_statement() {
         return left;
     }
     if (node_kind(left) != NODE_CALL_EXPRESSION) {
-        fail();
+        fail('C', 'L');
     }
     consume(TokenKind::Semicolon);
     NodeId statement = allocate_node(NODE_CALL_STATEMENT);
@@ -678,7 +678,7 @@ NodeId parse_ast_function_after_name(
         while (more) {
             NodeId parameter_type = parse_ast_complete_type(0, 0);
             if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-                fail();
+                fail('C', 'M');
             }
             NodeId parameter = allocate_node(NODE_PARAMETER);
             node_set_b(parameter, parameter_type);
@@ -701,7 +701,7 @@ NodeId parse_ast_function_after_name(
     node_set_a(function, first_parameter);
     node_set_b(function, parse_ast_statement());
     if (node_kind(node_b(function)) != NODE_BLOCK) {
-        fail();
+        fail('C', 'N');
     }
     return function;
 }
@@ -745,7 +745,7 @@ void append_ast_macro(NodeId definition) {
 void parse_ast_macro_definition() {
     next_token();
     if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-        fail();
+        fail('C', 'O');
     }
     NodeId definition = allocate_node(NODE_MACRO_DEFINITION);
     node_set_name(definition, intern_token_name());
@@ -757,14 +757,14 @@ void parse_ast_macro_definition() {
         cell more = 1;
         while (more) {
             if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-                fail();
+                fail('C', 'P');
             }
             NodeId parameter = allocate_node(NODE_MACRO_PARAMETER);
             node_set_name(parameter, intern_token_name());
             NodeId earlier = first;
             while (!node_is_null(earlier)) {
                 if (node_equals(node_name(earlier), node_name(parameter))) {
-                    fail();
+                    fail('C', 'Q');
                 }
                 earlier = node_next(earlier);
             }
@@ -786,7 +786,7 @@ void parse_ast_macro_definition() {
     node_set_a(definition, first);
     NodeId body = parse_ast_statement();
     if (node_kind(body) != NODE_BLOCK) {
-        fail();
+        fail('C', 'R');
     }
     node_set_b(definition, body);
     append_ast_macro(definition);
@@ -795,11 +795,11 @@ void parse_ast_macro_definition() {
 void parse_ast_constant_definition() {
     next_token();
     if (token_kind != TokenKind::Identifier || !token_is_cell()) {
-        fail();
+        fail('C', 'S');
     }
     next_token();
     if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-        fail();
+        fail('C', 'T');
     }
     NodeId constant = allocate_node(NODE_CONSTANT);
     node_set_name(constant, intern_token_name());
@@ -813,11 +813,11 @@ void parse_ast_constant_definition() {
 void parse_ast_enum_definition() {
     next_token();
     if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-        fail();
+        fail('C', 'U');
     }
     NodeId ty = get_or_create_named_type(intern_token_name());
     if (node_tag(ty) != TYPE_UNRESOLVED) {
-        fail();
+        fail('C', 'V');
     }
     node_set_tag(ty, TYPE_ENUM);
     next_token();
@@ -825,12 +825,12 @@ void parse_ast_enum_definition() {
     NodeId first;
     NodeId last;
     if (token_kind == TokenKind::RightBrace) {
-        fail();
+        fail('C', 'W');
     }
     cell more = 1;
     while (more) {
         if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-            fail();
+            fail('C', 'X');
         }
         NodeId variant = allocate_node(NODE_ENUM_VARIANT);
         node_set_name(variant, intern_token_name());
@@ -861,11 +861,11 @@ void parse_ast_enum_definition() {
 void parse_ast_struct_definition() {
     next_token();
     if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-        fail();
+        fail('C', 'Y');
     }
     NodeId ty = get_or_create_named_type(intern_token_name());
     if (node_tag(ty) != TYPE_UNRESOLVED) {
-        fail();
+        fail('C', 'Z');
     }
     node_set_tag(ty, TYPE_STRUCT);
     next_token();
@@ -874,11 +874,11 @@ void parse_ast_struct_definition() {
     NodeId last;
     while (token_kind != TokenKind::RightBrace) {
         if (token_kind == TokenKind::Eof) {
-            fail();
+            fail('D', 'A');
         }
         NodeId field_type = parse_ast_complete_type(0, 0);
         if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-            fail();
+            fail('D', 'B');
         }
         NodeId field = allocate_node(NODE_STRUCT_FIELD);
         node_set_a(field, field_type);
@@ -894,7 +894,7 @@ void parse_ast_struct_definition() {
     }
     next_token();
     if (node_is_null(first)) {
-        fail();
+        fail('D', 'C');
     }
     node_set_a(ty, first);
 }
@@ -918,14 +918,14 @@ void parse_ast_top_level_item() {
     }
     NodeId value_type = parse_ast_complete_type(1, 1);
     if (token_kind != TokenKind::Identifier || token_is_reserved()) {
-        fail();
+        fail('D', 'D');
     }
     NodeId name = intern_token_name();
     next_token();
 
     if (token_kind == TokenKind::LeftParen) {
         if (node_equals(value_type, inferred_type)) {
-            fail();
+            fail('D', 'E');
         }
         append_ast_function(
             parse_ast_function_after_name(value_type, name)
@@ -934,7 +934,7 @@ void parse_ast_top_level_item() {
     }
 
     if (node_equals(value_type, void_type)) {
-        fail();
+        fail('D', 'F');
     }
     NodeId global = allocate_node(NODE_GLOBAL);
     node_set_b(global, value_type);

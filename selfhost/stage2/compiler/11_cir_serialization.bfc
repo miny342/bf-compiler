@@ -23,7 +23,7 @@ NodeId next_cir_function_id(NodeId id) {
         id.slot = 0;
         id.page += 1;
         if (id.page == 0) {
-            fail();
+            fail('H', 'U');
         }
     } else {
         id.slot += 1;
@@ -41,7 +41,7 @@ NodeId cir_function_id(NodeId target) {
         id = next_cir_function_id(id);
         function = node_next(function);
     }
-    fail();
+    fail('H', 'V');
     return id;
 }
 
@@ -50,7 +50,7 @@ cell cir_parameter_count(NodeId function) {
     cell count;
     while (!node_is_null(parameter)) {
         if (count == 0xff) {
-            fail();
+            fail('H', 'W');
         }
         count += 1;
         parameter = node_next(parameter);
@@ -131,7 +131,7 @@ void emit_cir_instruction(NodeId instruction) {
         } else if (storage == RESOLVED_GLOBAL_DYNAMIC) {
             compiler_output!(1);
         } else {
-            fail();
+            fail('H', 'X');
         }
     } else if (kind == IR_COPY_OUTBOX) {
         compiler_output!(node_value(instruction));
@@ -148,7 +148,7 @@ void emit_cir_instruction(NodeId instruction) {
         compiler_output!(arena_read(instruction, FIELD_A_SLOT));
         compiler_output!(arena_read(instruction, FIELD_A_BANK));
     } else {
-        fail();
+        fail('H', 'Y');
     }
 }
 
@@ -157,7 +157,7 @@ cell cir_call_argument_count(NodeId continuation) {
     cell count;
     while (!node_is_null(argument)) {
         if (count == 0xff) {
-            fail();
+            fail('H', 'Z');
         }
         count += 1;
         argument = node_next(argument);
@@ -213,7 +213,7 @@ void emit_cir_terminator(NodeId continuation) {
     } else if (kind == TERM_ABORT) {
         compiler_output!(8);
     } else {
-        fail();
+        fail('I', 'A');
     }
 }
 

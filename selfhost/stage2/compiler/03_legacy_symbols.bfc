@@ -22,20 +22,20 @@ cell find_symbol() {
             return symbol_cell[index];
         }
     }
-    fail();
+    fail('A', 'W');
     return 0;
 }
 
 cell add_symbol() {
     if (token_is_reserved() || symbol_count == MAX_SYMBOLS) {
-        fail();
+        fail('A', 'X');
     }
 
     cell first = scope_base[scope_depth - 1];
     cell probe = first;
     while (probe < symbol_count) {
         if (token_matches_symbol(probe)) {
-            fail();
+            fail('A', 'Y');
         }
         probe += 1;
     }
