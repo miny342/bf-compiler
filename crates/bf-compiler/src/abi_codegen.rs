@@ -744,12 +744,23 @@ impl<'a> AbiEmitter<'a> {
         label: impl Into<String>,
         emit: impl FnOnce(&mut Self) -> Result<T, AbiCodegenError>,
     ) -> Result<T, AbiCodegenError> {
+        self.with_profile_attributes(kind, stable_key, label, BTreeMap::new(), emit)
+    }
+
+    fn with_profile_attributes<T>(
+        &mut self,
+        kind: &str,
+        stable_key: impl Into<String>,
+        label: impl Into<String>,
+        attributes: BTreeMap<String, String>,
+        emit: impl FnOnce(&mut Self) -> Result<T, AbiCodegenError>,
+    ) -> Result<T, AbiCodegenError> {
         let site = self.sites.intern(
             Some(self.current_profile_site()),
             kind,
             stable_key,
             label,
-            BTreeMap::new(),
+            attributes,
         );
         self.site_stack.push(site);
         let result = emit(self);
@@ -1944,6 +1955,29 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn emit_portal_call(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
+        self.with_profile_attributes(
+            "abi",
+            "abi.portal.request",
+            "portal request (static origin)",
+            BTreeMap::from([
+                ("region".into(), format!("{:?}", site.region)),
+                ("function".into(), site.function.index().to_string()),
+                ("cells".into(), site.cells.to_string()),
+                ("leaf".into(), site.leaf.to_string()),
+                (
+                    "accessor_encoded".into(),
+                    self.dispatch_encoding.encode(site.accessor).to_string(),
+                ),
+                (
+                    "resume_encoded".into(),
+                    self.dispatch_encoding.encode(site.resume).to_string(),
+                ),
+            ]),
+            |emitter| emitter.emit_portal_call_inner(site),
+        )
+    }
+
+    fn emit_portal_call_inner(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
         if let Some(router) = site.router {
             return self.stage_global_portal(site, router);
         }
@@ -2006,49 +2040,80 @@ impl<'a> AbiEmitter<'a> {
         let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
         let route_low = self.route_location(ROUTE_OFFSET_LOW)?;
         let route_high = self.route_location(ROUTE_OFFSET_HIGH)?;
-        match site.offset {
-            PortalOffset::Byte(index) => {
-                let source = self.address_location(index, site.function)?;
-                self.copy_locations(source, route_low, restore);
-                self.clear_location(route_high);
-            }
-            PortalOffset::Word(offset) => {
-                let low = self.address_location(offset.low, site.function)?;
-                let high = self.address_location(offset.high, site.function)?;
-                self.copy_locations(low, route_low, restore);
-                self.copy_locations(high, route_high, restore);
-            }
-        }
-        if let PortalOperation::Store { source } = site.operation {
-            let value_source = if site.cells > 1 {
-                self.portal_temporary_location(site.function, site.leaf)?
-            } else {
-                self.value_operand_element_location(source, site.leaf, site.function)?
-            };
-            self.copy_locations(value_source, self.route_location(ROUTE_VALUE)?, restore);
-        } else {
-            self.clear_location(self.route_location(ROUTE_VALUE)?);
-        }
-        for (index, value) in [
-            (
-                ROUTE_ACCESSOR_LOW,
-                self.dispatch_encoding.encode(site.accessor) as u8,
-            ),
-            (
-                ROUTE_ACCESSOR_HIGH,
-                (self.dispatch_encoding.encode(site.accessor) >> 8) as u8,
-            ),
-            (
-                ROUTE_RESUME_LOW,
-                self.dispatch_encoding.encode(site.resume) as u8,
-            ),
-            (
-                ROUTE_RESUME_HIGH,
-                (self.dispatch_encoding.encode(site.resume) >> 8) as u8,
-            ),
-        ] {
-            self.set_location(self.route_location(index)?, value);
-        }
+        self.with_profile_site(
+            "abi",
+            "abi.portal.stage.offset",
+            "abi.portal.stage.offset",
+            |emitter| {
+                match site.offset {
+                    PortalOffset::Byte(index) => {
+                        let source = emitter.address_location(index, site.function)?;
+                        emitter.copy_locations(source, route_low, restore);
+                        emitter.clear_location(route_high);
+                    }
+                    PortalOffset::Word(offset) => {
+                        let low = emitter.address_location(offset.low, site.function)?;
+                        let high = emitter.address_location(offset.high, site.function)?;
+                        emitter.copy_locations(low, route_low, restore);
+                        emitter.copy_locations(high, route_high, restore);
+                    }
+                }
+
+                Ok(())
+            },
+        )?;
+        self.with_profile_site(
+            "abi",
+            "abi.portal.stage.payload",
+            "abi.portal.stage.payload",
+            |emitter| {
+                if let PortalOperation::Store { source } = site.operation {
+                    let value_source = if site.cells > 1 {
+                        emitter.portal_temporary_location(site.function, site.leaf)?
+                    } else {
+                        emitter.value_operand_element_location(source, site.leaf, site.function)?
+                    };
+                    emitter.copy_locations(
+                        value_source,
+                        emitter.route_location(ROUTE_VALUE)?,
+                        restore,
+                    );
+                } else {
+                    emitter.clear_location(emitter.route_location(ROUTE_VALUE)?);
+                }
+
+                Ok(())
+            },
+        )?;
+        self.with_profile_site(
+            "abi",
+            "abi.portal.stage.pc",
+            "abi.portal.stage.pc",
+            |emitter| {
+                for (index, value) in [
+                    (
+                        ROUTE_ACCESSOR_LOW,
+                        emitter.dispatch_encoding.encode(site.accessor) as u8,
+                    ),
+                    (
+                        ROUTE_ACCESSOR_HIGH,
+                        (emitter.dispatch_encoding.encode(site.accessor) >> 8) as u8,
+                    ),
+                    (
+                        ROUTE_RESUME_LOW,
+                        emitter.dispatch_encoding.encode(site.resume) as u8,
+                    ),
+                    (
+                        ROUTE_RESUME_HIGH,
+                        (emitter.dispatch_encoding.encode(site.resume) >> 8) as u8,
+                    ),
+                ] {
+                    emitter.set_location(emitter.route_location(index)?, value);
+                }
+
+                Ok(())
+            },
+        )?;
         self.set_next_pc(router)
     }
 
@@ -2067,6 +2132,20 @@ impl<'a> AbiEmitter<'a> {
         router: GlobalPortalRouter,
     ) -> Result<(), AbiCodegenError> {
         let region = AggregateRegion::Global(router.global);
+        self.move_global_portal_request(region)?;
+        self.set_location(
+            self.portal_field_location(region, AbiField::Active, self.program.main())?,
+            1,
+        );
+        self.enter_portal(region, self.program.main())
+    }
+
+    // Kept separate so the compact transport fixture exercises precisely the
+    // production request path, with controlled bytes independent of PC layout.
+    fn move_global_portal_request(
+        &mut self,
+        region: AggregateRegion,
+    ) -> Result<(), AbiCodegenError> {
         // A static portal starts zero and its resume path clears every protocol
         // field after each access. Route staging is single-use, so moving the
         // seven request bytes is both smaller and cheaper than seven restored
@@ -2080,33 +2159,56 @@ impl<'a> AbiEmitter<'a> {
             (ROUTE_RESUME_LOW, AbiField::ReturnPcLow),
             (ROUTE_RESUME_HIGH, AbiField::ReturnPcHigh),
         ] {
-            let source = self.route_location(route)?;
-            let destination = self.portal_field_location(region, field, self.program.main())?;
-            // Each nibble transport duplicates the long navigation template.
-            // Restrict it to dynamic low bytes, where the bounded crossings
-            // repay that source-size cost; high bytes and payload values use
-            // the compact unary move.
-            let use_nibbles = matches!(
-                route,
-                ROUTE_OFFSET_LOW | ROUTE_ACCESSOR_LOW | ROUTE_RESUME_LOW
-            );
-            if use_nibbles {
-                let Location::Relative(source) = source else {
-                    unreachable!("route staging is frame-relative")
-                };
-                let Location::Global(destination) = destination else {
-                    unreachable!("global portal fields are static")
-                };
-                self.move_relative_to_global_nibbles(source, destination)?;
-            } else {
-                self.move_location_to_zero(source, destination);
-            }
+            self.with_profile_site(
+                "abi",
+                format!(
+                    "abi.portal.route.field.{}",
+                    [
+                        "offset_low",
+                        "offset_high",
+                        "payload",
+                        "accessor_low",
+                        "accessor_high",
+                        "resume_low",
+                        "resume_high"
+                    ][route]
+                ),
+                "request byte",
+                |emitter| {
+                    let source = emitter.route_location(route)?;
+                    let destination =
+                        emitter.portal_field_location(region, field, emitter.program.main())?;
+                    // Each nibble transport duplicates the long navigation template.
+                    // Restrict it to dynamic low bytes, where the bounded crossings
+                    // repay that source-size cost; high bytes and payload values use
+                    // the compact unary move.
+                    let use_nibbles = matches!(
+                        route,
+                        ROUTE_OFFSET_LOW | ROUTE_ACCESSOR_LOW | ROUTE_RESUME_LOW
+                    );
+                    if use_nibbles {
+                        let Location::Relative(source) = source else {
+                            unreachable!("route staging is frame-relative")
+                        };
+                        let Location::Global(destination) = destination else {
+                            unreachable!("global portal fields are static")
+                        };
+                        emitter.move_relative_to_global_nibbles(source, destination)?;
+                    } else {
+                        emitter.with_profile_site_infallible(
+                            "abi",
+                            "abi.portal.route.transport.unary",
+                            "unary transport",
+                            |emitter| {
+                                emitter.move_location_to_zero(source, destination);
+                            },
+                        );
+                    }
+                    Ok(())
+                },
+            )?;
         }
-        self.set_location(
-            self.portal_field_location(region, AbiField::Active, self.program.main())?,
-            1,
-        );
-        self.enter_portal(region, self.program.main())
+        Ok(())
     }
 
     fn emit_aggregate_accessor(&mut self, accessor: PortalAccessor) -> Result<(), AbiCodegenError> {
@@ -2237,25 +2339,42 @@ impl<'a> AbiEmitter<'a> {
         self.move_abi_field(AbiField::Index, AbiField::PcLow);
         self.move_abi_field(AbiField::Scratch0, AbiField::PcHigh);
 
-        self.split_abi_nibbles(AbiField::PcLow, AbiField::Index, AbiField::Scratch1)?;
-        self.split_abi_nibbles(AbiField::PcHigh, AbiField::PcLow, AbiField::Scratch2)?;
+        self.with_profile_site(
+            "abi",
+            "abi.portal.offset.split",
+            "abi.portal.offset.split",
+            |emitter| {
+                emitter.split_abi_nibbles(AbiField::PcLow, AbiField::Index, AbiField::Scratch1)?;
+                emitter.split_abi_nibbles(AbiField::PcHigh, AbiField::PcLow, AbiField::Scratch2)?;
 
-        let scratch = self.current_abi_offset(AbiField::Scratch0)?;
-        self.copy(
-            self.current_abi_offset(AbiField::Scratch1)?,
-            self.current_abi_offset(AbiField::Restore)?,
-            scratch,
-        );
-        self.copy(
-            self.current_abi_offset(AbiField::PcLow)?,
-            self.current_abi_offset(AbiField::Condition)?,
-            scratch,
-        );
-        self.copy(
-            self.current_abi_offset(AbiField::Scratch2)?,
-            self.current_abi_offset(AbiField::PcHigh)?,
-            scratch,
-        );
+                Ok(())
+            },
+        )?;
+        self.with_profile_site(
+            "abi",
+            "abi.portal.offset.prepare",
+            "abi.portal.offset.prepare",
+            |emitter| {
+                let scratch = emitter.current_abi_offset(AbiField::Scratch0)?;
+                emitter.copy(
+                    emitter.current_abi_offset(AbiField::Scratch1)?,
+                    emitter.current_abi_offset(AbiField::Restore)?,
+                    scratch,
+                );
+                emitter.copy(
+                    emitter.current_abi_offset(AbiField::PcLow)?,
+                    emitter.current_abi_offset(AbiField::Condition)?,
+                    scratch,
+                );
+                emitter.copy(
+                    emitter.current_abi_offset(AbiField::Scratch2)?,
+                    emitter.current_abi_offset(AbiField::PcHigh)?,
+                    scratch,
+                );
+
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
@@ -2353,17 +2472,27 @@ impl<'a> AbiEmitter<'a> {
         chunks: isize,
         right: bool,
     ) -> Result<(), AbiCodegenError> {
-        let digit_offset = self.current_abi_offset(digit)?;
-        self.move_to(digit_offset);
-        let body = self.capture_infallible(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.jump_portal_window(chunks, right);
-            emitter.move_to(digit_offset);
-        });
-        self.emit_loop(body);
-        self.move_to(0);
-        Ok(())
+        self.with_profile_site(
+            "abi",
+            format!(
+                "abi.portal.window.{}.jump.{chunks}",
+                if right { "right" } else { "left" }
+            ),
+            "portal jump",
+            |emitter| {
+                let digit_offset = emitter.current_abi_offset(digit)?;
+                emitter.move_to(digit_offset);
+                let body = emitter.capture_infallible(|emitter| {
+                    emitter.adjust(255);
+                    emitter.move_to(0);
+                    emitter.jump_portal_window(chunks, right);
+                    emitter.move_to(digit_offset);
+                });
+                emitter.emit_loop(body);
+                emitter.move_to(0);
+                Ok(())
+            },
+        )
     }
 
     /// Swap the D=16 portal chunk with a payload chunk at a fixed distance.
@@ -2385,26 +2514,33 @@ impl<'a> AbiEmitter<'a> {
         let cell = |chunk: isize, lane: usize| chunk * stride + 1 + lane as isize;
 
         for lane in 0..self.config.chunk_cells() {
-            let always_zero = lane == AbiField::NextPcLow.index()
-                || lane == AbiField::NextPcHigh.index()
-                || lane == AbiField::Scratch0.index()
-                || lane == AbiField::Scratch3.index();
-            let local = cell(0, lane);
-            let remote = cell(delta, lane);
-            if always_zero {
-                self.move_value(remote, local);
-                continue;
-            }
-            let temporary = if lane < primary_lane {
-                primary
-            } else if lane == primary_lane {
-                secondary
-            } else {
-                remote_primary
-            };
-            self.move_value(remote, temporary);
-            self.move_value(local, remote);
-            self.move_value(temporary, local);
+            self.with_profile_site_infallible(
+                "abi",
+                "abi.portal.window.exchange",
+                "exchange payload and control lane",
+                |emitter| {
+                    let always_zero = lane == AbiField::NextPcLow.index()
+                        || lane == AbiField::NextPcHigh.index()
+                        || lane == AbiField::Scratch0.index()
+                        || lane == AbiField::Scratch3.index();
+                    let local = cell(0, lane);
+                    let remote = cell(delta, lane);
+                    if always_zero {
+                        emitter.move_value(remote, local);
+                        return;
+                    }
+                    let temporary = if lane < primary_lane {
+                        primary
+                    } else if lane == primary_lane {
+                        secondary
+                    } else {
+                        remote_primary
+                    };
+                    emitter.move_value(remote, temporary);
+                    emitter.move_value(local, remote);
+                    emitter.move_value(temporary, local);
+                },
+            );
         }
         self.migrate_context(delta * stride);
     }
@@ -2417,32 +2553,51 @@ impl<'a> AbiEmitter<'a> {
             let index = self.current_abi_offset(AbiField::Index)?;
             let condition = self.current_abi_offset(AbiField::Scratch1)?;
             let scratch = self.current_abi_offset(AbiField::Scratch2)?;
-            self.copy(index, condition, scratch);
-            self.add_abi_field(AbiField::Scratch1, 0_u8.wrapping_sub(remainder as u8))?;
-            self.set_abi_field(AbiField::Branch, 1)?;
-            self.clear_branch_on_nonzero(AbiField::Scratch1)?;
-            let branch = self.current_abi_offset(AbiField::Branch)?;
-            self.move_to(branch);
-            let body = self.capture(|emitter| {
-                emitter.adjust(255);
-                emitter.move_to(0);
-                let payload = emitter
-                    .config
-                    .logical_offset_from_head(PROTOCOL_CELLS + remainder)
-                    as isize;
-                let value = emitter.current_abi_offset(AbiField::Value)?;
-                match kind {
-                    PortalAccessKind::Load => {
-                        let scratch = emitter.current_abi_offset(AbiField::Scratch2)?;
-                        emitter.copy(payload, value, scratch);
-                    }
-                    PortalAccessKind::Store => emitter.move_value(value, payload),
-                }
-                emitter.move_to(branch);
-                Ok(())
-            })?;
-            self.emit_loop(body);
-            self.move_to(0);
+            self.with_profile_site(
+                "abi",
+                "abi.portal.payload.select",
+                "abi.portal.payload.select",
+                |emitter| {
+                    emitter.copy(index, condition, scratch);
+                    emitter
+                        .add_abi_field(AbiField::Scratch1, 0_u8.wrapping_sub(remainder as u8))?;
+                    emitter.set_abi_field(AbiField::Branch, 1)?;
+                    emitter.clear_branch_on_nonzero(AbiField::Scratch1)?;
+
+                    Ok(())
+                },
+            )?;
+            self.with_profile_site(
+                "abi",
+                "abi.portal.payload.transfer",
+                "abi.portal.payload.transfer",
+                |emitter| {
+                    let branch = emitter.current_abi_offset(AbiField::Branch)?;
+                    emitter.move_to(branch);
+                    let body = emitter.capture(|emitter| {
+                        emitter.adjust(255);
+                        emitter.move_to(0);
+                        let payload = emitter
+                            .config
+                            .logical_offset_from_head(PROTOCOL_CELLS + remainder)
+                            as isize;
+                        let value = emitter.current_abi_offset(AbiField::Value)?;
+                        match kind {
+                            PortalAccessKind::Load => {
+                                let scratch = emitter.current_abi_offset(AbiField::Scratch2)?;
+                                emitter.copy(payload, value, scratch);
+                            }
+                            PortalAccessKind::Store => emitter.move_value(value, payload),
+                        }
+                        emitter.move_to(branch);
+                        Ok(())
+                    })?;
+                    emitter.emit_loop(body);
+                    emitter.move_to(0);
+
+                    Ok(())
+                },
+            )?;
         }
         Ok(())
     }
@@ -2455,51 +2610,91 @@ impl<'a> AbiEmitter<'a> {
 
     fn emit_portal_resume_inner(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
         let is_load = matches!(site.operation, PortalOperation::Load { .. });
-        for field in AbiField::ALL {
-            if is_load && field == AbiField::Value {
-                continue;
-            }
-            self.clear_abi_field(field)?;
-        }
+        self.with_profile_site(
+            "abi",
+            "abi.portal.resume.clear",
+            "abi.portal.resume.clear",
+            |emitter| {
+                for field in AbiField::ALL {
+                    if is_load && field == AbiField::Value {
+                        continue;
+                    }
+                    emitter.clear_abi_field(field)?;
+                }
 
+                Ok(())
+            },
+        )?;
         let frame = self.layout(site.function)?.frame.clone();
-        match site.region {
-            AggregateRegion::Frame(aggregate) => {
-                let context_delta = -frame.aggregate_base_offset(aggregate)?;
-                if is_load {
-                    let source = self.current_abi_offset(AbiField::Value)?;
-                    let destination = context_delta + frame.abi_offset(AbiField::Value);
-                    self.move_value(source, destination);
+        self.with_profile_site(
+            "abi",
+            "abi.portal.resume.transport",
+            "abi.portal.resume.transport",
+            |emitter| {
+                match site.region {
+                    AggregateRegion::Frame(aggregate) => {
+                        let context_delta = -frame.aggregate_base_offset(aggregate)?;
+                        if is_load {
+                            let source = emitter.current_abi_offset(AbiField::Value)?;
+                            let destination = context_delta + frame.abi_offset(AbiField::Value);
+                            emitter.move_value(source, destination);
+                        }
+                        emitter.clear_abi_field(AbiField::Value)?;
+                        emitter.migrate_context(context_delta);
+                    }
+                    AggregateRegion::Global(global) => {
+                        let base = emitter.static_layout.aggregate_base_head(global)?;
+                        if is_load {
+                            emitter.move_global_portal_value_to_context(
+                                base,
+                                frame.abi_offset(AbiField::Value),
+                            )?;
+                        } else {
+                            emitter.clear_abi_field(AbiField::Value)?;
+                            emitter.emit_global_to_context(base, frame.context_chunks());
+                        }
+                    }
+                    AggregateRegion::Outbox => {
+                        unreachable!("outbox cannot use the aggregate portal")
+                    }
                 }
-                self.clear_abi_field(AbiField::Value)?;
-                self.migrate_context(context_delta);
-            }
-            AggregateRegion::Global(global) => {
-                let base = self.static_layout.aggregate_base_head(global)?;
-                if is_load {
-                    self.move_global_portal_value_to_context(
-                        base,
-                        frame.abi_offset(AbiField::Value),
-                    )?;
-                } else {
-                    self.clear_abi_field(AbiField::Value)?;
-                    self.emit_global_to_context(base, frame.context_chunks());
-                }
-            }
-            AggregateRegion::Outbox => unreachable!("outbox cannot use the aggregate portal"),
-        }
 
-        if let PortalOperation::Load { destination } = site.operation {
-            let source = Location::Relative(frame.abi_offset(AbiField::Value));
-            let destination = if site.cells > 1 {
-                self.portal_temporary_location(site.function, site.leaf)?
-            } else {
-                self.value_operand_element_location(destination, site.leaf, site.function)?
-            };
-            self.move_location(source, destination);
-        }
+                Ok(())
+            },
+        )?;
+        self.with_profile_site(
+            "abi",
+            "abi.portal.resume.deliver",
+            "abi.portal.resume.deliver",
+            |emitter| {
+                if let PortalOperation::Load { destination } = site.operation {
+                    let source = Location::Relative(frame.abi_offset(AbiField::Value));
+                    let destination = if site.cells > 1 {
+                        emitter.portal_temporary_location(site.function, site.leaf)?
+                    } else {
+                        emitter.value_operand_element_location(
+                            destination,
+                            site.leaf,
+                            site.function,
+                        )?
+                    };
+                    emitter.move_location(source, destination);
+                }
+
+                Ok(())
+            },
+        )?;
         if let Some(next_resume) = site.next_resume {
-            self.increment_portal_offset(site.offset, site.function)?;
+            self.with_profile_site(
+                "abi",
+                "abi.portal.resume.advance",
+                "abi.portal.resume.advance",
+                |emitter| {
+                    emitter.increment_portal_offset(site.offset, site.function)?;
+
+                    Ok(())
+                },
+            )?;
             let next = *self
                 .portal
                 .ordered_sites
@@ -2984,39 +3179,58 @@ impl<'a> AbiEmitter<'a> {
         };
         let bits = std::array::from_fn::<_, 8, _>(|index| temporary + 1 + index as isize);
 
-        self.clear(temporary);
-        for bit in bits {
-            self.clear(bit);
-        }
+        self.with_profile_site_infallible(
+            "abi",
+            "abi.portal.route.decompose",
+            "abi.portal.route.decompose",
+            |emitter| {
+                emitter.clear(temporary);
+                for bit in bits {
+                    emitter.clear(bit);
+                }
 
-        self.move_to(source);
-        let decompose = self.capture_infallible(|emitter| {
-            emitter.adjust(255);
-            emitter.increment_bits(&bits, temporary, 0, source);
-        });
-        self.emit_loop(decompose);
-        self.move_to(0);
-
-        for index in 1..4 {
-            self.move_static_value(bits[index], bits[0], 1_u8 << index);
-        }
-        for index in 5..8 {
-            self.move_static_value(bits[index], bits[4], 1_u8 << (index - 4));
-        }
-
+                emitter.move_to(source);
+                let decompose = emitter.capture_infallible(|emitter| {
+                    emitter.adjust(255);
+                    emitter.increment_bits(&bits, temporary, 0, source);
+                });
+                emitter.emit_loop(decompose);
+                emitter.move_to(0);
+            },
+        );
+        self.with_profile_site_infallible(
+            "abi",
+            "abi.portal.route.pack",
+            "abi.portal.route.pack",
+            |emitter| {
+                for index in 1..4 {
+                    emitter.move_static_value(bits[index], bits[0], 1_u8 << index);
+                }
+                for index in 5..8 {
+                    emitter.move_static_value(bits[index], bits[4], 1_u8 << (index - 4));
+                }
+            },
+        );
         let context_chunks = self.config.portal_chunks();
         for (digit, contribution) in [(bits[0], 1_u8), (bits[4], 16_u8)] {
-            self.move_to(digit);
-            let transport = self.capture_infallible(|emitter| {
-                emitter.adjust(255);
-                emitter.move_to(0);
-                emitter.emit_context_to_global(destination, context_chunks);
-                emitter.adjust(contribution);
-                emitter.emit_global_to_context(destination, context_chunks);
-                emitter.move_to(digit);
-            });
-            self.emit_loop(transport);
-            self.move_to(0);
+            self.with_profile_site_infallible(
+                "abi",
+                format!("abi.portal.route.transport.nibble.{contribution}"),
+                "nibble transport",
+                |emitter| {
+                    emitter.move_to(digit);
+                    let transport = emitter.capture_infallible(|emitter| {
+                        emitter.adjust(255);
+                        emitter.move_to(0);
+                        emitter.emit_context_to_global(destination, context_chunks);
+                        emitter.adjust(contribution);
+                        emitter.emit_global_to_context(destination, context_chunks);
+                        emitter.move_to(digit);
+                    });
+                    emitter.emit_loop(transport);
+                    emitter.move_to(0);
+                },
+            );
         }
         Ok(())
     }
@@ -5317,3 +5531,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod portal_probe;

@@ -94,3 +94,68 @@ full selfhostを再完走しての速度測定は未実施。
 full9の出力命令列が5.5 TB相当になる問題を解決した変更ではない。
 
 次のコミットではこの作業結果節を置き換え、採否・理由・制約を保持する。
+
+## Portal詳細profile・コンパクト再現（2026-09-15）
+
+**診断基盤を採用。ABI、nibble搬送、RemoteTransferの実装は変更していない。**
+現状のproductionコードから短時間の再現を作れることと、搬送前の分解・要素選択・window交換を
+別々に観測できることを確認した。profile付き生成BFは変更前のRust compilerとbyte単位で一致した。
+
+### 測定条件
+
+`tmp/portal-profile-evaluation`に12ケースの結果、`tmp/portal-profile-values`に搬送値を変えた
+6ケースの結果を保存した。各directoryの`manifest.json`、`runner.py`、source/input、BF/map、
+raw profile、`summary.json`と`report.md`が再現情報である。
+通常測定はprofileなし、1回warmup後5組のON/OFF交互実行の中央値。前者は遅い設定で約2秒、
+後者は約0.5秒を目安に校正した。各processは60秒timeout。
+Rust/interpreterはrelease build、D=16、unlimited tape、同一BF・入力を使用。
+sample/countersは別実行。compile・parse・RSSと全runの値も記録した。
+長時間のcompiler自己入力は実行していない。
+
+### 得られた内訳
+
+| ケース | 圧縮BF bytes | RemoteTransfer ONの主なexclusive sample |
+| --- | ---: | --- |
+| 7byte要求搬送、padding 16セル | 1,263 | bit分解93.4%、搬送3.0% |
+| 7byte要求搬送、padding 256セル | 1,368 | bit分解92.7%、搬送3.1% |
+| 16要素×3セルのglobal配列 | 35,330 | 分解23.3%、要素選択20.2%、window交換15.0% |
+| 16要素×3セルのframe配列 | 30,676 | 要素選択32.3%、window交換20.8%、offset12.3% |
+| 大きいglobal配列・chunk境界 | 183,678 | window交換43.4%、分解23.3%、offset10.4% |
+| production optimizerの抜粋 | 99,517 | dispatch38.5%、分解17.6%、要素選択9.6%、window交換4.7% |
+
+共有祖先へ融合した命令の費用は親へ残した。表はsubsetであり、残余を子へ推測配賦していない。
+また、異なるケースのsample割合は分母が違うため、速度比として比較しない。
+
+7byteの搬送fixtureでは各要求がnibble 6本＋unary 4本の計10回のRemoteTransferとなり、
+全256値・両paddingでnative site帰属をテストした。測定した全ケースでfallbackは0だった。
+これは「RemoteTransferになっていないため遅い」という説明を支持しない。
+分解loopは転送とは別に残り、準備が主な費用になる条件を約1.3KBのBFで再現できた。
+
+要求byteを7本とも同じ値にした場合の、profileなしのwhole-fixture平均は次のとおり。
+初期化・観測・後処理も含むため、routerだけのlatencyではない。
+
+| byte値 | ON ns/要求 | OFF ns/要求 |
+| --- | ---: | ---: |
+| 0 | 639 | 613 |
+| 1 | 1,154 | 933 |
+| 15 | 2,995 | 5,742 |
+| 16 | 3,369 | 4,916 |
+| 127 | 19,350 | 34,887 |
+| 255 | 37,715 | 69,707 |
+
+大きい値ではRemoteTransferの改善後も分解費用が残る。小さい値ではprobeの固定費用もあり、
+必ずONが速いとは限らない。この表は当該runの中央値であり、実際の要求値分布を代替しない。
+
+### 判断と限界
+
+- 次の独立実験はrouterのbit分解を省く搬送のA/Bを優先する。まだ実装・採用していない。
+  現interpreterでは単純転送もnative化できるが、その優劣は今回の測定だけでは確定しない。
+- 小配列では16通りの要素選択も費用が大きい。小配列専用の選択やaggregate一括転送を
+  次の候補として維持する。大配列ではwindow交換の比重が高く、別の条件で評価する。
+- frame配列にはglobal routerがない。stackに置いても同じ費用になる、という説明は不正確。
+  一方で要素選択・window交換は残るため、関数の固定領域化だけで配列の費用が消えるわけでもない。
+- optimizerの抜粋はfull14とdispatch規模・PC値・call stack・仕事の割合が異なる。
+  primitive fixtureの制御値はPCとしてdispatchされない。full14と同じ比率や改善率は主張しない。
+- 全source fixtureをIR出力と照合し、配列のIR load/store数、全初期化payloadとcaller sentinelの保存を確認。
+  ON/OFFの出力・logical BF/RLE count・max pointerも一致した。
+- `cargo test --workspace`、全targetのClippy、profile追加前とのBF一致が通過した。

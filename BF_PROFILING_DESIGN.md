@@ -48,6 +48,37 @@ samplingを主体とし、exact/counters modeのような命令counter集計は�
 profilingなしの実行時間・parse時間・全体時間を分け、全runの出力hash、raw/RLE
 命令数、最大pointerの一致を必須とする。
 
+## Portalの詳細siteとコンパクト再現
+
+2026-09-15に既存のABI siteを細分化した。CLI・map v1形式・生成BF命令列は変更しない。
+`--profile-granularity continuation`でも次の子siteを取得できる。
+
+| key | 測る処理 |
+| --- | --- |
+| `abi.portal.stage.offset/payload/pc` | global要求の準備 |
+| `abi.portal.route.field.<field>` | 7要求byteそれぞれの親。offset、payload、accessor/resume PCのlow/high |
+| `abi.portal.route.decompose/pack` | byteのbitカウンタ化、二つのnibbleへの合成 |
+| `abi.portal.route.transport.unary/nibble.1/nibble.16` | unary／low nibble／high nibbleの搬送 |
+| `abi.portal.offset.split/prepare` | offset分解と移動量準備 |
+| `abi.portal.window.<right/left>.jump.<1/16/256>` | 各桁の移動loop全体 |
+| `abi.portal.window.exchange` | 制御laneとpayloadの交換 |
+| `abi.portal.payload.select/transfer` | 要素選択と選択後の転送 |
+| `abi.portal.resume.clear/transport/deliver/advance` | 後処理、frameへの搬送、結果格納、次のleafへの進行 |
+
+`abi.portal.request`のattributesには静的なregion、function、cells、leaf、
+accessor/resumeのencoded PCを記録する。小型化でPCの値まで小さくなる交絡を確認するために使う。
+共有routerの実際の呼出し元を動的に追跡する仕組みではない。
+
+子siteは完全な転送loopを囲み、native融合後も分解・搬送の共通親が別になるようにする。
+最適化を止めるmarkerやBF命令は追加しない。融合が処理境界を跨ぐ場合はLCAに費用を残す。
+親の残余を子に推測配賦せず、exclusive sampleを足してtotalと照合する。
+
+再現・測定は[`scripts/portal-profile/README.md`](scripts/portal-profile/README.md)を参照。
+production optimizerの抜粋、global/frame配列、production request搬送単体を使い、
+profileなしの時間測定とsample/countersを別実行する。各processは60秒で打ち切り、
+長時間のcompiler自己入力実験は含めない。sample modeのcounter未計測や、logical scanと
+RemoteTransfer内部probe費用の違いは従来の制約を維持する。
+
 ## sourceの直接Frame loweringとIR identity
 
 HIRのローカルな非ゼロwhileと単純なscalar操作は、仮想セル割当て前に直接Frame命令にする。

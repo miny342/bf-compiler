@@ -35,7 +35,8 @@
   sourceは関数名、CIRは確認済みartifact限定の明示function IDを使用する。
 - 設定入力上書き防止、phaseを跨ぐportal隣接切断、identity照合と
   固定CIR mapping検証は修正済み。開始chunk再訪はphase全体の履歴指標である。
-- BF hidden dispatch/navigation計測、実験3〜5、full selfhost時間比較は未完。
+- BF portalの詳細profileとコンパクト再現を追加済み。full phaseのhidden dispatch/navigation計測、
+  実験3〜5のABI最適化、full selfhost時間比較は未完。
 - 局所構造化のproduction比較とstage-12 selfhost機能検証は完了。
   次の候補は残るBF側費用の計測、PC配置、portal往復削減。代表phaseの実測で優先順位を決める。
   `scripts/local-structure/run.py`はdefault採用後もON/OFF比較を再現できる。
@@ -165,6 +166,18 @@ interpreter側のRemoteTransferでScan付き転送を一括化できるように
 同じregionへのアクセスでも、間のcall・alias・store・I/Oを越えて安全にまとめられるとは限らない。
 値のsnapshot、重複copy、再帰、global/frame境界を保つ。
 専用lane案ではtape増加とnavigation距離の変化も費用に含める。
+
+### 実験4のコンパクト再現と詳細profile
+
+`scripts/portal-profile/run.py`を追加。productionのstreaming optimizerを抜き出したケース、
+1/3セル・global/frame・chunk境界・stack条件・ゼロ/非ゼロpayloadのケース、
+production routerの7byte搬送をそのまま呼ぶfixtureを分けて測る。
+CLI/profile形式を変えず、要求フィールド別の分解・搬送、window交換、要素選択、resumeを細分化した。
+生成BFを変更する最適化はこの計測変更に含めない。
+
+手順と計測上の制限は[`scripts/portal-profile/README.md`](scripts/portal-profile/README.md)。
+既存のnibble搬送とRemoteTransferを維持し、後者のON/OFFを同一BF・入力で比較する。
+コンパクトケースはfull selfhostのphase比率の代わりにはならず、次の変更候補を絞るために用いる。
 
 ## 実験5：PCの3・4分割を独立評価
 

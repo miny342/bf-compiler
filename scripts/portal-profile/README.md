@@ -1,0 +1,44 @@
+# Compact portal diagnostics
+
+Uses the production ABI and stage2 streaming optimizer. It does not run the compiler on its own source or change the ABI, optimizer, or RemoteTransfer implementation.
+
+```sh
+cargo build --release -p bf-compiler -p bf-interpreter
+python3 scripts/portal-profile/run.py tmp/portal-run-01
+```
+
+The output directory must be new and under repository `tmp`. Each subprocess has a 60-second timeout; fixture BF must fit in 64 MiB. Default calibration targets two seconds for the slower RemoteTransfer setting, followed by one warmup and five measured ON/OFF pairs in alternating order. Input is capped at 16 MiB. `--seconds .2 --pairs 1` is useful for a smoke test, not for drawing performance conclusions.
+
+For a small initial selection:
+
+```sh
+python3 scripts/portal-profile/run.py tmp/portal-run-02 \
+  --cases optimizer transport-16 global-triple-full frame-triple-full
+```
+
+`--baseline-compiler PATH` optionally checks that an earlier compiler produces byte-identical compressed BF for every source fixture. It generates a separate old map and checks BF, not site IDs. The ordinary tests additionally check annotated/plain optimization equivalence, all 256 transported values, both RemoteTransfer settings, and native transfer attribution. No new public compiler/interpreter options or map schema are required.
+
+## Cases
+
+- `optimizer`: reads the current production `09_bf_optimizer.bfc`, serializer and required arithmetic helpers. Repeats eviction, ring wrap, cancellation, clear recognition, output barriers, wide moves and flush. Output is compressed, so wide logical moves do not create huge output files. The wrapper only provides input and output; it does not reimplement the optimizer.
+- `global-byte-zero/full`, `global-triple-zero/full`: dynamically store and load 16-element arrays; one-cell and three-cell values, with zero/nonzero payload. Three-cell indices include physical chunk crossings. Constant-index setup and final observation do not issue dynamic portal requests.
+- `frame-triple-full`, `global-triple-deep/wide`, `frame-triple-deep`: change region, eight extra recursive activations, or persistent frame padding. Caller sentinel values are read after returning to verify preservation.
+- `global-large`: a 32×256 array, with offsets 0, 15, 16, 255, 256, 4095, 4096, 8191. Seeds the payload chunks touched by the production base-16 jump paths. Final observation verifies that exchanged payload is restored, including cells outside the selected element.
+- `transport-16/256`: exports a small fixture through an explicitly selected ignored Rust test. It calls the same `move_global_portal_request` as production, in an initialized ABI frame. Seven controlled request bytes cover all 256 values. No dispatcher interprets these artificial bytes as PCs. Results are observed and the global prefix is cleared after every request. The suffix is frame **padding cells**, not stack depth; actual stack chunks are in `*.fixture.json`.
+- `transport-v0/v1/v15/v16/v127/v255`: the same small transport BF with constant request bytes, separating value-dependent preparation from stack traversal. These are controlled primitive measurements, not valid execution PCs.
+
+The Rust fixture exporter is test-only and adds no public API or production benchmark switch. It emits compressed BF/maps using the ordinary optimizer. Building it needs the workspace dev dependencies, just like `cargo test`.
+
+## Reading results
+
+`report.md` gives unprofiled median execute times and exclusive sample groups. `summary.json` and per-case summaries retain every measured run, grouped/individual counters, profile overhead, static request metadata (including encoded PC values), BF/map identities and sizes. Raw sample/counters reports, IR logs, exact input/expected output and build logs are retained. `manifest.json` identifies the compiler, interpreter, fixture implementation and production source files; `runner.py` preserves the script used for that run.
+
+- Performance values are from **unprofiled** runs. Sample and counters are separate diagnostic executions. Their times are available but do not establish the ON/OFF speedup.
+- Array cases check IR load/store totals against the workload. BF primitive requests are `records × 2 × value width`. The transport fixture executes one seven-byte request per record. The optimizer case has no claimed request denominator.
+- Per-request totals include initialization, input/output, fixture observation and cleanup. Use the stage counters for the cost within a specific template; do not read the whole-case average as isolated router latency.
+- Exclusive groups partition sample counts. A fused native instruction belongs to the common ancestor of its contributing sites; parent residue is reported, not redistributed. Fewer than 20 samples is marked low confidence. Sample-mode operation counters are unmeasured, not zero-cost operations.
+- `remote_transfer_loops` records recognized executions (including zero-source skips), `remote_transfer_fallbacks` records failed runtime checks. Raw/RLE instructions and scan counters describe BF semantics; they are not a measurement of the implementation's probe work. No interpreter instrumentation was added to infer the latter.
+- ON/OFF must have identical output, logical BF/RLE counts and maximum pointer. Source fixtures are also checked against IR output. Every initialized payload cell and caller sentinel is observed at the end.
+- Small fixtures change dispatch size and encoded PC values. The transport fixture controls request bytes independently to expose this difference. Production request attributes record **static origins**, not dynamic caller attribution of a shared router.
+
+These cases reproduce the production templates and buffer behavior. They do not establish the phase mix, percentage breakdown, or end-to-end speedup of `full14`. Keep interpreter settings fixed when comparing later compiler changes; compare changes independently.
