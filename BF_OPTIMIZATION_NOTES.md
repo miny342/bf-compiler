@@ -1,6 +1,6 @@
 # Brainfuck backend最適化メモ
 
-> 現在のABIはD=16のみをサポートする。以下のD=8への言及は実験当時の記録である。
+> 現在のRust版ABIはD=16のみをサポートする。以下のD=8への言及は実験当時の記録である。
 
 この文書は、source language semanticsと現行ABI contractを変更しないbackend最適化、および今後の
 候補を記録する。
@@ -8,6 +8,35 @@
 BF IR peephole最適化とcontinuation dispatcherの二段countdownは採用済みである。その他の高度な
 lowering手法は未採用であり、実装時には生成BFの長さ、実行step、追加cell数を現在のloweringと
 比較してから選ぶ。
+
+## stage2の整数幅・不要処理の整理
+
+2026-09-15: streaming BF最適化追加後の自己入力失敗`BFC_STAGE12_ERROR:GX`は、
+関数数が246から257へ増え、semanticの255関数制限を超えたことが原因だった。
+未使用の1-byte関数番号・関数カウンタを撤去し、NodeIdによる参照をそのまま使う。
+`main`の引数有無を調べるためだけのbyteカウンタも撤去し、引数listを直接検査する。
+型の24-bitサイズをreturn descriptorへ保存する箇所にはframeサイズ検査を追加した。
+従来は256/65,536 cellの戻り値が0 cellに切り捨てられ得た。
+
+不要な処理も合わせて整理した。
+
+- 未使用の`emit_repeat_256`・`emit_repeat_65536`、未参照定数、`node_field` wrapperを削除。
+- literal/input/unary/binary/callの型情報設定は自明または無処理なので呼び出しごと削除。
+  `len`の解決済みflagとその他の式の型handle保存は維持する。
+- parameterのtag/size保存をlocal登録にまとめ、余分なparameter list走査を削除。
+- fresh macro名は独立したname recordだけを確保し、不変の綴りbyteを共有する。
+- arenaのbyte幅advanceを1-cell反復から1回の加算とpage/bank carryへ変更。
+- wide値の256倍を256回の加算からbyte shiftとoverflow検査へ変更。
+- 16-bit offsetの上位byte加算を、256回ずつのlow-byte increment生成からhigh-byteへの直接加算へ変更。
+- 新規continuationへの切替ではinstruction tailを空に設定し、既存branch末尾のgoto接続時には
+  不要なinstruction listの末尾走査を行わない。
+- 旧parser専用の`token_is_main`をtest専用moduleへ移動。CIR entryの結合対象から、到達不能な
+  BF primitive・optimizer・serializer・ABI backendとその出力状態を除外する。
+
+stage2のframeは16-cell header + 可変長dataの独自方式で、RustのD=16 chunk ABIとは異なる。
+古いD=8切替はstage2に存在しない。必要なbuffer/slot/portal制限は残す。
+301関数の小さな入力、16-bit加算、overflowを検証するscriptは
+`scripts/verify-stage2-limits.py`。長時間のcompiler自己入力での速度・完走は未測定。
 
 ## D=16 portal offset の直接 nibble 分解
 
@@ -246,6 +275,43 @@ jq -r '
 `exact`はsite境界ごとのclock readを行うため、最初のfull self-host比較には使わない。
 
 ## 現在のpeephole最適化と基準値
+
+### stage2のstreaming BF最適化
+
+2026-09-15: `selfhost/stage2/compiler/09_bf_optimizer.bfc`に、最終BF出力前の
+固定長peephole bufferを追加した。`bf-compiler/src/bf_optimizer.rs`の次の規則を、
+保持している末尾の範囲で適用する。通常BFとBFCRLEの両entryで共通に使う。
+
+- 隣接するpointer移動の統合・相殺、移動量0の除去。
+- 隣接する加減算のmod 256での統合・相殺、加算量0の除去。文字列化では128以下を
+  `+`、129以上を短い`-` runにする。
+- 本体が単一の奇数加算へ縮約されたloopを`[-]`へ標準化する。偶数加算loopや空loopは
+  停止性が違うため残す。
+- clear直前の加算の除去と、連続clearの重複除去。
+- 入力直前の加算・clearの除去（repositoryの入力はEOF時も0で上書きする）。
+
+bufferは16 tokenのringで、kind 16 cell、24-bit count 48 cell、head/length 2 cellの
+計66 cellを使う。BF IR全体やloop本体全体は保存しない。24-bitの移動runも1 tokenとして
+保持し、合算が24-bitを超える場合は先にflushする。I/Oとcompile unit終端でもflushする。
+serializationは`09_bf_serialization.bfc`へ分離し、最適化後のrunだけを通常BFまたは
+BFCRLEへ書く。codegen primitiveを個別に呼ぶtest/harnessも、結果の観測前に
+`flush_bf_optimizer()`、新しい出力の開始前に`reset_bf_optimizer()`を呼ぶ。
+
+**見送る範囲:** Rustのpassに大域的なdata-flow解析などの別規則はない。ただしRustと同じ
+縮約結果を常に得るには、後続命令で相殺されるかもしれない任意長の末尾やloopを保持する
+必要がある。例えば`>+`を多数並べ、その逆順に`-<`を並べると、Rustでは全体が消える。
+stage2は16 tokenを超えた古い命令を逐次出力するため、その出力済み範囲まで遡る相殺・
+上書き除去はしない。同様に、長いloop本体の縮約後に初めて判明するclear化も、開始括弧や
+必要な本体がbufferに残っていなければ行わない。これは最適化の取りこぼしだけであり、
+生成programの意味を変えない。移動相殺のtape境界に関する前提はRustのpassと同じである。
+
+`scripts/verify-stage2-bf-optimizer.py`（`--compiler target/release/bfc
+--interpreter target/release/bf-interpreter`）で、全256加算値、奇数/偶数loop、入出力境界、nested loop、
+buffer追い出し、24-bit移動の桁境界・overflowを含む577 caseをIR/BF実行と両出力形式で
+照合する。加えて50 programの最適化前後を、EOFを含む入力で実行比較する。
+`hello.bfc`の生成BFは848 → 512 byteとなり、実行結果は同じ`A!`と改行だった。
+
+### Rust backendの基準値
 
 `compile`と`compile_continuations`は、未最適化BF IRへ`optimize_bf`を適用してから文字列化する。
 未加工のIRは`lower`または`lower_continuations`で取得できる。次のコマンドは標準入力をprogramへ

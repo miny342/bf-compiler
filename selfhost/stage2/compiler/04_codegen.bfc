@@ -1,74 +1,54 @@
 // target Brainfuckのdata pointer位置を追跡しながらprimitiveを出力する。
 
+cell target_position;
+
 void emit_move_to(cell destination) {
-    if (COMPRESSED_BF_OUTPUT) {
-        if (target_position < destination) {
-            emit_repeat_character('>', destination - target_position);
-        }
-        if (target_position > destination) {
-            emit_repeat_character('<', target_position - destination);
-        }
-        target_position = destination;
-        return;
+    if (target_position < destination) {
+        emit_repeat_character('>', destination - target_position);
     }
-    while (target_position < destination) {
-        compiler_output!('>');
-        target_position += 1;
+    if (target_position > destination) {
+        emit_repeat_character('<', target_position - destination);
     }
-    while (target_position > destination) {
-        compiler_output!('<');
-        target_position -= 1;
-    }
+    target_position = destination;
 }
 
 void emit_clear(cell destination) {
     emit_move_to(destination);
-    compiler_output!('[');
-    compiler_output!('-');
-    compiler_output!(']');
+    emit_bf_character('[');
+    emit_bf_character('-');
+    emit_bf_character(']');
 }
 
 void emit_constant(cell destination, cell value) {
     emit_clear(destination);
-    emit_move_to(destination);
-    if (value <= 128) {
-        while (value != 0) {
-            compiler_output!('+');
-            value -= 1;
-        }
-    } else {
-        while (value != 0) {
-            compiler_output!('-');
-            value += 1;
-        }
-    }
+    emit_repeat_character('+', value);
 }
 
 void emit_input(cell destination) {
     emit_move_to(destination);
-    compiler_output!(',');
+    emit_bf_character(',');
 }
 
 void emit_transfer(cell source, cell destination, cell subtract) {
     emit_move_to(source);
-    compiler_output!('[');
-    compiler_output!('-');
+    emit_bf_character('[');
+    emit_bf_character('-');
     emit_move_to(destination);
     if (subtract) {
-        compiler_output!('-');
+        emit_bf_character('-');
     } else {
-        compiler_output!('+');
+        emit_bf_character('+');
     }
     emit_move_to(source);
-    compiler_output!(']');
+    emit_bf_character(']');
 }
 
 void emit_loop_open(cell condition) {
     emit_move_to(condition);
-    compiler_output!('[');
+    emit_bf_character('[');
 }
 
 void emit_loop_close(cell condition) {
     emit_move_to(condition);
-    compiler_output!(']');
+    emit_bf_character(']');
 }

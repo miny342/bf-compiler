@@ -12,12 +12,6 @@ cell token_is_void() {
         && token_text[2] == 'i' && token_text[3] == 'd';
 }
 
-cell token_is_main() {
-    return token_length == 4
-        && token_text[0] == 'm' && token_text[1] == 'a'
-        && token_text[2] == 'i' && token_text[3] == 'n';
-}
-
 cell token_is_input() {
     return token_length == 5
         && token_text[0] == 'i' && token_text[1] == 'n'

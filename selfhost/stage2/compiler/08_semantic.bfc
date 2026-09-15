@@ -11,7 +11,6 @@ cell[16] semantic_scope_base;
 cell[16] semantic_scope_slot_base;
 NodeId semantic_current_function;
 NodeId main_function;
-cell function_count;
 WideValue stage7_static_cells;
 
 const cell RESOLVED_LOCAL = 0;
@@ -24,11 +23,9 @@ const cell RESOLVED_CONSTANT = 5;
 const cell DYNAMIC_PROJECTION_INDEX = 1;
 const cell DYNAMIC_PROJECTION_CONSTANT = 2;
 
-const cell TYPE_STATE_UNVISITED = 0;
 const cell TYPE_STATE_VISITING = 1;
 const cell TYPE_STATE_DONE = 2;
 
-const cell CONSTANT_STATE_UNVISITED = 0;
 const cell CONSTANT_STATE_VISITING = 1;
 const cell CONSTANT_STATE_DONE = 2;
 
@@ -138,28 +135,6 @@ NodeId expression_type(NodeId expression) {
         return node_name(node_c(function));
     }
     return node_name(expression);
-}
-
-void set_expression_type(NodeId expression, NodeId ty) {
-    cell kind = node_kind(expression);
-    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_INPUT_EXPRESSION
-        || kind == NODE_UNARY_EXPRESSION || kind == NODE_BINARY_EXPRESSION) {
-        if (!node_equals(ty, cell_type)) {
-            fail('E', 'F');
-        }
-        return;
-    }
-    if (kind == NODE_LEN_EXPRESSION) {
-        if (!node_equals(ty, cell_type)) {
-            fail('E', 'G');
-        }
-        node_set_tag(expression, 1);
-        return;
-    }
-    if (kind == NODE_CALL_EXPRESSION) {
-        return;
-    }
-    node_set_name(expression, ty);
 }
 
 cell type_is_aggregate(NodeId ty) {
@@ -591,7 +566,6 @@ NodeId find_struct_field(NodeId ty, NodeId name) {
 NodeId analyze_ast_expression(NodeId expression) {
     cell kind = node_kind(expression);
     if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_INPUT_EXPRESSION) {
-        set_expression_type(expression, cell_type);
         return cell_type;
     }
     if (kind == NODE_STRING_EXPRESSION) {
@@ -604,7 +578,7 @@ NodeId analyze_ast_expression(NodeId expression) {
             fail('F', 'K');
         }
         node_set_value(expression, arena_read(operand_type, FIELD_C_PAGE));
-        set_expression_type(expression, cell_type);
+        node_set_tag(expression, 1);
         return cell_type;
     }
     if (kind == NODE_ENUM_EXPRESSION) {
@@ -621,7 +595,7 @@ NodeId analyze_ast_expression(NodeId expression) {
             fail('F', 'M');
         }
         node_set_value(expression, node_value(variant));
-        set_expression_type(expression, ty);
+        node_set_name(expression, ty);
         return ty;
     }
     if (kind == NODE_NAME_EXPRESSION) {
@@ -643,7 +617,7 @@ NodeId analyze_ast_expression(NodeId expression) {
             if (!node_is_null(constant)) {
                 node_set_tag(expression, RESOLVED_CONSTANT);
                 node_set_value(expression, resolve_constant(constant));
-                set_expression_type(expression, cell_type);
+                node_set_name(expression, cell_type);
                 return cell_type;
             }
             NodeId global = find_global_by_name_or_null(node_name(expression));
@@ -654,7 +628,7 @@ NodeId analyze_ast_expression(NodeId expression) {
             set_resolved_address(expression, global_base(global));
             ty = node_b(global);
         }
-        set_expression_type(expression, ty);
+        node_set_name(expression, ty);
         return ty;
     }
     if (kind == NODE_INDEX_EXPRESSION) {
@@ -714,7 +688,7 @@ NodeId analyze_ast_expression(NodeId expression) {
             set_resolved_address(expression, resolved_address(base_expression));
             set_projection(expression, element_cells, DYNAMIC_PROJECTION_INDEX);
         }
-        set_expression_type(expression, element_type);
+        node_set_name(expression, element_type);
         return element_type;
     }
     if (kind == NODE_FIELD_EXPRESSION) {
@@ -740,14 +714,13 @@ NodeId analyze_ast_expression(NodeId expression) {
             set_resolved_address(expression, offset);
         }
         NodeId ty = node_a(field);
-        set_expression_type(expression, ty);
+        node_set_name(expression, ty);
         return ty;
     }
     if (kind == NODE_UNARY_EXPRESSION) {
         if (!types_equal(analyze_ast_expression(node_a(expression)), cell_type)) {
             fail('F', 'U');
         }
-        set_expression_type(expression, cell_type);
         return cell_type;
     }
     if (kind == NODE_BINARY_EXPRESSION) {
@@ -766,7 +739,6 @@ NodeId analyze_ast_expression(NodeId expression) {
             || !types_equal(right, cell_type)) {
             fail('F', 'W');
         }
-        set_expression_type(expression, cell_type);
         return cell_type;
     }
     if (kind == NODE_CALL_EXPRESSION) {
@@ -787,9 +759,7 @@ NodeId analyze_ast_expression(NodeId expression) {
         if (!node_is_null(argument) || !node_is_null(parameter)) {
             fail('F', 'Z');
         }
-        NodeId ty = node_name(node_c(function));
-        set_expression_type(expression, ty);
-        return ty;
+        return node_name(node_c(function));
     }
     fail('G', 'A');
     return void_type;
@@ -984,7 +954,6 @@ void collect_file_declarations() {
         global = node_next(global);
     }
 
-    function_count = 0;
     main_function = null_node();
     NodeId function = first_function;
     while (!node_is_null(function)) {
@@ -1010,28 +979,18 @@ void collect_file_declarations() {
             }
             ty = node_next(ty);
         }
-        if (function_count == 0xff) {
-            fail('G', 'X');
-        }
-        node_set_value(function, function_count);
-        function_count += 1;
-
         NodeId return_type = node_c(function);
+        // Return values must fit the flat frame/outbox before storing a byte size.
+        WideValue return_cells = type_cells(return_type);
+        if (return_cells.mid != 0 || return_cells.high != 0
+            || return_cells.low > 0xef) {
+            fail('I', 'D');
+        }
         node_set_tag(function, parser_type_class(return_type));
         NodeId descriptor = allocate_node(NODE_FUNCTION_DESCRIPTOR);
         node_set_name(descriptor, return_type);
         node_set_c(function, descriptor);
-        arena_write(descriptor, FIELD_B_PAGE, node_value(return_type));
-        NodeId parameter = node_a(function);
-        cell parameter_count;
-        while (!node_is_null(parameter)) {
-            NodeId parameter_type = node_b(parameter);
-            node_set_tag(parameter, type_is_aggregate(parameter_type));
-            node_set_value(parameter, node_value(parameter_type));
-            parameter_count += 1;
-            parameter = node_next(parameter);
-        }
-        node_set_tag(descriptor, parameter_count);
+        arena_write(descriptor, FIELD_B_PAGE, return_cells.low);
 
         NodeId name = node_name(function);
         if (node_value(name) == 4) {
@@ -1056,7 +1015,7 @@ void collect_file_declarations() {
     }
     if (node_is_null(main_function)
         || !types_equal(node_name(node_c(main_function)), void_type)
-        || node_tag(node_c(main_function)) != 0) {
+        || !node_is_null(node_a(main_function))) {
         fail('G', 'Z');
     }
 }
@@ -1085,8 +1044,11 @@ void analyze_ast_program() {
         enter_semantic_scope();
         NodeId parameter = node_a(function);
         while (!node_is_null(parameter)) {
+            NodeId parameter_type = node_b(parameter);
             arena_write(parameter, FIELD_C_PAGE,
-                add_semantic_local(node_name(parameter), node_b(parameter)));
+                add_semantic_local(node_name(parameter), parameter_type));
+            node_set_tag(parameter, type_is_aggregate(parameter_type));
+            node_set_value(parameter, node_value(parameter_type));
             parameter = node_next(parameter);
         }
         cell returns = analyze_ast_statement(node_b(function));

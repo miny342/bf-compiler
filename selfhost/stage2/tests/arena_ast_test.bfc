@@ -18,6 +18,12 @@ void test_wide_arithmetic() {
     WideValue bank = wide_multiply_length(page, 0xff, 0);
     expect_test(page.low == 0 && page.mid == 1 && page.high == 0
         && bank.low == 0 && bank.mid == 0xff && bank.high == 0, '/');
+    WideValue largest;
+    largest.low = 0xff;
+    largest.mid = 0xff;
+    largest = wide_multiply_length(largest, 0, 1);
+    expect_test(largest.low == 0 && largest.mid == 0xff
+        && largest.high == 0xff, '/');
 }
 
 void test_compact_node_sizes() {
@@ -71,7 +77,7 @@ void test_arena_page_boundary() {
         index += 1;
     }
     expect_test(node.page > 0, 'h');
-    NodeId field = node_field(node, FIELD_NEXT_SLOT);
+    NodeId field = arena_advance(node, FIELD_NEXT_SLOT);
     expect_test(field.page >= node.page, 'i');
 
     NodeId boundary;
@@ -81,6 +87,16 @@ void test_arena_page_boundary() {
     arena_cell_write(next_bank, 'B');
     expect_test(next_bank.bank == 1 && next_bank.page == 0
         && next_bank.slot == 0 && arena_cell_read(next_bank) == 'B', '=');
+    boundary.slot = 1;
+    next_bank = arena_advance(boundary, 0xff);
+    expect_test(next_bank.bank == 1 && next_bank.page == 0
+        && next_bank.slot == 0, '=');
+    boundary.bank = ARENA_LAST_BANK;
+    boundary.slot = 0;
+    next_bank = arena_advance(boundary, 0xff);
+    expect_test(next_bank.bank == ARENA_LAST_BANK
+        && next_bank.page == ARENA_LAST_PAGE && next_bank.slot == 0xff, '=');
+    expect_test(node_equals(arena_advance(next_bank, 0), next_bank), '=');
 }
 
 void test_continuation_dispatch_ids() {
@@ -129,7 +145,7 @@ void test_ast_parser() {
     analyze_ast_program();
     expect_test(node_equals(node_b(call), second), 's');
     expect_test(node_value(node_a(first)) == 1
-        && node_tag(node_c(first)) == 1, 't');
+        && node_is_null(node_next(node_a(first))), 't');
     expect_test(node_value(node_c(first)) == 1
         && node_value(node_c(main_function)) == 1, 'u');
 

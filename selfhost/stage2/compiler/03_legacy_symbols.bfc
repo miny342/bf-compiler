@@ -1,5 +1,11 @@
 // 内部回帰testだけで使う旧第4段階scalar symbol table。
 
+cell token_is_main() {
+    return token_length == 4
+        && token_text[0] == 'm' && token_text[1] == 'a'
+        && token_text[2] == 'i' && token_text[3] == 'n';
+}
+
 cell token_matches_symbol(cell symbol) {
     if (token_length != symbol_length[symbol]) {
         return 0;

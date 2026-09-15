@@ -1,6 +1,5 @@
 // typed ASTから第12段階Continuation IRを構築する。
 
-const cell TERM_NONE = 0;
 const cell TERM_GOTO = 1;
 const cell TERM_BRANCH = 2;
 const cell TERM_CALL = 3;
@@ -67,6 +66,10 @@ NodeId next_continuation_dispatch_id(NodeId previous) {
     if (result.slot == 0xff) {
         result.slot = 0;
         result.page += 1;
+        if (result.page == 0) {
+            // Zero is reserved; never wrap a dispatch ID back to it.
+            fail('I', 'C');
+        }
     } else {
         result.slot += 1;
     }
@@ -93,14 +96,10 @@ NodeId new_continuation() {
     return result;
 }
 
-void select_continuation(NodeId continuation) {
+// Instruction emission only switches to freshly allocated continuations.
+void select_new_continuation(NodeId continuation) {
     lowering_current_continuation = continuation;
-    NodeId instruction = node_a(continuation);
-    lowering_instruction_tail = instruction;
-    while (!node_is_null(lowering_instruction_tail)
-        && !node_is_null(node_next(lowering_instruction_tail))) {
-        lowering_instruction_tail = node_next(lowering_instruction_tail);
-    }
+    lowering_instruction_tail = null_node();
 }
 
 void append_ir_instruction(cell kind, cell destination, cell source) {
@@ -301,7 +300,7 @@ void lower_ast_call(NodeId expression) {
     node_set_name(lowering_current_continuation, function);
     node_set_b(lowering_current_continuation, resume);
     node_set_c(lowering_current_continuation, first_argument);
-    select_continuation(resume);
+    select_new_continuation(resume);
     lowering_temp_next = temporary_base;
 }
 
@@ -592,7 +591,7 @@ void lower_ast_expression(NodeId expression, cell destination) {
                 finish_branch(branch_condition, join, right);
             }
             release_lowering_temp(branch_condition);
-            select_continuation(right);
+            select_new_continuation(right);
             if (binary_has_immediate(expression)) {
                 append_ir_instruction(
                     IR_SET,
@@ -604,7 +603,7 @@ void lower_ast_expression(NodeId expression, cell destination) {
             }
             append_ir_instruction(IR_BOOLEANIZE, destination, 0);
             finish_goto(join);
-            select_continuation(join);
+            select_new_continuation(join);
             return;
         }
 
@@ -833,11 +832,11 @@ void lower_ast_statement(NodeId statement) {
         finish_branch(condition, then_continuation, else_continuation);
         release_lowering_temp(condition);
 
-        select_continuation(then_continuation);
+        select_new_continuation(then_continuation);
         lower_ast_statement(node_b(statement));
         NodeId then_end = lowering_current_continuation;
 
-        select_continuation(else_continuation);
+        select_new_continuation(else_continuation);
         if (!node_is_null(node_c(statement))) {
             lower_ast_statement(node_c(statement));
         }
@@ -848,14 +847,14 @@ void lower_ast_statement(NodeId statement) {
         } else {
             NodeId join = new_continuation();
             if (!node_is_null(then_end)) {
-                select_continuation(then_end);
+                lowering_current_continuation = then_end;
                 finish_goto(join);
             }
             if (!node_is_null(else_end)) {
-                select_continuation(else_end);
+                lowering_current_continuation = else_end;
                 finish_goto(join);
             }
-            select_continuation(join);
+            select_new_continuation(join);
         }
         return;
     }
@@ -865,19 +864,19 @@ void lower_ast_statement(NodeId statement) {
         NodeId exit_continuation = new_continuation();
         finish_goto(condition_continuation);
 
-        select_continuation(condition_continuation);
+        select_new_continuation(condition_continuation);
         cell condition = allocate_lowering_temp();
         lower_ast_expression(node_a(statement), condition);
         append_ir_instruction(IR_BOOLEANIZE, condition, 0);
         finish_branch(condition, body_continuation, exit_continuation);
         release_lowering_temp(condition);
 
-        select_continuation(body_continuation);
+        select_new_continuation(body_continuation);
         lower_ast_statement(node_b(statement));
         if (!node_is_null(lowering_current_continuation)) {
             finish_goto(condition_continuation);
         }
-        select_continuation(exit_continuation);
+        select_new_continuation(exit_continuation);
         return;
     }
     fail('H', 'K');
@@ -939,7 +938,7 @@ void lower_ast_program() {
         lowering_temp_max = lowering_temp_next;
         NodeId entry = new_continuation();
         node_set_a(descriptor, entry);
-        select_continuation(entry);
+        select_new_continuation(entry);
         if (node_equals(function, main_function)) {
             lower_global_initializers();
         }

@@ -197,18 +197,9 @@ void validate_macro_declarations() {
 
 NodeId fresh_macro_name(NodeId original) {
     NodeId fresh = allocate_node(NODE_NAME_RECORD);
-    cell length = node_value(original);
-    node_set_value(fresh, length);
-    NodeId source = node_a(original);
-    NodeId destination = allocate_cells(length);
-    node_set_a(fresh, destination);
-    cell index;
-    while (index < length) {
-        arena_cell_write(destination, arena_cell_read(source));
-        source = arena_advance(source, 1);
-        destination = arena_advance(destination, 1);
-        index += 1;
-    }
+    // Hygiene depends on the fresh record's identity; spelling bytes are immutable.
+    node_set_value(fresh, node_value(original));
+    node_set_a(fresh, node_a(original));
     return fresh;
 }
 

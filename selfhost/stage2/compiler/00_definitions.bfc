@@ -48,4 +48,3 @@ cell token_string_is_256;
 cell[256] token_string;
 
 // Position of the data pointer in the Brainfuck program being emitted.
-cell target_position;

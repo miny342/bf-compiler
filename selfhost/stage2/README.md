@@ -52,6 +52,8 @@ cargo run --release -p bf-compiler -- --unlimited-tape --compressed-bf \
 展開せずrunの回数を比較し、巨大な通常BFをSSDへ保存しない。
 `00_legacy_stage4.bfc`、`03_legacy_symbols.bfc`、`04_legacy_codegen.bfc`、`05_parser.bfc`はproductionの
 到達可能性に関与しないため除外する。`test` entryだけは旧回帰を維持するためこれらも連結する。
+`cir` entryではBF primitive・optimizer・serializer・ABI backendも除外し、使わないBF出力処理を
+コンパイラ自身の入力に含めない。
 
 ## BFCで記述した内部テスト
 
@@ -111,9 +113,9 @@ production実装を変えずに次をBF上で検証できる。
 - `if`、`else`、`while`
 - ASCII空白、行コメント、blockコメント
 
-production経路には、identifier 64 byte、function 255個、block nesting 16段、uniform
-frameのlocal/temporary 239 cell、16-bit dynamic aggregate offset、packed AST/IR arena
-261,120 cellという明示的な制限がある。型layout、struct field offset、static globalのbase/sizeは
+production経路には、identifier 64 byte、block nesting 16段、uniform
+frameのlocal/temporary/outbox合計239 cell、16-bit dynamic aggregate offset、packed AST/IR arena
+1,044,480 cell（先頭1 cellはnull用）という明示的な制限がある。型layout、struct field offset、static globalのbase/sizeは
 little-endian 24-bit値で保持し、配列長256と`cell[255][256]`のようなlarge globalを受理する。
 streaming parserは、function bodyの
 local宣言を開始するnominal型定義がそのfunctionより前に現れることを要求する。
@@ -128,13 +130,40 @@ frameへmaterializeできる239 cell以下の値だけに対応する。旧第4�
 `rg -n "fail\('A', 'A'\)" selfhost/stage2/compiler`で検索できる。各`fail`呼び出しには
 固有の`fail('A', 'A')`形式のIDを割り当て、既存IDは行の移動やcallの追加で振り直さない。
 新しい箇所には未使用の組を使う（`AA`〜`ZZ`の676通り）。削除したIDも過去のログのために
-再利用しない。初回は`AA`〜`IA`の209組を使用しており、次の追加は`IB`から始める。
+再利用しない。初回は`AA`〜`IA`の209組を使用した。`EF`・`EG`・`GX`は処理削除に伴い廃止し、
+`IB`は256倍の24-bit overflow、`IC`はdispatch ID overflow、`ID`は戻り値サイズ超過に使用する。
+次の追加は`IE`から始める。
 既存の`BFC_STAGE12_ERROR`によるエラー検出はそのまま利用できる。
 
 Continuationにはarena上の`NodeId`とは別に1始まりの密な16-bit dispatch IDを割り当てる。
 ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的countdownでdispatchし、
 caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
 dispatch cycle末までは`Pc`を0に保つ。
+
+### 整数幅とABIの制限
+
+関数数の255個制限と未使用の1-byte関数番号は撤去した。関数参照は24-bit `NodeId`で保持し、
+BFでは16-bit continuation ID、CIRでは別途採番する16-bit関数IDへ変換する。
+`main`の引数検査は引数listが空かを直接調べ、件数のbyte wrapには依存しない。
+
+| 対象 | 現在の表現・残す制限 |
+| --- | --- |
+| BF frame | 管理領域16 cell + local/temporary/outbox。幅とslotが1 byteなので合計255 cellまで |
+| BF dispatch ID | 1〜65,535。0は予約し、overflowを拒否する |
+| global base・型サイズ・field offset | 24 bit。加算・乗算のoverflowを拒否する |
+| 動的projection | offsetとportalが16 bit。BF portalの領域サイズは1〜65,535 cell |
+| local・引数・aggregate return | frameにmaterializeするためbyteサイズ。戻り値の上位byte切り捨てを禁止 |
+| lexer・scope・macro | identifier 64 byte、配列次元/semantic scope/macro展開16段、macro scope32段、展開中のmacro引数64個。固定長bufferに対応するチェックを維持 |
+
+stage2のBF backendはRust側のD=16 chunk ABIとは別方式であり、D=8/D=16切替は持たない。
+`FRAME_DATA_BASE = 16`は管理領域の幅で、frame全体を16 cellに固定する指定ではない。
+`--unlimited-tape`はこれらstage2内の表現幅や固定長bufferを拡張しない。
+現方式のframe/offset上限を広げるには、チェックの削除だけでなくIRとcodegenの表現変更が必要になる。
+
+最終BF出力は16 tokenの固定長bufferでpeephole最適化する。隣接する移動・加算の統合と相殺、
+奇数加算loopの`[-]`への標準化、clearや入力で上書きされる更新の除去を、通常BFと圧縮BFに
+共通で適用する。BF IR全体は保持せず、出力済みの範囲へ遡る縮約は行わない。詳細と制限は
+[`BF_OPTIMIZATION_NOTES.md`](../../BF_OPTIMIZATION_NOTES.md#stage2のstreaming-bf最適化)を参照。
 
 arena recordは`next`と頻出fieldを前方へ置いた4〜20 cellのkind別layoutを使用する。
 Continuation、global、wide addressを保持するname/index/field expressionは20 cellである。
@@ -158,7 +187,14 @@ repository rootで次を実行する。
 
 ```console
 scripts/verify-stage2-selfhost.sh
+python3 scripts/verify-stage2-bf-optimizer.py --compiler target/release/bfc \
+  --interpreter target/release/bf-interpreter
+python3 scripts/verify-stage2-limits.py --compiler target/release/bfc \
+  --interpreter target/release/bf-interpreter
 ```
+
+`verify-stage2-limits.py`は301関数の小さな入力を通常BF・圧縮BF・CIR経路でコンパイルして実行し、
+255/256境界のcall/return、サイズ切り捨て拒否、arena・算術境界を検証する。自己入力実験は行わない。
 
 診断だけの短い回帰検証は次で実行する。全call siteのID重複・引数漏れと、lexer・semantic・
 内部算術helperのエラー表示および停止を確認する。compiler自身を入力する実験は行わない。

@@ -105,12 +105,11 @@ WideValue wide_multiply_length(
     WideValue result;
     cell index;
     if (length_is_256) {
-        result = wide_add(result, value);
-        index = 1;
-        while (index != 0) {
-            result = wide_add(result, value);
-            index += 1;
+        if (value.high != 0) {
+            fail('I', 'B');
         }
+        result.mid = value.low;
+        result.high = value.mid;
     } else {
         while (index < length) {
             result = wide_add(result, value);
@@ -120,7 +119,6 @@ WideValue wide_multiply_length(
     return result;
 }
 
-const cell NODE_NULL = 0;
 const cell NODE_NAME_RECORD = 1;
 const cell NODE_FUNCTION = 2;
 const cell NODE_PARAMETER = 3;
@@ -215,38 +213,30 @@ cell node_equals(NodeId left, NodeId right) {
 }
 
 NodeId arena_advance(NodeId position, cell amount) {
-    while (amount != 0) {
-        if (position.bank == ARENA_LAST_BANK
-            && position.page == ARENA_LAST_PAGE && position.slot == 0xff) {
-            fail('B', 'P');
-        }
-        if (position.slot == 0xff) {
-            position.slot = 0;
-            if (position.page == ARENA_LAST_PAGE) {
-                position.page = 0;
-                position.bank += 1;
-            } else {
-                position.page += 1;
+    // A byte-sized advance can cross at most one page boundary.
+    cell slot = position.slot + amount;
+    if (slot < position.slot) {
+        if (position.page == ARENA_LAST_PAGE) {
+            if (position.bank == ARENA_LAST_BANK) {
+                fail('B', 'P');
             }
+            position.page = 0;
+            position.bank += 1;
         } else {
-            position.slot += 1;
+            position.page += 1;
         }
-        amount -= 1;
     }
+    position.slot = slot;
     return position;
 }
 
-NodeId node_field(NodeId id, cell field) {
-    return arena_advance(id, field);
-}
-
 cell arena_read(NodeId id, cell field) {
-    NodeId position = node_field(id, field);
+    NodeId position = arena_advance(id, field);
     return arena_cell_read(position);
 }
 
 void arena_write(NodeId id, cell field, cell value) {
-    NodeId position = node_field(id, field);
+    NodeId position = arena_advance(id, field);
     arena_cell_write(position, value);
 }
 
