@@ -31,11 +31,12 @@ mod semantic;
 mod static_layout;
 
 pub use abi_codegen::{
-    AbiCodegenError, CompiledProfileArtifact, ProfileGranularity, compile_continuations,
-    compile_continuations_unbounded, compile_continuations_unbounded_with_profile,
-    compile_continuations_with_profile, lower_continuations, lower_continuations_unbounded,
-    lower_continuations_unbounded_with_profile, lower_continuations_with_config,
-    lower_continuations_with_profile,
+    AbiCodegenError, AbiCodegenOptions, CompiledProfileArtifact, ProfileGranularity,
+    compile_continuations, compile_continuations_unbounded,
+    compile_continuations_unbounded_with_profile, compile_continuations_with_profile,
+    lower_continuations, lower_continuations_unbounded, lower_continuations_unbounded_with_profile,
+    lower_continuations_with_codegen_options, lower_continuations_with_config,
+    lower_continuations_with_profile, lower_continuations_with_profile_and_codegen_options,
 };
 pub use bf_ir::{
     AnnotatedBfInstruction, AnnotatedBfOperation, AnnotatedBfProgram, BfInstruction, BfProgram,

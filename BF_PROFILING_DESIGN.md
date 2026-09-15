@@ -65,6 +65,12 @@ profilingなしの実行時間・parse時間・全体時間を分け、全runの
 | `abi.portal.payload.select/transfer` | 要素選択と選択後の転送 |
 | `abi.portal.resume.clear/transport/deliver/advance` | 後処理、frameへの搬送、結果格納、次のleafへの進行 |
 
+2026-09-16からRust backendのbyte搬送はunaryを既定とし、
+`--enable-nibble-transfer`で従来のnibble搬送を選ぶ。
+`route.decompose/pack`と`route.transport.nibble.*`は有効時だけ現れる。
+`offset.split`とwindowのbase-16移動は別処理であり、常に維持する。
+生成BFが変わるため、切り替え時はBFとmapをセットで再生成する。
+
 `abi.portal.request`のattributesには静的なregion、function、cells、leaf、
 accessor/resumeのencoded PCを記録する。小型化でPCの値まで小さくなる交絡を確認するために使う。
 共有routerの実際の呼出し元を動的に追跡する仕組みではない。

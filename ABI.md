@@ -227,6 +227,25 @@ while current_flag != 0:
 static globalへアクセスするhelperは、原則として`F`で開始し、anchor経由でglobalへ
 移動し、同じ`F`へ戻る。
 
+### Frame/global間のbyte搬送の生成方式
+
+Rust backendは既定でunary搬送を生成する。interpreterのRemoteTransferは
+Scanを含む転送loopを一括実行するため、byteの分解と転送loopの本数を減らせる。
+`bfc --enable-nibble-transfer`で従来の方式を選択できる。
+global scalarからframeへのcopy、およびglobal portal要求のoffset/accessor/resumeの
+low byteを二つのnibbleへ分解し、値に依存するstack往復を最大30回に抑える。
+他の要求byteは従来通りunaryのままとする。
+RemoteTransferのない実行系でBF命令数を抑えるための選択肢であり、
+実行時間の優劣は値と移動距離に依存する。
+
+libraryでは`AbiCodegenOptions::nibble_transfer`で指定し、
+`lower_continuations_with_codegen_options`または
+`lower_continuations_with_profile_and_codegen_options`へ渡す。
+既存のoptionsなしAPIもunaryを既定とする。
+source/CIR、通常/圧縮BF、profile付き出力で共通の指定である。
+frame/static配置とscratch予約、offset分解、windowのbase-16移動は変更しない。
+stage2のBFC製backendの設定ではない。
+
 ## Function frame
 
 各関数について、compilerは次を含む`FrameDescriptor`を作る。

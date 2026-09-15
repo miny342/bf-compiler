@@ -28,6 +28,45 @@ pub enum ProfileGranularity {
     Source,
 }
 
+/// BF backend choices independent of source/CIR lowering and ABI geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AbiCodegenOptions {
+    /// Skip the standard tape capacity check during code generation.
+    pub unlimited_tape: bool,
+    /// Bound byte-wise frame/global crossings using two nibble counters.
+    /// Off by default: RemoteTransfer can execute unary loops directly.
+    /// This does not change offset decomposition or portal window jumps.
+    pub nibble_transfer: bool,
+}
+
+/// Lower BF with explicit backend options, without profiling metadata.
+pub fn lower_continuations_with_codegen_options(
+    program: &ContinuationProgram,
+    options: AbiCodegenOptions,
+) -> Result<BfProgram, AbiCodegenError> {
+    Ok(lower_continuations_with_profile_and_codegen_options(
+        program,
+        ProfileGranularity::Abi,
+        options,
+    )?
+    .into_plain())
+}
+
+/// Lower annotated BF using the same backend options as ordinary output.
+pub fn lower_continuations_with_profile_and_codegen_options(
+    program: &ContinuationProgram,
+    granularity: ProfileGranularity,
+    options: AbiCodegenOptions,
+) -> Result<AnnotatedBfProgram, AbiCodegenError> {
+    lower_continuations_annotated_with_options(
+        program,
+        AbiConfig::default(),
+        !options.unlimited_tape,
+        granularity,
+        options.nibble_transfer,
+    )
+}
+
 /// A normal BF artifact plus its sidecar profile map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledProfileArtifact {
@@ -83,7 +122,13 @@ pub fn lower_continuations_with_profile(
     program: &ContinuationProgram,
     granularity: ProfileGranularity,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
-    lower_continuations_annotated_with_options(program, AbiConfig::default(), true, granularity)
+    lower_continuations_annotated_with_options(
+        program,
+        AbiConfig::default(),
+        true,
+        granularity,
+        false,
+    )
 }
 
 /// Lower continuation IR to provenance-carrying BF IR without the standard
@@ -92,7 +137,13 @@ pub fn lower_continuations_unbounded_with_profile(
     program: &ContinuationProgram,
     granularity: ProfileGranularity,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
-    lower_continuations_annotated_with_options(program, AbiConfig::default(), false, granularity)
+    lower_continuations_annotated_with_options(
+        program,
+        AbiConfig::default(),
+        false,
+        granularity,
+        false,
+    )
 }
 
 /// Lower continuation IR without enforcing the standard 30,000-cell tape.
@@ -120,6 +171,7 @@ fn lower_continuations_with_options(
         config,
         check_capacity,
         ProfileGranularity::Abi,
+        false,
     )?
     .into_plain())
 }
@@ -129,6 +181,7 @@ fn lower_continuations_annotated_with_options(
     config: AbiConfig,
     check_capacity: bool,
     granularity: ProfileGranularity,
+    nibble_transfer: bool,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
     let layouts = build_layouts(program, config)?;
     let static_layout = if check_capacity {
@@ -145,6 +198,7 @@ fn lower_continuations_annotated_with_options(
         config,
         granularity,
     );
+    emitter.nibble_transfer = nibble_transfer;
     emitter.with_profile_site(
         "abi",
         "abi.initialization",
@@ -704,6 +758,7 @@ struct AbiEmitter<'a> {
     /// Physical during initialization; context-base-relative in dispatcher.
     position: isize,
     branch_temporary_depth: usize,
+    nibble_transfer: bool,
 }
 
 impl<'a> AbiEmitter<'a> {
@@ -730,6 +785,7 @@ impl<'a> AbiEmitter<'a> {
             granularity,
             position: 0,
             branch_temporary_depth: 0,
+            nibble_transfer: false,
         }
     }
 
@@ -1435,7 +1491,8 @@ impl<'a> AbiEmitter<'a> {
                 let src = self.address_location(source_address, function)?;
                 let dst = self.address_location(*dst, function)?;
                 let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
-                if matches!(source_address, Address::Global(_))
+                if self.nibble_transfer
+                    && matches!(source_address, Address::Global(_))
                     && let (Location::Global(source), Location::Relative(destination)) = (src, dst)
                 {
                     self.copy_global_to_relative_bits(source, destination);
@@ -2182,10 +2239,11 @@ impl<'a> AbiEmitter<'a> {
                     // Restrict it to dynamic low bytes, where the bounded crossings
                     // repay that source-size cost; high bytes and payload values use
                     // the compact unary move.
-                    let use_nibbles = matches!(
-                        route,
-                        ROUTE_OFFSET_LOW | ROUTE_ACCESSOR_LOW | ROUTE_RESUME_LOW
-                    );
+                    let use_nibbles = emitter.nibble_transfer
+                        && matches!(
+                            route,
+                            ROUTE_OFFSET_LOW | ROUTE_ACCESSOR_LOW | ROUTE_RESUME_LOW
+                        );
                     if use_nibbles {
                         let Location::Relative(source) = source else {
                             unreachable!("route staging is frame-relative")

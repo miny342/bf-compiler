@@ -2,14 +2,19 @@
 use super::*;
 use std::{fs, io::Write, path::Path};
 
-fn transport_fixture(padding: usize) -> (CompiledProfileArtifact, usize) {
+fn transport_fixture(padding: usize, nibble_transfer: bool) -> (CompiledProfileArtifact, usize) {
+    // Keep each actual frame within the ABI limit. Additional live flag
+    // chunks model suspended callers, not one oversized activation.
+    let frame_padding = padding.min(256);
+    let extra_chunks = (padding - frame_padding) / crate::DEFAULT_CHUNK_CELLS;
+    let declaration = format!("cell[{frame_padding}] keep;");
+    let first = "keep[0]";
+    let last = format!("keep[{}]", frame_padding - 1);
     let source = format!(
-        "cell[16] data; void main() {{ cell[{padding}] keep; \
-         keep[0] = input(); keep[{}] = input(); \
+        "cell[16] data; void main() {{ {declaration} \
+         {first} = input(); {last} = input(); \
          cell i = input(); data[i] = input(); output(data[i]); \
-         output(keep[0]); output(keep[{}]); }}",
-        padding - 1,
-        padding - 1
+         output({first}); output({last}); }}"
     );
     let program = crate::lower_source(&source).unwrap();
     let config = AbiConfig::default();
@@ -24,7 +29,19 @@ fn transport_fixture(padding: usize) -> (CompiledProfileArtifact, usize) {
         config,
         ProfileGranularity::Continuation,
     );
-    emitter.initialize_main(true).unwrap();
+    emitter.nibble_transfer = nibble_transfer;
+    emitter.initialize_main(false).unwrap();
+    emitter.with_profile_site_infallible(
+        "fixture",
+        "fixture.stack",
+        "live caller chunks",
+        |emitter| {
+            for chunk in 1..=extra_chunks {
+                emitter.set((chunk * config.stride()) as isize, 1);
+            }
+            emitter.migrate_context((extra_chunks * config.stride()) as isize);
+        },
+    );
     let condition = emitter.current_abi_offset(AbiField::Active).unwrap();
     emitter.move_to(condition);
     emitter.emit_operation(AnnotatedBfOperation::Input);
@@ -91,13 +108,16 @@ fn transport_fixture(padding: usize) -> (CompiledProfileArtifact, usize) {
         plain,
         "profile labels must not change optimized BF"
     );
-    (artifact, layouts[&program.main()].frame.frame_chunks())
+    (
+        artifact,
+        layouts[&program.main()].frame.frame_chunks() + extra_chunks,
+    )
 }
 
 #[test]
 fn request_transport_preserves_every_byte_and_profile_structure() {
-    for padding in [16, 256] {
-        let (artifact, _) = transport_fixture(padding);
+    for (padding, nibble_transfer) in [(16, false), (16, true), (256, false), (256, true)] {
+        let (artifact, _) = transport_fixture(padding, nibble_transfer);
         let mut input = Vec::new();
         let mut expected = Vec::new();
         for value in 0..=255u8 {
@@ -145,7 +165,14 @@ fn request_transport_preserves_every_byte_and_profile_structure() {
                 })
                 .map(|site| site.counters.remote_transfer_loops)
                 .sum();
-            assert_eq!(transport_loops, if disabled { 0 } else { 256 * 10 });
+            assert_eq!(
+                transport_loops,
+                if disabled {
+                    0
+                } else {
+                    256 * if nibble_transfer { 10 } else { 7 }
+                }
+            );
             assert_eq!(run.stats.optimization.remote_transfer_fallbacks, 0);
         }
         let json = artifact.map.to_json_pretty().unwrap();
@@ -155,7 +182,10 @@ fn request_transport_preserves_every_byte_and_profile_structure() {
             "abi.portal.route.transport.nibble.1",
             "abi.portal.route.transport.unary",
         ] {
-            assert!(json.contains(key));
+            assert_eq!(
+                json.contains(key),
+                nibble_transfer || key.ends_with("unary")
+            );
         }
     }
 }
@@ -174,15 +204,20 @@ fn export_portal_transport_fixtures() {
         root.starts_with(tmp),
         "artifacts must be under repository tmp"
     );
-    for padding in [16, 256] {
-        let (artifact, chunks) = transport_fixture(padding);
+    let nibble_transfer = match std::env::var("BFC_PORTAL_NIBBLE_TRANSFER").as_deref() {
+        Ok("1") => true,
+        Err(std::env::VarError::NotPresent) | Ok("0") => false,
+        _ => panic!("BFC_PORTAL_NIBBLE_TRANSFER must be 0 or 1"),
+    };
+    for padding in [16, 256, 65280] {
+        let (artifact, chunks) = transport_fixture(padding, nibble_transfer);
         for (suffix, contents) in [
             ("bf", artifact.source),
             ("bfmap.json", artifact.map.to_json_pretty().unwrap()),
             (
                 "fixture.json",
                 serde_json::json!({"kind":"transport", "padding_cells":padding,
-                "stack_chunks":chunks, "request_bytes":7,
+                "stack_chunks":chunks, "request_bytes":7, "nibble_transfer":nibble_transfer,
                 "note":"controlled request bytes; no dispatcher or accessor"})
                 .to_string(),
             ),

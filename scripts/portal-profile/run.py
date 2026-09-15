@@ -141,10 +141,17 @@ def cases():
     block += b'R>\xff\xff\x01R<\xfe\xff\x01' + b'!'
     result['optimizer'] = dict(source=optimizer_source(), prefix=b'', block=block,
                                suffix=b'\0', records=1, kind='optimizer')
-    for padding in [16, 256]:
-        block = b''.join(b'\1'+bytes((v+f*31) % 256 for f in range(7)) for v in range(256))
+    result['scalar'] = dict(source="""cell global;
+void main() { cell more = input(); while (more != 0) {
+    global = input(); cell saved = global; global = input();
+    output(saved); output(global); more = input();
+} }""", prefix=b'', block=b''.join(b'\1'+bytes([v,255-v]) for v in range(256)),
+        suffix=b'\0', records=256, kind='scalar')
+    for padding in [16, 256, 65280]:
+        values = [0, 1, 15, 16, 127, 128, 254, 255] if padding > 256 else range(256)
+        block = b''.join(b'\1'+bytes((v+f*31) % 256 for f in range(7)) for v in values)
         result[f'transport-{padding}'] = dict(prefix=b'', block=block, suffix=b'\0',
-            records=256, kind='transport', request_bytes=7)
+            records=len(values), kind='transport', request_bytes=7)
     for value in [0, 1, 15, 16, 127, 255]:
         result[f'transport-v{value}'] = dict(prefix=b'', block=(b'\1'+bytes([value])*7)*256,
             suffix=b'\0', records=256, kind='transport', request_bytes=7,
@@ -215,6 +222,7 @@ def main():
     parser.add_argument('--interpreter', type=Path, default=REPO/'target/release/bf-interpreter')
     parser.add_argument('--baseline-compiler', type=Path)
     parser.add_argument('--cases', nargs='+', choices=list(cases()))
+    parser.add_argument('--enable-nibble-transfer', action='store_true')
     parser.add_argument('--pairs', type=int, default=5)
     parser.add_argument('--seconds', type=float, default=2)
     args = parser.parse_args()
@@ -235,9 +243,9 @@ def main():
     save(root/'manifest.json', dict(commit=invoke(['git','rev-parse','HEAD']).stdout.decode().strip(),
         tracked_diff_sha256=digest(invoke(['git','diff']).stdout), pairs=args.pairs, seconds=args.seconds,
         files={str(p):dict(sha256=digest(p.read_bytes()), bytes=p.stat().st_size) for p in inputs},
-        cases=list(selected), timeout_seconds=60, timing='unprofiled execute_ns; separate sample/counters runs'))
+        cases=list(selected), nibble_transfer=args.enable_nibble_transfer, timeout_seconds=60, timing='unprofiled execute_ns; separate sample/counters runs'))
     if any(c['kind']=='transport' for c in selected.values()):
-        env = dict(os.environ, BFC_PORTAL_PROBE_OUTPUT=str(root))
+        env = dict(os.environ, BFC_PORTAL_PROBE_OUTPUT=str(root), BFC_PORTAL_NIBBLE_TRANSFER=str(int(args.enable_nibble_transfer)))
         result = invoke(['cargo','test','--release','-p','bf-compiler','--lib',
             'abi_codegen::portal_probe::export_portal_transport_fixtures','--','--ignored','--exact'],
             env=env)
@@ -254,7 +262,7 @@ def main():
             source.write_text(case['source'])
             command = ['--compressed-bf','--unlimited-tape','--profile-granularity','continuation',
                        '--profile-map-output',map_path,source]
-            built = invoke([compiler,*command])
+            built = invoke([compiler, *(['--enable-nibble-transfer'] if args.enable_nibble_transfer else []), *command])
             bf.write_bytes(built.stdout)
             (root/f'{name}.build.log').write_bytes(built.stderr)
             if args.baseline_compiler:

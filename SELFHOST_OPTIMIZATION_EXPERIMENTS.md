@@ -25,8 +25,11 @@
 - セルフホスト版も`concat-stage2-compiler.sh compressed`でBFCRLE出力を選べる。
   命令列の変更ではなく可逆な保存形式の変更。通常BFの`main`とbinary `cir`は維持する。
 - interpreterのRemoteTransferを採用。Scan経路と更新先が独立な局所転送を実行時に
-  一括化し、`--disable-remote-transfer`で比較可能。BF生成・nibble搬送ABIは未変更。
+  一括化し、`--disable-remote-transfer`で比較可能。
   compiler側のportal batch/専用laneとは別の最適化として評価する。
+- Rust backendのframe/global byte搬送はunaryを既定とし、
+  `--enable-nibble-transfer`で従来のBF命令数削減方式を選択可能。
+  offset分解・window移動・ABI配置は維持する。比較はRemoteTransfer ON/OFFそれぞれで行う。
 - 同一関数の非空Branch後継inline化（2c）は採用済み。比較用に`--disable-2c`を保持。
 - arena算術化は試作・検証後に撤回。単一入口の局所if/while構造化（2d）はsource/CIRの
   production BF比較に基づき通常経路へ採用。比較用に`--disable-local-control-flow`を保持。
@@ -176,7 +179,9 @@ CLI/profile形式を変えず、要求フィールド別の分解・搬送、win
 生成BFを変更する最適化はこの計測変更に含めない。
 
 手順と計測上の制限は[`scripts/portal-profile/README.md`](scripts/portal-profile/README.md)。
-既存のnibble搬送とRemoteTransferを維持し、後者のON/OFFを同一BF・入力で比較する。
+`run.py`は搬送生成方式を固定し、RemoteTransferのON/OFFを同一BF・入力で比較する。
+`compare-transfer.py`はunary/nibbleの生成BFを同じ入力で比較し、
+RemoteTransfer ON/OFFを別々に測定する。global scalar copyと長いlive stackのfixtureも追加した。
 コンパクトケースはfull selfhostのphase比率の代わりにはならず、次の変更候補を絞るために用いる。
 
 ## 実験5：PCの3・4分割を独立評価

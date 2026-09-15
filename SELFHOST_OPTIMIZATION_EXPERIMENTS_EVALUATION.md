@@ -14,6 +14,7 @@
 | IR継続・遷移・終端・phase・portal集計 | 採用 | 出力・通常counter一致とaccounting、source/CIR測定を確認。計測費用があるためオプトイン。BF hidden dispatch/navigation費用は測れていない。 |
 | BFCRLE v1テキスト圧縮 | 採用（オプトイン） | Rust版出力のSSD書込量を削減。通常BF互換を維持し、profileの展開後ordinal/identityとinline markerを保つ。セルフホスト版にもcompressedエントリを追加し、通常mainとbinary CIRを維持。 |
 | interpreter RemoteTransfer | 採用 | BFの意味から経路不変性を実行時検証してScan往復を一括転送へ置換。source由来BFの複数入力で出力・論理counter一致とexecute短縮を確認。不成立時は通常実行。CIR/full selfhost時間比較は未実施。 |
+| frame/global byte搬送のunary既定化 | 採用 | RemoteTransfer有効時のコンパクトケースでexecute短縮を確認。nibbleはBF命令数を抑える選択肢として`--enable-nibble-transfer`に保持。offset/window移動・ABI配置は維持。full selfhost速度は未測定。 |
 | HIRの局所Frame lowering | 採用 | 単純なローカルwhileの非ゼロ条件・Output・定数更新を直接Frame命令にし、割当て前に不要な一時セルと条件の0/1化を除く。emit_repeat_256の反復は通常BFの最小形となり出力ベンチを短縮。複雑な制御は従来経路、多箇所inlineは未拡張。 |
 | Frame Compareと非同期分岐による比較 | 採用 | source/binary CIRの比較をABI loweringまで保持し、反復内のoperand複製を省く。全8-bit入力・両ABI配置を検証。比較ベンチの時間短縮を確認したが、付随する既存inline/CFG簡約も含む。一部生成BFサイズは増加。full selfhost時間は未測定。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
@@ -148,8 +149,8 @@ sample/countersは別実行。compile・parse・RSSと全runの値も記録し�
 
 ### 判断と限界
 
-- 次の独立実験はrouterのbit分解を省く搬送のA/Bを優先する。まだ実装・採用していない。
-  現interpreterでは単純転送もnative化できるが、その優劣は今回の測定だけでは確定しない。
+- この時点では次の独立実験としてrouterのbit分解を省く搬送のA/Bを優先した。
+  単純転送のnative化との優劣はこの測定だけでは確定せず、2026-09-16の独立比較で判断した。
 - 小配列では16通りの要素選択も費用が大きい。小配列専用の選択やaggregate一括転送を
   次の候補として維持する。大配列ではwindow交換の比重が高く、別の条件で評価する。
 - frame配列にはglobal routerがない。stackに置いても同じ費用になる、という説明は不正確。
@@ -159,3 +160,73 @@ sample/countersは別実行。compile・parse・RSSと全runの値も記録し�
 - 全source fixtureをIR出力と照合し、配列のIR load/store数、全初期化payloadとcaller sentinelの保存を確認。
   ON/OFFの出力・logical BF/RLE count・max pointerも一致した。
 - `cargo test --workspace`、全targetのClippy、profile追加前とのBF一致が通過した。
+
+## Byte搬送をunary既定へ変更（2026-09-16）
+
+**採用。Rust backendのnibble搬送を`--enable-nibble-transfer`で選択する方式にした。**
+global scalarからframeへのcopy、およびglobal routerのoffset/accessor/resume low byteが対象。
+source/CIR、通常BF/圧縮BF、profile付き出力で共通に指定する。
+offset分解、base-16 window移動、frame/static配置とscratch予約は維持した。
+stage2のBFC製backendは変更していない。
+
+### full15の観測と判断
+
+以下は変更前のfull15を読んだ時点の記録。後の実験で`full15.metrics`が上書きされたため、
+現在の同名ファイルとは一致しない。独立A/Bのartifactは別directoryに保存している。
+
+`full15.metrics`の210〜220分の差分では、routerの複数のnibble/unary siteが
+それぞれ約2.7〜3.0万sample増え、global navigationも約1.7万増えている。
+序盤のdecompose/exchangeだけを改善して終わる説明では不十分である。
+ただし保存されているのは累積top10表示で、最終profile JSONはない。
+ここから全siteの割合やnibble有無の実行時間差を確定してはいけない。
+
+RemoteTransferはunary loopも一括実行できる。一方、nibble化は分解処理を追加し、
+対象byteの転送を二つのloopに分ける。global要求7byteでは計10本から7本へ減らせる。
+各loopに経路探索が必要なため、分解だけでなく長いstackでの搬送も比較した。
+RemoteTransferのない実行では値による往復回数の削減が有利になる条件が残る。
+
+### 独立したA/B測定
+
+次のコマンドで測定した。
+
+```sh
+python3 scripts/portal-profile/compare-transfer.py tmp/nibble-transfer-evaluation \
+  --baseline-compiler tmp/nibble-transfer-baseline/bfc
+```
+
+release build、unlimited tape、profileなし、warmup後5組のAB/BA交互実行。
+RemoteTransfer ON/OFFを別々に校正し、それぞれの遅いvariantを約1秒にする。
+同じ組の入力・反復数は同一。表は実行時間の中央値を入力record数で割った値であり、
+初期化・観測・後処理も含む。長いstackは有効なframeに4,064個のlive caller chunkを追加したfixture。
+
+| ケース | ON: nibble ns/record | ON: unary ns/record | ON時間変化 | OFF時間変化 |
+| --- | ---: | ---: | ---: | ---: |
+| global scalar snapshot | 13,744 | 874 | -93.6% | +16.7% |
+| production optimizer抜粋 | 14,307,067 | 10,839,705 | -24.2% | -8.7% |
+| global 16要素×3セル | 45,419 | 31,799 | -30.0% | -8.4% |
+| 同配列・再帰8段 | 49,100 | 35,412 | -27.9% | -3.2% |
+| 大きいglobal配列・chunk境界 | 42,125 | 30,885 | -26.7% | -9.1% |
+| 搬送単体・padding 16 | 20,453 | 987 | -95.2% | -20.1% |
+| 搬送単体・長いlive stack | 77,129 | 47,762 | -38.1% | +52.1% |
+
+変化はnibbleを基準とし、負がunaryの短縮。全7ケースのONでpaired差のbootstrap 95%区間も
+負になった。全source fixtureのnibble有効BFは変更前7367a75のcompilerとbyte単位で一致した。
+通常のportal単体は1要求7本/10本のRemoteTransferとなることを全256値で検証。
+長いfixtureは両方式ともrunあたり1回のfallbackを含み、それも時間・counterへ含めた。
+生成BFサイズはoptimizerが99,517→94,952 bytes、小さい搬送単体が1,263→436 bytes。
+
+### 検証と制約
+
+- `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`が通過。
+- source/CIRのglobal snapshot・動的配列アクセスを両方式・両RemoteTransfer設定で照合。
+  通常/圧縮BF、profile/embedded mapのBF identity一致と、flagで生成BFが変わることを検証。
+- 搬送単体の全256値、短い/長めのframe、native site帰属を両方式で検証。
+- 測定は毎runの出力をIRまたは制御byte列と照合した。同じBFのRemoteTransfer ON/OFFで
+  pilotのlogical BF/RLE命令数と最大pointerも一致した。
+- `tmp/nibble-transfer-evaluation`に全pair、BF/map、入力/期待値、binary/source hash、script snapshot、
+  bootstrap区間を保存。sample/countersの別診断は`tmp/nibble-transfer-diagnostics-unary`と
+  `tmp/nibble-transfer-diagnostics-nibble`に保存した。診断の短い測定時間は速度判断に使わない。
+- RemoteTransferがなくても、小さい値・短い距離では分解費用が勝つ場合があるため、
+  「なしならnibbleが常に速い」とはしない。BF命令数とnative実行時間も区別する。
+- full15のphase分布とfull selfhost改善率は未検証。長時間のcompiler自己入力は実行していない。
+  navigationやwindow交換自体は残り、portal往復削減・専用laneは引き続き別の課題である。

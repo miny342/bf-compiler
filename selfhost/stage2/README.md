@@ -43,6 +43,11 @@ cargo run --release -p bf-compiler -- --unlimited-tape --compressed-bf \
 ```
 
 あとは従来通りinterpreterで実行できる。BFとprofile mapは必ずセットで再生成する。
+Rust backendはframe/global間のbyte搬送を既定でunaryにする。
+従来の搬送を比較する場合は上のRustコンパイラに`--enable-nibble-transfer`を追加する。
+RemoteTransferを使わないBF処理系向けに、値の分解で往復のBF命令数を抑える選択肢である。
+この指定はRustが生成するBFにだけ適用し、stage2コンパイラ自身のbackendや
+配列offset/windowのbase-16移動には影響しない。
 コンパイラ実行のprofile mapと、生成されたプログラムのmapは別物である。
 セルフホスト版はinline-profile markerを生成せず、既存のprofile形式を変更しない。
 入力は引き続きBFCソースであり、BFCRLEをBFCとして再入力するものではない。

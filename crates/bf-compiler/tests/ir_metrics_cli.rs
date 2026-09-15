@@ -151,6 +151,171 @@ fn compressed_bf_cli_preserves_source_cir_and_profile_artifacts() {
 }
 
 #[test]
+fn nibble_transfer_is_opt_in_for_source_cir_and_all_output_formats() {
+    use SelfhostCirInstruction as I;
+    use bf_compiler::{SelfhostCirArrayOp, SelfhostCirGlobalOp, SelfhostCirStorage};
+    use bf_interpreter::{RunOptions, run_with_options};
+
+    let root = test_root().with_file_name(format!("nibble-transfer-cli-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("main.bfc"),
+        "cell[256] values; cell global; void main(){cell i=input(); \
+         global=input(); cell saved=global; global=input(); values[i]=saved; \
+         output(values[i]); output(saved); output(global);}",
+    )
+    .unwrap();
+    let cir = SelfhostCirProgram::new(
+        257,
+        0,
+        vec![SelfhostCirFunction {
+            id: 0,
+            entry: 1,
+            frame_cells: 6,
+            return_type: SelfhostCirReturnType::Void,
+            parameters: vec![],
+        }],
+        vec![SelfhostCirContinuation {
+            id: 1,
+            function: 0,
+            instructions: vec![
+                I::Input { destination: 1 },
+                I::Copy {
+                    destination: 5,
+                    source: 1,
+                },
+                I::Input { destination: 0 },
+                I::Global {
+                    op: SelfhostCirGlobalOp::Store,
+                    data: 0,
+                    address: 256,
+                },
+                I::Global {
+                    op: SelfhostCirGlobalOp::Copy,
+                    data: 3,
+                    address: 256,
+                },
+                I::Input { destination: 4 },
+                I::Global {
+                    op: SelfhostCirGlobalOp::Store,
+                    data: 4,
+                    address: 256,
+                },
+                I::Set {
+                    destination: 2,
+                    value: 0,
+                },
+                // CIR array stores consume data and offset slots.
+                I::Copy {
+                    destination: 0,
+                    source: 3,
+                },
+                I::Array {
+                    op: SelfhostCirArrayOp::Store,
+                    data: 0,
+                    offset_low: 1,
+                    offset_high: 2,
+                    base: 0,
+                    cells: 256,
+                    storage: SelfhostCirStorage::Global,
+                },
+                I::Copy {
+                    destination: 1,
+                    source: 5,
+                },
+                I::Array {
+                    op: SelfhostCirArrayOp::Load,
+                    data: 0,
+                    offset_low: 1,
+                    offset_high: 2,
+                    base: 0,
+                    cells: 256,
+                    storage: SelfhostCirStorage::Global,
+                },
+                I::Output { source: 0 },
+                I::Output { source: 3 },
+                // CIR global stores consume their data slot; read it back.
+                I::Global {
+                    op: SelfhostCirGlobalOp::Copy,
+                    data: 4,
+                    address: 256,
+                },
+                I::Output { source: 4 },
+            ],
+            terminator: SelfhostCirTerminator::Halt,
+        }],
+    )
+    .unwrap();
+    fs::write(root.join("main.cir"), cir.encode().unwrap()).unwrap();
+    for input in [vec!["main.bfc"], vec!["--cir-input", "main.cir"]] {
+        for unbounded in [false, true] {
+            let mut identities = Vec::new();
+            for nibble in [false, true] {
+                let mut arguments = input.clone();
+                if unbounded {
+                    arguments.push("--unlimited-tape");
+                }
+                if nibble {
+                    arguments.push("--enable-nibble-transfer");
+                }
+                let plain = run_bfc(&root, &arguments);
+                assert!(plain.status.success(), "{:?}", plain.stderr);
+                let identity = bf_profiling::bf_identity(&plain.stdout);
+                identities.push(identity);
+                for compressed in [false, true] {
+                    let mut args = arguments.clone();
+                    if compressed {
+                        args.push("--compressed-bf");
+                    }
+                    let ordinary = run_bfc(&root, &args);
+                    assert!(ordinary.status.success(), "{:?}", ordinary.stderr);
+                    assert_eq!(bf_profiling::bf_identity(&ordinary.stdout), identity);
+                    args.extend(["--profile-map-output", "map.json", "--embed-profile"]);
+                    let profiled = run_bfc(&root, &args);
+                    assert!(profiled.status.success(), "{:?}", profiled.stderr);
+                    assert_eq!(bf_profiling::bf_identity(&profiled.stdout), identity);
+                    let map_json = fs::read_to_string(root.join("map.json")).unwrap();
+                    assert_eq!(map_json.contains("abi.portal.route.decompose"), nibble);
+                    let map = bf_profiling::ProfileMap::from_json(&map_json).unwrap();
+                    map.validate_for_source(&profiled.stdout).unwrap();
+                    assert_eq!(
+                        bf_profiling::embedded_profile_map(&profiled.stdout).unwrap(),
+                        Some(map)
+                    );
+                    for value in [0, 1, 15, 16, 127, 128, 254, 255] {
+                        for disable_remote_transfer in [false, true] {
+                            let run = run_with_options(
+                                &profiled.stdout,
+                                &[value, value, 255 - value],
+                                RunOptions {
+                                    unbounded_tape: unbounded,
+                                    disable_remote_transfer,
+                                    ..RunOptions::default()
+                                },
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                run.output,
+                                [value, value, 255 - value],
+                                "{args:?}, RT disabled={disable_remote_transfer}"
+                            );
+                        }
+                    }
+                }
+            }
+            assert_ne!(
+                identities[0], identities[1],
+                "flag must change generated BF"
+            );
+        }
+    }
+    let invalid = run_bfc(&root, &["--run-ir", "--enable-nibble-transfer", "main.bfc"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("Brainfuck code-generation options"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn local_control_flow_options_bind_identity_and_preserve_execution() {
     let root = test_root().with_file_name(format!(
         "ir-metrics-local-control-flow-{}",

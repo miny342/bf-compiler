@@ -16,15 +16,29 @@ python3 scripts/portal-profile/run.py tmp/portal-run-02 \
   --cases optimizer transport-16 global-triple-full frame-triple-full
 ```
 
-`--baseline-compiler PATH` optionally checks that an earlier compiler produces byte-identical compressed BF for every source fixture. It generates a separate old map and checks BF, not site IDs. The ordinary tests additionally check annotated/plain optimization equivalence, all 256 transported values, both RemoteTransfer settings, and native transfer attribution. No new public compiler/interpreter options or map schema are required.
+Byte transport defaults to unary. Add `--enable-nibble-transfer` to select the earlier nibble templates in both source and transport fixtures. This changes compiler output; RemoteTransfer ON/OFF changes only interpreter execution. Offset decomposition and base-16 window movement are unaffected.
+
+`--baseline-compiler PATH` optionally checks that an earlier compiler produces byte-identical compressed BF for every source fixture. When comparing against the compiler before unary became the default, also pass `--enable-nibble-transfer`. It generates a separate old map and checks BF, not site IDs. The ordinary tests additionally check annotated/plain optimization equivalence, all 256 transported values, both RemoteTransfer settings, and native transfer attribution.
+
+## Comparing unary and nibble generation
+
+```sh
+python3 scripts/portal-profile/compare-transfer.py tmp/transfer-comparison
+```
+
+This generates both variants, checks output against IR or controlled request bytes, and measures five unprofiled AB/BA pairs after warmup. RemoteTransfer ON and OFF are calibrated and compared independently, targeting one second for the slower variant. Input and repetition count are identical **within** each paired comparison; use time per record when comparing the two interpreter settings. `--cases`, `--pairs`, and `--seconds` narrow the experiment. Optional `--baseline-compiler PATH` checks that **nibble** output matches the earlier compiler. Use `run.py` separately for sample/counters diagnosis of a selected generation mode.
+
+Exact sources, inputs, outputs, BF/maps, run logs, script snapshots and binary hashes remain in the output directory. Summaries record execute/parse times, logical counters, RSS, all pairs and a paired bootstrap interval for the execute-time difference. These compact cases do not establish a full selfhost speedup.
 
 ## Cases
 
 - `optimizer`: reads the current production `09_bf_optimizer.bfc`, serializer and required arithmetic helpers. Repeats eviction, ring wrap, cancellation, clear recognition, output barriers, wide moves and flush. Output is compressed, so wide logical moves do not create huge output files. The wrapper only provides input and output; it does not reimplement the optimizer.
+- `scalar`: copies a global byte to a local snapshot, overwrites the global, then observes both values. Covers all 256 byte values and the separate global-to-frame copy template.
 - `global-byte-zero/full`, `global-triple-zero/full`: dynamically store and load 16-element arrays; one-cell and three-cell values, with zero/nonzero payload. Three-cell indices include physical chunk crossings. Constant-index setup and final observation do not issue dynamic portal requests.
 - `frame-triple-full`, `global-triple-deep/wide`, `frame-triple-deep`: change region, eight extra recursive activations, or persistent frame padding. Caller sentinel values are read after returning to verify preservation.
 - `global-large`: a 32×256 array, with offsets 0, 15, 16, 255, 256, 4095, 4096, 8191. Seeds the payload chunks touched by the production base-16 jump paths. Final observation verifies that exchanged payload is restored, including cells outside the selected element.
 - `transport-16/256`: exports a small fixture through an explicitly selected ignored Rust test. It calls the same `move_global_portal_request` as production, in an initialized ABI frame. Seven controlled request bytes cover all 256 values. No dispatcher interprets these artificial bytes as PCs. Results are observed and the global prefix is cleared after every request. The suffix is frame **padding cells**, not stack depth; actual stack chunks are in `*.fixture.json`.
+- `transport-65280`: extends the live stack flags with 4,064 caller chunks beyond a valid padded frame, moving the active context to their end. This exercises a long navigation/probe path without declaring an oversized function or compiling the compiler. Eight records cover zero, byte/nibble boundaries and large values; fields are offset by 31 modulo 256. The suffix denotes total padding across the synthetic live region; actual chunks and generation mode are recorded in the fixture metadata.
 - `transport-v0/v1/v15/v16/v127/v255`: the same small transport BF with constant request bytes, separating value-dependent preparation from stack traversal. These are controlled primitive measurements, not valid execution PCs.
 
 The Rust fixture exporter is test-only and adds no public API or production benchmark switch. It emits compressed BF/maps using the ordinary optimizer. Building it needs the workspace dev dependencies, just like `cargo test`.
