@@ -31,7 +31,7 @@ lowering手法は未採用であり、実装時には生成BFの長さ、実行s
 - 新規continuationへの切替ではinstruction tailを空に設定し、既存branch末尾のgoto接続時には
   不要なinstruction listの末尾走査を行わない。
 - 旧parser専用の`token_is_main`をtest専用moduleへ移動。CIR entryの結合対象から、到達不能な
-  BF primitive・optimizer・serializer・ABI backendとその出力状態を除外する。
+  BF primitive・serializer・ABI backendとその出力状態を除外する。
 
 stage2のframeは16-cell header + 可変長dataの独自方式で、RustのD=16 chunk ABIとは異なる。
 古いD=8切替はstage2に存在しない。必要なbuffer/slot/portal制限は残す。
@@ -278,38 +278,23 @@ jq -r '
 
 ### stage2のstreaming BF最適化
 
-2026-09-15: `selfhost/stage2/compiler/09_bf_optimizer.bfc`に、最終BF出力前の
-固定長peephole bufferを追加した。`bf-compiler/src/bf_optimizer.rs`の次の規則を、
-保持している末尾の範囲で適用する。通常BFとBFCRLEの両entryで共通に使う。
+2026-09-16: full16の観測を受け、16 tokenのpeephole bufferを撤去し、
+`0400bc4`時点の素朴な即時出力へ戻した。`09_bf_serialization.bfc`は反復命令を
+通常BFまたはBFCRLEへ直接書き、flush/resetやkind/count配列を持たない。
+定数生成時の短い加減算の選択と24-bit反復数の直列化は維持する。
+整数幅・overflow検査・fail site診断、およびRust版のBF最適化は変更しない。
 
-- 隣接するpointer移動の統合・相殺、移動量0の除去。
-- 隣接する加減算のmod 256での統合・相殺、加算量0の除去。文字列化では128以下を
-  `+`、129以上を短い`-` runにする。
-- 本体が単一の奇数加算へ縮約されたloopを`[-]`へ標準化する。偶数加算loopや空loopは
-  停止性が違うため残す。
-- clear直前の加算の除去と、連続clearの重複除去。
-- 入力直前の加算・clearの除去（repositoryの入力はEOF時も0で上書きする）。
+撤去した規則は、隣接移動・加減算の統合と相殺、奇数加算loopのclear化、
+clear/入力の前で不要になる更新の除去。BF IR全体の保持を避けても、
+ringへの動的配列アクセスに実行費用がかかる。count laneの読み書きを絞る改修は
+小ケースで改善したが、素朴な出力との採否判断には不十分だった。
+旧実装は`4f3a2b9`以降の履歴、countアクセス削減の測定は
+`SELFHOST_OPTIMIZATION_EXPERIMENTS_EVALUATION.md`に記録している。
 
-bufferは16 tokenのringで、kind 16 cell、24-bit count 48 cell、head/length 2 cellの
-計66 cellを使う。BF IR全体やloop本体全体は保存しない。24-bitの移動runも1 tokenとして
-保持し、合算が24-bitを超える場合は先にflushする。I/Oとcompile unit終端でもflushする。
-serializationは`09_bf_serialization.bfc`へ分離し、最適化後のrunだけを通常BFまたは
-BFCRLEへ書く。codegen primitiveを個別に呼ぶtest/harnessも、結果の観測前に
-`flush_bf_optimizer()`、新しい出力の開始前に`reset_bf_optimizer()`を呼ぶ。
-
-**見送る範囲:** Rustのpassに大域的なdata-flow解析などの別規則はない。ただしRustと同じ
-縮約結果を常に得るには、後続命令で相殺されるかもしれない任意長の末尾やloopを保持する
-必要がある。例えば`>+`を多数並べ、その逆順に`-<`を並べると、Rustでは全体が消える。
-stage2は16 tokenを超えた古い命令を逐次出力するため、その出力済み範囲まで遡る相殺・
-上書き除去はしない。同様に、長いloop本体の縮約後に初めて判明するclear化も、開始括弧や
-必要な本体がbufferに残っていなければ行わない。これは最適化の取りこぼしだけであり、
-生成programの意味を変えない。移動相殺のtape境界に関する前提はRustのpassと同じである。
-
-`scripts/verify-stage2-bf-optimizer.py`（`--compiler target/release/bfc
---interpreter target/release/bf-interpreter`）で、全256加算値、奇数/偶数loop、入出力境界、nested loop、
-buffer追い出し、24-bit移動の桁境界・overflowを含む577 caseをIR/BF実行と両出力形式で
-照合する。加えて50 programの最適化前後を、EOFを含む入力で実行比較する。
-`hello.bfc`の生成BFは848 → 512 byteとなり、実行結果は同じ`A!`と改行だった。
+ユーザー観測では移動runを圧縮した生成BFの削減は約300→225 MiBだった一方、
+full16の出力進行に大きな時間がかかった。これは厳密な完走時間の比較ではなく、
+「約10倍」の予想は未検証。今回はcompiler自己入力の長時間実験を行わない。
+通常/圧縮の命令列一致と反復数境界は`verify-selfhost-compressed.py`で検証する。
 
 ### Rust backendの基準値
 

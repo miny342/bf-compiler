@@ -15,6 +15,7 @@
 | BFCRLE v1テキスト圧縮 | 採用（オプトイン） | Rust版出力のSSD書込量を削減。通常BF互換を維持し、profileの展開後ordinal/identityとinline markerを保つ。セルフホスト版にもcompressedエントリを追加し、通常mainとbinary CIRを維持。 |
 | interpreter RemoteTransfer | 採用 | BFの意味から経路不変性を実行時検証してScan往復を一括転送へ置換。source由来BFの複数入力で出力・論理counter一致とexecute短縮を確認。不成立時は通常実行。CIR/full selfhost時間比較は未実施。 |
 | frame/global byte搬送のunary既定化 | 採用 | RemoteTransfer有効時のコンパクトケースでexecute短縮を確認。nibbleはBF命令数を抑える選択肢として`--enable-nibble-transfer`に保持。offset/window移動・ABI配置は維持。full selfhost速度は未測定。 |
+| stage2 BF最適化器のcount読み書き削減 | 撤回（最適化器ごと撤去） | token kindに応じたlaneだけを読み書きし、相殺時の書き戻しを除去。最適化規則と生成出力は維持。小入力のbyte単位portal要求削減とIR/BF照合を確認。 |
 | HIRの局所Frame lowering | 採用 | 単純なローカルwhileの非ゼロ条件・Output・定数更新を直接Frame命令にし、割当て前に不要な一時セルと条件の0/1化を除く。emit_repeat_256の反復は通常BFの最小形となり出力ベンチを短縮。複雑な制御は従来経路、多箇所inlineは未拡張。 |
 | Frame Compareと非同期分岐による比較 | 採用 | source/binary CIRの比較をABI loweringまで保持し、反復内のoperand複製を省く。全8-bit入力・両ABI配置を検証。比較ベンチの時間短縮を確認したが、付随する既存inline/CFG簡約も含む。一部生成BFサイズは増加。full selfhost時間は未測定。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
@@ -230,3 +231,42 @@ RemoteTransfer ON/OFFを別々に校正し、それぞれの遅いvariantを約1
   「なしならnibbleが常に速い」とはしない。BF命令数とnative実行時間も区別する。
 - full15のphase分布とfull selfhost改善率は未検証。長時間のcompiler自己入力は実行していない。
   navigationやwindow交換自体は残り、portal往復削減・専用laneは引き続き別の課題である。
+
+## stage2 BF最適化器の不要なcountアクセス削減（2026-09-16、撤去前の測定）
+
+`09_bf_optimizer.bfc`で、合併する分岐に入ってから必要なcountを読むよう変更した。
+加算・奇偶判定はlow byteだけ、pointer移動は3byte、括弧等はcountを使わない。
+書込みも同じkind契約に限定し、相殺されたtokenと変化しないkindへの書き戻しを省く。
+最適化規則、16 tokenの容量、生成BFの形式は維持する。slotの未使用laneには古い値が残りうる。
+
+`tmp/portal-next-review`に変更前/後のoptimizer抜粋sourceと生成BF、入力・出力、IR metricsを保存した。
+production fixtureの4 blockで、実行されたIR load/storeのcellsを合計すると、
+byte単位portal要求はload 2,008→1,020、store 1,324→764、合計3,332→1,784（46.5%減）。
+この入力の最適化済み出力184 bytesは一致した。
+80 blockを同じRemoteTransfer有効のinterpreterで、profileなし・warmup後5組AB/BA比較した参考値は、
+execute中央値840→688 ms（約18%短縮）。全runの出力一致を確認した。
+ログは`io-benchmark.*.log`、全測定値は`io-benchmark.json`、source/BF/binary/input hashは`io-manifest.json`。
+長時間のcompiler自己入力やfull phaseの速度比較は実行していない。
+
+`verify-stage2-bf-optimizer.py`は580ケースのIR/BF・通常/圧縮の照合と50プログラムの意味比較が通過。
+全count laneを使った後にring slotを再利用する3ケースも、期待する命令列と照合する。
+logは`tmp/portal-next-review/verification.log`。
+二段portal配置・小配列accessor・interpreterの変更は本変更に含めない。
+
+## 素朴なBFCRLE出力への復帰（2026-09-16）
+
+full16について、ユーザーから生成コードの削減量に対してコンパイル時の負担が大きいとの報告。
+移動run圧縮換算で約300→225 MiBという削減と、約26 MBの出力進行を根拠に、
+最適化導入前の即時出力へ戻す。完走時間が約10倍という予想は実測で確認した値ではない。
+kind/count配列とflush/resetを撤去し、反復回数の可逆な圧縮のみを行う。
+整数幅の修正・診断・Rust側の最適化は維持する。full selfhostの再実行は行わない。
+`portal-profile`の`optimizer`というcase名は既存コマンドとの互換用に残すが、
+現在は即時serializerを実行するため、旧測定とは処理内容・出力が異なる。
+
+検証結果:
+- `verify-selfhost-compressed.py`: 全サンプルの通常/圧縮命令列一致、全byte反復数・24-bit境界のIR/BF一致。
+- `verify-stage2-selfhost.sh`: 小入力のコンパイル・生成BF実行を含むstage2回帰検証成功。
+- `verify-stage2-limits.py`: 301関数、255/256境界、frame上限、overflow拒否、16-bit offset加算の検証成功。
+- `portal-profile`の出力fixture: 4 blockのIR/BF出力一致（420 bytes）。
+- serializer本体は`0400bc4`の実装との一致を確認。helloは通常848 bytes、圧縮276 bytes。
+ログは`tmp/simple-output-{compressed,stage2,limits}.log`。

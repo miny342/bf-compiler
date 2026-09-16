@@ -163,7 +163,7 @@ void parse_output_statement() {
     consume(TokenKind::RightParen);
     consume(TokenKind::Semicolon);
     emit_move_to(SCRATCH_BASE);
-    emit_bf_character('.');
+    compiler_output!('.');
 }
 
 void parse_assignment() {
@@ -290,7 +290,6 @@ void parse_statement() {
 }
 
 void compile_program_stage4() {
-    reset_bf_optimizer();
     control_depth = 0;
     read_character();
     next_token();
@@ -310,5 +309,4 @@ void compile_program_stage4() {
     if (token_kind != TokenKind::Eof) {
         fail('B', 'K');
     }
-    flush_bf_optimizer();
 }

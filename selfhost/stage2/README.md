@@ -57,7 +57,7 @@ RemoteTransferを使わないBF処理系向けに、値の分解で往復のBF�
 展開せずrunの回数を比較し、巨大な通常BFをSSDへ保存しない。
 `00_legacy_stage4.bfc`、`03_legacy_symbols.bfc`、`04_legacy_codegen.bfc`、`05_parser.bfc`はproductionの
 到達可能性に関与しないため除外する。`test` entryだけは旧回帰を維持するためこれらも連結する。
-`cir` entryではBF primitive・optimizer・serializer・ABI backendも除外し、使わないBF出力処理を
+`cir` entryではBF primitive・serializer・ABI backendも除外し、使わないBF出力処理を
 コンパイラ自身の入力に含めない。
 
 ## BFCで記述した内部テスト
@@ -165,9 +165,10 @@ stage2のBF backendはRust側のD=16 chunk ABIとは別方式であり、D=8/D=1
 `--unlimited-tape`はこれらstage2内の表現幅や固定長bufferを拡張しない。
 現方式のframe/offset上限を広げるには、チェックの削除だけでなくIRとcodegenの表現変更が必要になる。
 
-最終BF出力は16 tokenの固定長bufferでpeephole最適化する。隣接する移動・加算の統合と相殺、
-奇数加算loopの`[-]`への標準化、clearや入力で上書きされる更新の除去を、通常BFと圧縮BFに
-共通で適用する。BF IR全体は保持せず、出力済みの範囲へ遡る縮約は行わない。詳細と制限は
+最終BF出力はbufferを持たず、その場で通常BFまたはBFCRLEへ書く。
+`compressed` entryは反復命令の回数だけを短縮し、命令間の統合・相殺やloopの書換えはしない。
+定数生成時の短い加減算の選択は維持する。full16での出力最適化の実行費用を受け、
+16 tokenのpeephole最適化器は撤去した。経緯は
 [`BF_OPTIMIZATION_NOTES.md`](../../BF_OPTIMIZATION_NOTES.md#stage2のstreaming-bf最適化)を参照。
 
 arena recordは`next`と頻出fieldを前方へ置いた4〜20 cellのkind別layoutを使用する。
@@ -192,7 +193,7 @@ repository rootで次を実行する。
 
 ```console
 scripts/verify-stage2-selfhost.sh
-python3 scripts/verify-stage2-bf-optimizer.py --compiler target/release/bfc \
+python3 scripts/verify-selfhost-compressed.py --compiler target/release/bfc \
   --interpreter target/release/bf-interpreter
 python3 scripts/verify-stage2-limits.py --compiler target/release/bfc \
   --interpreter target/release/bf-interpreter

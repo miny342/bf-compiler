@@ -25,7 +25,6 @@ void reset_test_input(cell kind) {
 }
 
 void reset_capture() {
-    reset_bf_optimizer();
     test_capture_length = 0;
     test_capture_overflow = 0;
     test_output_valid = 1;

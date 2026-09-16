@@ -67,27 +67,27 @@ def main():
             assert normalized(plain) == normalized(compressed), example
             print(f"{example.name}: {len(plain)} -> {len(compressed)} bytes", flush=True)
 
-        # Test the serializer directly: optimization may wrap or cancel Add runs.
+        # Test the immediate serializer directly, including exact Add run counts.
         # All cell counts, decimal boundaries, 256/65536 and maximum 24-bit count.
         harness = sources["compressed"].read_text().split("void main() {")[0]
         harness += """void main() {
             output('@'); output('B'); output('F'); output('C'); output('R');
             output('L'); output('E'); output('1'); output(';');
             cell n;
-            write_bf_repeat_character('+', n); output('.');
+            emit_repeat_character('+', n); output('.');
             n = 1;
             while (n != 0) {
-                write_bf_repeat_character('+', n); output('.');
-                write_bf_repeat_character('-', n); output('.');
-                write_bf_repeat_character('>', n); output('.');
-                write_bf_repeat_character('<', n); output('.');
+                emit_repeat_character('+', n); output('.');
+                emit_repeat_character('-', n); output('.');
+                emit_repeat_character('>', n); output('.');
+                emit_repeat_character('<', n); output('.');
                 n += 1;
             }
-            write_bf_repeat_256('>'); output('.');
-            write_bf_repeat_65536('<'); output('.');
+            emit_repeat_256('>'); output('.');
+            emit_repeat_65536('<'); output('.');
             WideValue count;
             count.low = 255; count.mid = 255; count.high = 255;
-            write_bf_repeat_wide('>', count); output('.');
+            emit_repeat_wide('>', count); output('.');
         }
         """
         path = work / "counts.bfc"
@@ -97,7 +97,7 @@ def main():
         extra = ""
         for count in boundaries:
             extra += (f"count.low={count % 256}; count.mid={(count // 256) % 256}; "
-                      f"count.high={count // 65536}; write_bf_repeat_wide('<',count); output('.');")
+                      f"count.high={count // 65536}; emit_repeat_wide('<',count); output('.');")
         harness = harness.rsplit("}", 1)[0] + extra + "}"
         path.write_text(harness)
         data = run([compiler, "--run-ir", str(path)])

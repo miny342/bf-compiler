@@ -5,22 +5,22 @@ void emit_copy(cell source, cell destination) {
     emit_clear(RESTORE_CELL);
 
     emit_move_to(source);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_move_to(destination);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(RESTORE_CELL);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(source);
-    emit_bf_character(']');
+    compiler_output!(']');
 
     emit_move_to(RESTORE_CELL);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_move_to(source);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(RESTORE_CELL);
-    emit_bf_character(']');
+    compiler_output!(']');
 }
 
 void check_scratch(cell destination) {
@@ -49,7 +49,7 @@ void emit_booleanize(cell destination) {
     emit_loop_open(destination);
     emit_clear(destination);
     emit_move_to(temporary);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_loop_close(destination);
     emit_transfer(temporary, destination, 0);
 }
@@ -77,7 +77,7 @@ void emit_less(cell left, cell right) {
 
     emit_loop_open(right);
     emit_move_to(right);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_copy(left, condition);
     emit_booleanize(condition);
     emit_constant(otherwise, 1);
@@ -86,7 +86,7 @@ void emit_less(cell left, cell right) {
     emit_clear(condition);
     emit_clear(otherwise);
     emit_move_to(left);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_loop_close(condition);
 
     emit_loop_open(otherwise);

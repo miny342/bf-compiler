@@ -14,41 +14,45 @@ void emit_move_to(cell destination) {
 
 void emit_clear(cell destination) {
     emit_move_to(destination);
-    emit_bf_character('[');
-    emit_bf_character('-');
-    emit_bf_character(']');
+    compiler_output!('[');
+    compiler_output!('-');
+    compiler_output!(']');
 }
 
 void emit_constant(cell destination, cell value) {
     emit_clear(destination);
-    emit_repeat_character('+', value);
+    if (value <= 128) {
+        emit_repeat_character('+', value);
+    } else {
+        emit_repeat_character('-', 0 - value);
+    }
 }
 
 void emit_input(cell destination) {
     emit_move_to(destination);
-    emit_bf_character(',');
+    compiler_output!(',');
 }
 
 void emit_transfer(cell source, cell destination, cell subtract) {
     emit_move_to(source);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_move_to(destination);
     if (subtract) {
-        emit_bf_character('-');
+        compiler_output!('-');
     } else {
-        emit_bf_character('+');
+        compiler_output!('+');
     }
     emit_move_to(source);
-    emit_bf_character(']');
+    compiler_output!(']');
 }
 
 void emit_loop_open(cell condition) {
     emit_move_to(condition);
-    emit_bf_character('[');
+    compiler_output!('[');
 }
 
 void emit_loop_close(cell condition) {
     emit_move_to(condition);
-    emit_bf_character(']');
+    compiler_output!(']');
 }

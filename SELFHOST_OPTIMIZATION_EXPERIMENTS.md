@@ -184,6 +184,17 @@ CLI/profile形式を変えず、要求フィールド別の分解・搬送、win
 RemoteTransfer ON/OFFを別々に測定する。global scalar copyと長いlive stackのfixtureも追加した。
 コンパクトケースはfull selfhostのphase比率の代わりにはならず、次の変更候補を絞るために用いる。
 
+当時のfull15でhotなglobal 69/70は、保存sourceのloweringからBF最適化器のkind/count配列
+（16/48セル）と対応づけた。count読み書き削減を試した後、full16の観測を受け、
+最適化器自体を撤去して素朴なBFCRLE出力へ戻した。以下のportal案は未実装の候補である。
+次は小配列の専用accessorで、要素選択と既知位置のcopyを行い、window交換・PC搬送を省く案を比較する。
+有効indexだけを扱えばよく、範囲外は言語仕様上UB。
+大配列では256セルごとの独立portal prefixと、相対位置で共用する内側accessorを候補とする。
+二段選択なら全要素のcaseを列挙する必要はない。ただしprefix/markerの追加配置、
+呼出し後の復元、論理offsetから物理位置への変換、および外側の長距離Moveを含む
+通常BF長とBFCRLE長をそれぞれ評価する。行選択でscan guardを書き換えるloopは、
+現RemoteTransferの経路不変条件を満たさないため、自動的に一括化できるとは仮定しない。
+
 ## 実験5：PCの3・4分割を独立評価
 
 約6,000件を均等に選択する単純モデルでは、二段の約78×78に対し、

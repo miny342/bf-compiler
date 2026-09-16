@@ -104,27 +104,27 @@ def main():
 
         # Generate arithmetic BF directly: no large array portal or self-input needed.
         helper.write_text(prelude + """void main() {
-            reset_bf_optimizer(); emit_constant(20,0); emit_constant(21,0);
+            emit_constant(20,0); emit_constant(21,0);
             emit_logical_offset_steps(20,21,0,255);
-            emit_move_to(20); emit_bf_character('.');
-            emit_move_to(21); emit_bf_character('.'); flush_bf_optimizer();
+            emit_move_to(20); compiler_output!('.');
+            emit_move_to(21); compiler_output!('.');
         }""")
         high_only = HEADER + run([compiler, "--run-ir", str(helper)])
         assert len(high_only) < 128, len(high_only)
         assert execute(high_only) == bytes((0, 255))
         offsets = [(0, 0), (255, 0), (0, 255), (255, 255), (250, 128)]
         amounts = [(0, 0), (1, 0), (255, 0), (0, 1), (0, 255), (255, 255)]
-        body = "void main(){reset_bf_optimizer();"
+        body = "void main(){"
         expected_offsets = bytearray()
         for low, high in offsets:
             for add_low, add_high in amounts:
                 body += (f"emit_constant(20,{low});emit_constant(21,{high});"
                          f"emit_logical_offset_steps(20,21,{add_low},{add_high});"
-                         "emit_move_to(20);emit_bf_character('.');"
-                         "emit_move_to(21);emit_bf_character('.');")
+                         "emit_move_to(20);compiler_output!('.');"
+                         "emit_move_to(21);compiler_output!('.');")
                 value = (low + 256 * high + add_low + 256 * add_high) % 65536
                 expected_offsets.extend(value.to_bytes(2, "little"))
-        body += "flush_bf_optimizer();}"
+        body += "}"
         helper.write_text(prelude + body)
         generated = HEADER + run([compiler, "--run-ir", str(helper)])
         assert execute(generated) == expected_offsets

@@ -30,21 +30,25 @@ cell physical_frame_slot(cell slot) {
 
 void emit_add_constant(cell destination, cell value) {
     emit_move_to(destination);
-    emit_repeat_character('+', value);
+    if (value <= 128) {
+        emit_repeat_character('+', value);
+    } else {
+        emit_repeat_character('-', 0 - value);
+    }
 }
 
 void emit_frame_copy(cell source, cell destination) {
     emit_clear(destination);
     emit_clear(FRAME_RESTORE);
     emit_move_to(source);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_move_to(destination);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(FRAME_RESTORE);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(source);
-    emit_bf_character(']');
+    compiler_output!(']');
     emit_transfer(FRAME_RESTORE, source, 0);
 }
 
@@ -92,7 +96,7 @@ void emit_offset_instruction(NodeId instruction) {
     );
     emit_loop_open(source);
     emit_move_to(source);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_logical_offset_steps(low, high, amount_low, amount_high);
     emit_loop_close(source);
 }
@@ -102,7 +106,7 @@ void emit_frame_booleanize(cell destination) {
     emit_loop_open(destination);
     emit_clear(destination);
     emit_move_to(FRAME_SCRATCH_0);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_loop_close(destination);
     emit_transfer(FRAME_SCRATCH_0, destination, 0);
 }
@@ -133,7 +137,7 @@ void emit_frame_less(cell left, cell right) {
     emit_clear(FRAME_SCRATCH_1);
     emit_loop_open(right);
     emit_move_to(right);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_frame_copy(left, FRAME_CONDITION);
     emit_frame_booleanize(FRAME_CONDITION);
     emit_constant(FRAME_SCRATCH_0, 1);
@@ -142,7 +146,7 @@ void emit_frame_less(cell left, cell right) {
     emit_clear(FRAME_CONDITION);
     emit_clear(FRAME_SCRATCH_0);
     emit_move_to(left);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_loop_close(FRAME_CONDITION);
 
     emit_loop_open(FRAME_SCRATCH_0);
@@ -173,17 +177,17 @@ void emit_previous_context(cell frame_cells) {
 // any recursion depth without materializing a pointer in a language cell.
 void emit_current_to_anchor(cell frame_cells) {
     emit_move_to(FRAME_ACTIVE);
-    emit_bf_character('[');
+    compiler_output!('[');
     emit_repeat_character('<', frame_cells);
-    emit_bf_character(']');
+    compiler_output!(']');
     target_position = 0;
 }
 
 void emit_anchor_to_current(cell frame_cells) {
     emit_repeat_character('>', frame_cells);
-    emit_bf_character('[');
+    compiler_output!('[');
     emit_repeat_character('>', frame_cells);
-    emit_bf_character(']');
+    compiler_output!(']');
     emit_repeat_character('<', frame_cells);
     target_position = 0;
 }
@@ -210,14 +214,14 @@ void emit_global_to_current(WideValue global, cell frame_cells) {
 
 void emit_global_constant(WideValue global, cell value, cell frame_cells) {
     emit_current_to_global(global, frame_cells);
-    emit_bf_character('[');
-    emit_bf_character('-');
-    emit_bf_character(']');
+    compiler_output!('[');
+    compiler_output!('-');
+    compiler_output!(']');
     if (value <= 128) {
         emit_repeat_character('+', value);
     } else {
         while (value != 0) {
-            emit_bf_character('-');
+            compiler_output!('-');
             value += 1;
         }
     }
@@ -228,27 +232,27 @@ void emit_global_copy(WideValue global, cell destination, cell frame_cells) {
     emit_clear(destination);
     emit_clear(FRAME_RESTORE);
     emit_current_to_global(global, frame_cells);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_global_to_current(global, frame_cells);
     emit_move_to(destination);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(FRAME_RESTORE);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(0);
     emit_current_to_global(global, frame_cells);
-    emit_bf_character(']');
+    compiler_output!(']');
     emit_global_to_current(global, frame_cells);
 
     emit_move_to(FRAME_RESTORE);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_move_to(0);
     emit_current_to_global(global, frame_cells);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_global_to_current(global, frame_cells);
     emit_move_to(FRAME_RESTORE);
-    emit_bf_character(']');
+    compiler_output!(']');
     emit_move_to(0);
 }
 
@@ -263,18 +267,18 @@ void emit_transfer_to_global(
         emit_global_constant(global, 0, frame_cells);
     }
     emit_move_to(source);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_move_to(0);
     emit_current_to_global(global, frame_cells);
     if (subtract) {
-        emit_bf_character('-');
+        compiler_output!('-');
     } else {
-        emit_bf_character('+');
+        compiler_output!('+');
     }
     emit_global_to_current(global, frame_cells);
     emit_move_to(source);
-    emit_bf_character(']');
+    compiler_output!(']');
     emit_move_to(0);
 }
 
@@ -285,20 +289,20 @@ void emit_copy_to_next_context(
 ) {
     emit_clear(FRAME_RESTORE);
     emit_move_to(source);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_move_to(0);
     emit_repeat_character('>', frame_cells);
     target_position = 0;
     emit_move_to(destination);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(0);
     emit_repeat_character('<', frame_cells);
     target_position = 0;
     emit_move_to(FRAME_RESTORE);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(source);
-    emit_bf_character(']');
+    compiler_output!(']');
     emit_transfer(FRAME_RESTORE, source, 0);
     emit_move_to(0);
 }
@@ -309,18 +313,18 @@ void emit_transfer_to_previous_context(
     cell frame_cells
 ) {
     emit_move_to(source);
-    emit_bf_character('[');
-    emit_bf_character('-');
+    compiler_output!('[');
+    compiler_output!('-');
     emit_move_to(0);
     emit_repeat_character('<', frame_cells);
     target_position = 0;
     emit_move_to(destination);
-    emit_bf_character('+');
+    compiler_output!('+');
     emit_move_to(0);
     emit_repeat_character('>', frame_cells);
     target_position = 0;
     emit_move_to(source);
-    emit_bf_character(']');
+    compiler_output!(']');
     emit_move_to(0);
 }
 
@@ -385,7 +389,7 @@ void emit_array_countdown_case(
 ) {
     emit_loop_open(branch);
     emit_move_to(branch);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_move_to(0);
     emit_array_case_operation(kind, data, base, element, storage, frame_cells);
     emit_loop_close(branch);
@@ -410,7 +414,7 @@ void emit_array_countdown_level(
         emit_clear(branch);
     } else {
         emit_move_to(index_slot);
-        emit_bf_character('-');
+        compiler_output!('-');
         emit_move_to(0);
         emit_array_countdown_level(
             kind,
@@ -450,7 +454,7 @@ void emit_array_page_countdown_case(
 ) {
     emit_loop_open(FRAME_SCRATCH_3);
     emit_move_to(FRAME_SCRATCH_3);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_move_to(0);
     WideValue page_offset;
     page_offset.mid = page;
@@ -494,7 +498,7 @@ void emit_array_page_countdown_level(
         emit_clear(FRAME_SCRATCH_3);
     } else {
         emit_move_to(high_slot);
-        emit_bf_character('-');
+        compiler_output!('-');
         emit_move_to(0);
         emit_array_page_countdown_level(
             kind,
@@ -609,7 +613,7 @@ void emit_ir_instruction(NodeId instruction) {
         emit_input(destination);
     } else if (kind == IR_OUTPUT) {
         emit_move_to(source);
-        emit_bf_character('.');
+        compiler_output!('.');
     } else if (kind == IR_ADD) {
         emit_transfer(source, destination, 0);
     } else if (kind == IR_SUBTRACT) {
@@ -810,7 +814,7 @@ void emit_dispatch_body(NodeId continuation) {
 void emit_countdown_case(NodeId continuation) {
     emit_loop_open(FRAME_BRANCH);
     emit_move_to(FRAME_BRANCH);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_move_to(0);
     emit_dispatch_body(continuation);
     emit_loop_close(FRAME_BRANCH);
@@ -824,7 +828,7 @@ void emit_low_countdown_level(NodeId continuation, cell remaining) {
         emit_clear(FRAME_BRANCH);
     } else {
         emit_move_to(FRAME_PC_LOW);
-        emit_bf_character('-');
+        compiler_output!('-');
         emit_move_to(0);
         NodeId next = node_next(continuation);
         emit_low_countdown_level(next, remaining - 1);
@@ -864,7 +868,7 @@ NodeId next_dispatch_page(NodeId first) {
 void emit_page_countdown_case(NodeId first, NodeId after) {
     emit_loop_open(FRAME_BRANCH);
     emit_move_to(FRAME_BRANCH);
-    emit_bf_character('-');
+    compiler_output!('-');
     emit_move_to(0);
     emit_dispatch_page(first, after);
     emit_loop_close(FRAME_BRANCH);
@@ -879,7 +883,7 @@ void emit_page_countdown_level(NodeId first, cell remaining) {
         emit_clear(FRAME_BRANCH);
     } else {
         emit_move_to(FRAME_PC_HIGH);
-        emit_bf_character('-');
+        compiler_output!('-');
         emit_move_to(0);
         emit_page_countdown_level(after, remaining - 1);
     }
@@ -925,7 +929,6 @@ void calculate_stage8_frame_size() {
 }
 
 void emit_continuation_program() {
-    reset_bf_optimizer();
     calculate_stage8_frame_size();
     // static globals | zero anchor | one frame-stride gap | root frame
     emit_repeat_wide('>', stage7_static_cells);
@@ -937,7 +940,7 @@ void emit_continuation_program() {
     emit_constant(FRAME_PC_LOW, main_entry_id.slot);
     emit_constant(FRAME_PC_HIGH, main_entry_id.page);
     emit_move_to(FRAME_ACTIVE);
-    emit_bf_character('[');
+    compiler_output!('[');
 
     NodeId first = first_continuation;
     NodeId last = last_continuation;
@@ -945,8 +948,7 @@ void emit_continuation_program() {
     emit_transfer(FRAME_NEXT_PC_LOW, FRAME_PC_LOW, 0);
     emit_transfer(FRAME_NEXT_PC_HIGH, FRAME_PC_HIGH, 0);
     emit_move_to(FRAME_ACTIVE);
-    emit_bf_character(']');
-    flush_bf_optimizer();
+    compiler_output!(']');
 }
 
 void compile_program_stage12() {

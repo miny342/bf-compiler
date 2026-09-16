@@ -1,6 +1,6 @@
 # Compact portal diagnostics
 
-Uses the production ABI and stage2 streaming optimizer. It does not run the compiler on its own source or change the ABI, optimizer, or RemoteTransfer implementation.
+Uses the production ABI and stage2 BF serializer. It does not run the compiler on its own source or change the ABI, optimizer, or RemoteTransfer implementation.
 
 ```sh
 cargo build --release -p bf-compiler -p bf-interpreter
@@ -32,7 +32,7 @@ Exact sources, inputs, outputs, BF/maps, run logs, script snapshots and binary h
 
 ## Cases
 
-- `optimizer`: reads the current production `09_bf_optimizer.bfc`, serializer and required arithmetic helpers. Repeats eviction, ring wrap, cancellation, clear recognition, output barriers, wide moves and flush. Output is compressed, so wide logical moves do not create huge output files. The wrapper only provides input and output; it does not reimplement the optimizer.
+- `optimizer`: historical case name, now reads the production `09_bf_serialization.bfc` and arithmetic helpers. Exercises immediate output with byte and wide runs; no ring buffer or peephole optimization remains. Input is retained for convenience, but output and work differ from measurements before the full16 rollback.
 - `scalar`: copies a global byte to a local snapshot, overwrites the global, then observes both values. Covers all 256 byte values and the separate global-to-frame copy template.
 - `global-byte-zero/full`, `global-triple-zero/full`: dynamically store and load 16-element arrays; one-cell and three-cell values, with zero/nonzero payload. Three-cell indices include physical chunk crossings. Constant-index setup and final observation do not issue dynamic portal requests.
 - `frame-triple-full`, `global-triple-deep/wide`, `frame-triple-deep`: change region, eight extra recursive activations, or persistent frame padding. Caller sentinel values are read after returning to verify preservation.

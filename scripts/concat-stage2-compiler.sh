@@ -22,7 +22,7 @@ for source in "$repo_dir"/selfhost/stage2/compiler/[0-9][0-9]_*.bfc; do
         fi
         if [[ "$entry" == cir ]]; then
             case "${source##*/}" in
-                04_codegen.bfc|09_bf_optimizer.bfc|09_bf_serialization.bfc|10_abi_codegen.bfc)
+                04_codegen.bfc|09_bf_serialization.bfc|10_abi_codegen.bfc)
                     continue
                     ;;
             esac

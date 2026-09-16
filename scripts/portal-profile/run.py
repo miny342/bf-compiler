@@ -41,26 +41,25 @@ def invoke(command, data=b'', env=None):
 
 
 def optimizer_source():
+    # Keep the historical case key; this now exercises the immediate serializer.
     directory = REPO / 'selfhost/stage2/compiler'
     arena = (directory / '06_arena.bfc').read_text()
     helpers = arena[arena.index('struct WideValue {'):arena.index('WideValue wide_multiply_length(')]
     return ('const cell COMPRESSED_BF_OUTPUT = 1;\n' + helpers
-            + (directory / '09_bf_optimizer.bfc').read_text()
             + (directory / '09_bf_serialization.bfc').read_text() + r'''
 macro compiler_output(value) { output(value); }
 void fail(cell first, cell second) { output('E'); output(first); output(second); abort(); }
 void main() {
     cell command = input();
     while (command != 0) {
-        if (command == '!') { flush_bf_optimizer(); reset_bf_optimizer(); }
+        if (command == '!') { }
         else if (command == 'R') {
             cell character = input(); WideValue count;
             count.low = input(); count.mid = input(); count.high = input();
             emit_repeat_wide(character, count);
-        } else { emit_bf_character(command); }
+        } else { compiler_output!(command); }
         command = input();
     }
-    flush_bf_optimizer();
 }
 ''')
 
@@ -237,7 +236,7 @@ def main():
     selected = {k:v for k,v in cases().items() if not args.cases or k in args.cases}
     inputs = [compiler, interpreter, Path(__file__), REPO/'crates/bf-compiler/src/abi_codegen.rs',
               REPO/'crates/bf-compiler/src/abi_codegen/portal_probe.rs',
-              *[REPO/'selfhost/stage2/compiler'/f for f in ['06_arena.bfc','09_bf_optimizer.bfc','09_bf_serialization.bfc']]]
+              *[REPO/'selfhost/stage2/compiler'/f for f in ['06_arena.bfc','09_bf_serialization.bfc']]]
     if args.baseline_compiler:
         inputs.append(args.baseline_compiler.resolve())
     save(root/'manifest.json', dict(commit=invoke(['git','rev-parse','HEAD']).stdout.decode().strip(),

@@ -1,14 +1,12 @@
 void test_codegen() {
     reset_capture();
     emit_constant(0, 0xFF);
-    flush_bf_optimizer();
     expect_test(test_capture_length == 4, 'v');
     expect_test(test_capture[0] == '[' && test_capture[1] == '-'
         && test_capture[2] == ']' && test_capture[3] == '-', 'w');
 
     reset_capture();
     emit_transfer(1, 0, 0);
-    flush_bf_optimizer();
     expect_test(test_capture_length == 7, 'x');
     expect_test(test_capture[0] == '>' && test_capture[1] == '['
         && test_capture[2] == '-' && test_capture[3] == '<'
