@@ -9,7 +9,7 @@ from pathlib import Path
 
 # Keep generated cache files out of the source directory.
 sys.dont_write_bytecode = True
-from ir_artifact_identity import cir_identity, source_identity
+from ir_artifact_identity import VERSION, cir_identity, source_identity
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("root", type=Path)
@@ -66,7 +66,7 @@ write(
         "artifact": {
             "kind": "source",
             "id": source_id,
-            "identity_version": "bfc-ir-artifact-v4",
+            "identity_version": VERSION.decode(),
             "lowering_options": lowering_options,
         },
         "chunk_cells": [16],
@@ -87,7 +87,7 @@ write(
         "artifact": {
             "kind": "cir",
             "id": cir_id,
-            "identity_version": "bfc-ir-artifact-v3",
+            "identity_version": VERSION.decode(),
             "lowering_options": lowering_options,
         },
         "chunk_cells": [16],

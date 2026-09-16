@@ -1,0 +1,11 @@
+void main() {
+    cell more = input();
+    while (more) {
+        cell a = input();
+        cell b = input();
+        cell borrow = a < b;
+        cell difference = a - b;
+        output(difference); output(borrow); output(a); output(b);
+        more = input();
+    }
+}

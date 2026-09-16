@@ -709,6 +709,7 @@ pub(crate) fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
 
 fn instruction_kind(instruction: &FrameInstruction) -> &'static str {
     match instruction {
+        FrameInstruction::SubWithBorrow { .. } => "sub_with_borrow",
         FrameInstruction::Compare { .. } => "compare",
         FrameInstruction::Set { .. } => "set",
         FrameInstruction::AddConst { .. } => "add_const",
@@ -1467,6 +1468,24 @@ impl<'a> AbiEmitter<'a> {
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
         match instruction {
+            FrameInstruction::SubWithBorrow {
+                left,
+                right,
+                difference,
+                borrow,
+                true_value,
+                false_value,
+            } => {
+                self.emit_compare(
+                    *left,
+                    *right,
+                    *borrow,
+                    *true_value,
+                    *false_value,
+                    Some(*difference),
+                    function,
+                )?;
+            }
             FrameInstruction::Compare {
                 left,
                 right,
@@ -1474,7 +1493,15 @@ impl<'a> AbiEmitter<'a> {
                 true_value,
                 false_value,
             } => {
-                self.emit_compare(*left, *right, *dst, *true_value, *false_value, function)?;
+                self.emit_compare(
+                    *left,
+                    *right,
+                    *dst,
+                    *true_value,
+                    *false_value,
+                    None,
+                    function,
+                )?;
             }
             FrameInstruction::Set { dst, value } => {
                 let dst = self.address_location(*dst, function)?;
@@ -1549,6 +1576,7 @@ impl<'a> AbiEmitter<'a> {
     /// Scratch0..3 are contiguous in both supported layouts, inaccessible as
     /// public operand addresses, and all zero on exit. The context origin and
     /// surrounding structured-branch flags are preserved.
+    #[allow(clippy::too_many_arguments)]
     fn emit_compare(
         &mut self,
         left: Address,
@@ -1556,11 +1584,18 @@ impl<'a> AbiEmitter<'a> {
         dst: Address,
         true_value: u8,
         false_value: u8,
+        difference: Option<Address>,
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
         let left = self.address_location(left, function)?;
         let right = self.address_location(right, function)?;
         let dst = self.address_location(dst, function)?;
+        let difference = difference
+            .map(|address| self.address_location(address, function))
+            .transpose()?;
+        // Restore is private ABI scratch, separate from structured-branch flags.
+        // Retain the countdown remainder here when both outputs are requested.
+        let remainder = self.current_abi_offset(AbiField::Restore)?;
         let l = self.current_abi_offset(AbiField::Scratch0)?;
         let r = self.current_abi_offset(AbiField::Scratch1)?;
         let e = self.current_abi_offset(AbiField::Scratch2)?;
@@ -1574,6 +1609,9 @@ impl<'a> AbiEmitter<'a> {
         self.move_location(right, Location::Relative(r));
         self.clear(e);
         self.clear(b);
+        if difference.is_some() {
+            self.clear(remainder);
+        }
         self.move_to(l);
         let countdown = self.capture_infallible(|emitter| {
             emitter.move_to(e);
@@ -1593,7 +1631,11 @@ impl<'a> AbiEmitter<'a> {
             emitter.position = e; // entry to the else body is always E
             let zero = emitter.capture_infallible(|emitter| {
                 emitter.adjust(255);
-                emitter.clear(l);
+                if difference.is_some() {
+                    emitter.move_value(l, remainder);
+                } else {
+                    emitter.clear(l);
+                }
                 emitter.move_to(b);
             });
             emitter.emit_loop(zero);
@@ -1604,12 +1646,25 @@ impl<'a> AbiEmitter<'a> {
         self.set(e, false_value);
         self.move_to(r);
         let less = self.capture_infallible(|emitter| {
-            emitter.clear_current();
+            if difference.is_some() {
+                let subtract = emitter.capture_infallible(|emitter| {
+                    emitter.adjust(255);
+                    emitter.move_to(remainder);
+                    emitter.adjust(255);
+                    emitter.move_to(r);
+                });
+                emitter.emit_loop(subtract);
+            } else {
+                emitter.clear_current();
+            }
             emitter.set(e, true_value);
             emitter.move_to(r);
         });
         self.emit_loop(less);
         self.move_to(0);
+        if let Some(difference) = difference {
+            self.move_location(Location::Relative(remainder), difference);
+        }
         self.move_location(Location::Relative(e), dst);
         Ok(())
     }

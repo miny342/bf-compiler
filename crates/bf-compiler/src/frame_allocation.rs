@@ -271,6 +271,19 @@ fn build_body(
             ..Node::new(function)
         };
         match instruction {
+            FrameInstruction::SubWithBorrow {
+                left,
+                right,
+                difference,
+                borrow,
+                ..
+            } => {
+                node.read(*left);
+                node.read(*right);
+                for address in [left, right, difference, borrow] {
+                    node.write(*address);
+                }
+            }
             FrameInstruction::Compare {
                 left, right, dst, ..
             } => {
@@ -533,6 +546,18 @@ fn map_body(body: &mut [FrameInstruction], map: &mut impl FnMut(&mut Address)) {
                 map(left);
                 map(right);
                 map(dst);
+            }
+            FrameInstruction::SubWithBorrow {
+                left,
+                right,
+                difference,
+                borrow,
+                ..
+            } => {
+                map(left);
+                map(right);
+                map(difference);
+                map(borrow);
             }
             FrameInstruction::Transfer { src, targets } => {
                 map(src);

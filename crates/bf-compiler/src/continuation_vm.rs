@@ -927,6 +927,21 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
         self.stats.executed_frame_instructions += 1;
         self.maybe_progress(progress, false);
         match instruction {
+            FrameInstruction::SubWithBorrow {
+                left,
+                right,
+                difference,
+                borrow,
+                true_value,
+                false_value,
+            } => {
+                let a = self.read_address(*left)?;
+                let b = self.read_address(*right)?;
+                self.write_address(*left, 0)?;
+                self.write_address(*right, 0)?;
+                self.write_address(*difference, a.wrapping_sub(b))?;
+                self.write_address(*borrow, if a < b { *true_value } else { *false_value })?;
+            }
             FrameInstruction::Compare {
                 left,
                 right,

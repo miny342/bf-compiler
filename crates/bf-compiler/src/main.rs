@@ -555,7 +555,10 @@ fn load_phase_config(
         .into());
     }
     if artifact.get("identity_version").and_then(Value::as_str) != Some(IR_ARTIFACT_ID_VERSION) {
-        return Err("phase config artifact.identity_version must be bfc-ir-artifact-v4".into());
+        return Err(format!(
+            "phase config artifact.identity_version must be {IR_ARTIFACT_ID_VERSION}"
+        )
+        .into());
     }
     let expected_options = lowering_options_json(optimization_options);
     if artifact.get("lowering_options") != Some(&expected_options) {
@@ -812,7 +815,7 @@ fn write_ir_metrics(
     Ok(())
 }
 
-const IR_ARTIFACT_ID_VERSION: &str = "bfc-ir-artifact-v4";
+const IR_ARTIFACT_ID_VERSION: &str = "bfc-ir-artifact-v5";
 
 fn lowering_options_json(
     optimization_options: bf_compiler::ContinuationOptimizationOptions,

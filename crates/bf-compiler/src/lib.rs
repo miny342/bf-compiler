@@ -16,6 +16,7 @@ mod continuation_optimizer;
 mod continuation_structure;
 mod continuation_vm;
 mod frame_allocation;
+mod frame_fusion;
 mod frame_layout;
 mod frontend;
 mod hir;

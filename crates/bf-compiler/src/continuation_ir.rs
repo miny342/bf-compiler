@@ -255,6 +255,17 @@ pub struct FrameTransferTarget {
 /// A structured operation whose frame addresses are resolved at run time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameInstruction {
+    /// Snapshot both unsigned inputs, clear them, then write the wrapping
+    /// difference followed by the selected borrow value (`left < right`).
+    /// All addresses may alias; when outputs alias, the borrow write wins.
+    SubWithBorrow {
+        left: Address,
+        right: Address,
+        difference: Address,
+        borrow: Address,
+        true_value: u8,
+        false_value: u8,
+    },
     /// Compare unsigned input snapshots (`left < right`), clear both operands,
     /// then write `true_value` or `false_value` to `dst`. All addresses may
     /// alias. Keeping this operation intact avoids copying a shrinking operand
@@ -1401,6 +1412,17 @@ fn validate_instructions(
 ) -> Result<(), ContinuationIrError> {
     for instruction in instructions {
         match instruction {
+            FrameInstruction::SubWithBorrow {
+                left,
+                right,
+                difference,
+                borrow,
+                ..
+            } => {
+                for address in [left, right, difference, borrow] {
+                    validate_address(*address, continuation, function, globals)?;
+                }
+            }
             FrameInstruction::Compare {
                 left, right, dst, ..
             } => {

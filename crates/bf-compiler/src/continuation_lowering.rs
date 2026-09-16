@@ -154,10 +154,12 @@ fn lower_hir_with_slot_reuse(
         let descriptor = lowerer
             .descriptor(lowered.entry)?
             .with_name(function.name.clone());
+        let (descriptor, fused) =
+            crate::frame_fusion::fuse_function(descriptor, lowerer.continuations);
         let (descriptor, allocated) = if reuse_slots {
-            crate::frame_allocation::allocate(descriptor, lowerer.continuations)
+            crate::frame_allocation::allocate(descriptor, fused)
         } else {
-            (descriptor, lowerer.continuations)
+            (descriptor, fused)
         };
         functions.push(descriptor);
         continuations.extend(allocated);
@@ -192,10 +194,11 @@ pub(crate) fn allocated_frame_chunks(
         &mut ids,
     )?;
     lowerer.lower()?;
-    let (descriptor, continuations) = crate::frame_allocation::allocate(
+    let (descriptor, fused) = crate::frame_fusion::fuse_function(
         lowerer.descriptor(lowered.entry)?,
         lowerer.continuations,
     );
+    let (descriptor, continuations) = crate::frame_allocation::allocate(descriptor, fused);
     let branch_cells = continuations
         .iter()
         .map(|continuation| crate::abi_codegen::maximum_branch_depth(continuation.body()))

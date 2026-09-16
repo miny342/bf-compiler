@@ -143,6 +143,29 @@ pub fn lower_selfhost_cir_with_options(
         )?;
     }
 
+    let order: HashMap<_, _> = continuations
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id(), i))
+        .collect();
+    let mut by_function: HashMap<_, Vec<_>> = HashMap::new();
+    for continuation in continuations {
+        by_function
+            .entry(continuation.function())
+            .or_default()
+            .push(continuation);
+    }
+    let mut continuations = Vec::new();
+    let functions = functions
+        .into_iter()
+        .map(|function| {
+            let body = by_function.remove(&function.id()).unwrap_or_default();
+            let (function, fused) = crate::frame_fusion::fuse_function(function, body);
+            continuations.extend(fused);
+            function
+        })
+        .collect();
+    continuations.sort_by_key(|c| order[&c.id()]);
     let lowered = ContinuationProgram::new_with_globals(
         FunctionId::new(usize::from(source.main_function)),
         globals.descriptors,

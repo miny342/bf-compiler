@@ -183,6 +183,7 @@ sourceのenumやstructというnominal型は消え、`ValueType::Cell`またはc
 `FrameInstruction`は次を表す。
 
 - `Set`、`AddConst`、sourceを保存する`Copy`、破壊的な`Transfer`
+- unsigned大小比較の`Compare`と、差・borrowを同時に生成する`SubWithBorrow`
 - protocol cellを除外した`AggregateCopy`
 - byte単位の`Input`と`Output`
 - BFへ構造的にloweringできる`Loop`と、条件を消費する`Branch`
@@ -191,6 +192,24 @@ temporary cellはsource localと同じ`FrameSlot`として表される。現行l
 式評価で必要になるvirtual temporary cellとaggregate regionを単調に追加する。その後、
 `frame_allocation`がCFG上の生存期間を解析し、scalar slotと同じサイズのaggregate regionを再利用する。
 source localとtemporaryを区別せず、同時に必要な値が同じ領域へ割り当てられないようにする。
+
+### 局所的な算術fusion
+
+`frame_fusion`はsourceのframe割当て前、およびbinary CIRをFrame命令へ変換した後に適用する。
+同一の直列領域内でコピーと値の更新を追跡し、`a < b`（結果反転も可）に続く
+`a - b`が同じ入力snapshotを使う場合、`SubWithBorrow`へ融合する。
+関数名、ソース言語の型追加、intrinsic、binary CIRの新opcodeには依存しない。
+
+`SubWithBorrow`は入力をsnapshotし、両入力を0にしてから、modulo 256の差、指定された
+borrow値の順に出力する。全operandのaliasを許し、出力同士がaliasする場合はborrowが残る。
+ABI backendは比較countdownの残りを差として使う。既存の`Restore`と`Scratch0..3`を
+使用し、終了時に作業セルを0に戻す。
+
+差の出力先を比較位置で先に書いても途中で観測されない場合は、最終出力先へ直接生成する。
+それ以外は一時slotに保存し、元の減算位置で書き戻す。融合で不要になったコピーは、
+次の読み出しより先に上書きされると証明できるものだけ除去する。元の一時セルのclearも保持する。
+call、portal、I/O、非local storage、aggregate copy、制御境界を跨ぐ融合は行わない。
+Loop/Branchの各bodyは独立に処理する。加算＋carryや、減算より後に現れる比較は未対応。
 
 ### TerminatorとCFG
 
