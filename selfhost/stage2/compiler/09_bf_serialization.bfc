@@ -65,23 +65,6 @@ void emit_repeat_65536(cell character) {
     }
 }
 
-// Emit one fixed-width decimal digit and return the remainder. Leading zeros
-// are legal in BFCRLE; fixed width avoids a mutable cross-call output state.
-WideValue emit_repeat_decimal_digit(WideValue count, cell low, cell mid, cell high) {
-    WideValue place;
-    place.low = low;
-    place.mid = mid;
-    place.high = high;
-    cell digit = '0';
-    while (count.high > high || (count.high == high &&
-        (count.mid > mid || (count.mid == mid && count.low >= low)))) {
-        count = wide_subtract(count, place);
-        digit += 1;
-    }
-    compiler_output!(digit);
-    return count;
-}
-
 void emit_repeat_wide(cell character, WideValue count) {
     if (COMPRESSED_BF_OUTPUT) {
         if (count.high == 0 && count.mid == 0) {
@@ -90,14 +73,132 @@ void emit_repeat_wide(cell character, WideValue count) {
         }
         compiler_output!(character);
         // Little-endian base-256 digits of 10^7, 10^6, ..., 10^0.
-        count = emit_repeat_decimal_digit(count, 128, 150, 152);
-        count = emit_repeat_decimal_digit(count, 64, 66, 15);
-        count = emit_repeat_decimal_digit(count, 160, 134, 1);
-        count = emit_repeat_decimal_digit(count, 16, 39, 0);
-        count = emit_repeat_decimal_digit(count, 232, 3, 0);
-        count = emit_repeat_decimal_digit(count, 100, 0, 0);
-        count = emit_repeat_decimal_digit(count, 10, 0, 0);
-        count = emit_repeat_decimal_digit(count, 1, 0, 0);
+        // Keep each fixed-place loop here rather than calling a generic helper:
+        // the self-host compiler can then fuse the fixed subtraction and its
+        // borrow flag without adding eight dispatcher functions.
+        cell digit = 0;
+        while (count.high > 152 || (count.high == 152 &&
+            (count.mid > 150 || (count.mid == 150 && count.low >= 128)))) {
+            cell borrow = count.low < 128;
+            count.low -= 128;
+            cell next_borrow = count.mid < 150;
+            count.mid -= 150;
+            if (borrow) {
+                if (count.mid == 0) {
+                    next_borrow = 1;
+                }
+                count.mid -= 1;
+            }
+            count.high -= 152;
+            if (next_borrow) {
+                count.high -= 1;
+            }
+            digit += 1;
+        }
+        compiler_output!('0' + digit);
+
+        digit = 0;
+        while (count.high > 15 || (count.high == 15 &&
+            (count.mid > 66 || (count.mid == 66 && count.low >= 64)))) {
+            cell borrow = count.low < 64;
+            count.low -= 64;
+            cell next_borrow = count.mid < 66;
+            count.mid -= 66;
+            if (borrow) {
+                if (count.mid == 0) {
+                    next_borrow = 1;
+                }
+                count.mid -= 1;
+            }
+            count.high -= 15;
+            if (next_borrow) {
+                count.high -= 1;
+            }
+            digit += 1;
+        }
+        compiler_output!('0' + digit);
+
+        digit = 0;
+        while (count.high > 1 || (count.high == 1 &&
+            (count.mid > 134 || (count.mid == 134 && count.low >= 160)))) {
+            cell borrow = count.low < 160;
+            count.low -= 160;
+            cell next_borrow = count.mid < 134;
+            count.mid -= 134;
+            if (borrow) {
+                if (count.mid == 0) {
+                    next_borrow = 1;
+                }
+                count.mid -= 1;
+            }
+            count.high -= 1;
+            if (next_borrow) {
+                count.high -= 1;
+            }
+            digit += 1;
+        }
+        compiler_output!('0' + digit);
+
+        digit = 0;
+        while (count.high != 0 || count.mid > 39 ||
+            (count.mid == 39 && count.low >= 16)) {
+            cell borrow = count.low < 16;
+            count.low -= 16;
+            cell next_borrow = count.mid < 39;
+            count.mid -= 39;
+            if (borrow) {
+                if (count.mid == 0) {
+                    next_borrow = 1;
+                }
+                count.mid -= 1;
+            }
+            if (next_borrow) {
+                count.high -= 1;
+            }
+            digit += 1;
+        }
+        compiler_output!('0' + digit);
+
+        // The 10^4 pass leaves a value below 10^4, so high is now known zero.
+        digit = 0;
+        while (count.mid > 3 ||
+            (count.mid == 3 && count.low >= 232)) {
+            cell borrow = count.low < 232;
+            count.low -= 232;
+            count.mid -= 3;
+            if (borrow) {
+                count.mid -= 1;
+            }
+            digit += 1;
+        }
+        compiler_output!('0' + digit);
+
+        // The 10^3 pass leaves a value below 10^3; high remains zero.
+        digit = 0;
+        while (count.mid != 0 || count.low >= 100) {
+            cell borrow = count.low < 100;
+            count.low -= 100;
+            if (borrow) {
+                count.mid -= 1;
+            }
+            digit += 1;
+        }
+        compiler_output!('0' + digit);
+
+        // The 10^2 pass leaves a value below 100, so only low remains.
+        digit = 0;
+        while (count.low >= 10) {
+            count.low -= 10;
+            digit += 1;
+        }
+        compiler_output!('0' + digit);
+
+        digit = 0;
+        while (count.low != 0) {
+            count.low -= 1;
+            digit += 1;
+        }
+        compiler_output!('0' + digit);
         return;
     }
     while (count.high != 0) {
