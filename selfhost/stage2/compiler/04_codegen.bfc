@@ -3,11 +3,12 @@
 cell target_position;
 
 void emit_move_to(cell destination) {
-    if (target_position < destination) {
-        emit_repeat_character('>', destination - target_position);
+    cell tmp = target_position;
+    if (tmp < destination) {
+        emit_repeat_character('>', destination - tmp);
     }
-    if (target_position > destination) {
-        emit_repeat_character('<', target_position - destination);
+    if (tmp > destination) {
+        emit_repeat_character('<', tmp - destination);
     }
     target_position = destination;
 }
