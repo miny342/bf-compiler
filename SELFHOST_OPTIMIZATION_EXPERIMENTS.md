@@ -46,6 +46,38 @@
   `arena_advance`はphase別IR集計で熱い関数として確認された。
   portal再訪率だけからbatchの安全性・優位性を判断しない。
 
+## 2026-09-20: full23 と BF シリアライザの手動特殊化
+
+full19からfull23までのselfhost実験で、BF側の比較・継続・値コピーが主な費用として残った。
+今回の修正と観測は次のとおり。
+
+- `emit_move_to`では、ユーザーが追加した素朴な修正として現在位置をローカルcellへ一度コピーし、
+  そのローカル値を比較・更新してから`target_position`へ戻すようにした。
+  full23 profileではこの関数のexclusive shareが19.716%から12.140%へ下がったが、
+  full19/full23は起動環境と入力条件が完全には同一でないため、時間の差をこの変更だけの効果とは断定しない。
+- `emit_repeat_wide`は、セルのwrappingを利用した固定のgreedy展開へ変更した。
+  10^7桁は最上位が0/1なので`if`、10^6〜10^1は比較順5,2,1,1の4段、10^0は残ったlowをそのまま出力する。
+  1000〜10000桁の比較では残余の`high`も考慮し、単純化による桁落ちを避けた。
+  これにより、動的な繰り返し回数と`sub_with_borrow`を減らすことを狙った。
+- full23（`logs/full-selfhost-20260920-014052`）では、full19比で
+  `abi.frame.sub_with_borrow`のshareが14.644%から8.497%へ、
+  `emit_repeat_wide`のshareが21.279%から17.109%へ下がった。
+  一方、`abi.frame.compare`は9.575%から12.961%へ増え、固定展開が比較とdispatcher countdownを
+  別のボトルネックとして表面化させた。`emit_repeat_wide`のcontinuation数は50から166へ増えているため、
+  継続を増やし過ぎない自動特殊化は将来候補だが、今回は実装しない。
+- 圧縮BFの`emit_repeat_character`も、100/10のwhileをやめ、200,100,50,20,10,10の
+  固定6比較（百の位2段、十の位4段）へ変更した。各減算はwrapping cellの補数加算にしている。
+  これは今回の新しい変更であり、full23のprofileにはまだ反映されていない。
+
+full23の生成物を使った`hello.bfc`（`A!`）と`arithmetic.bfc`（出力byte列255,2,0）は、
+生成BFを実行した結果とRust IR実行結果が一致した。さらに、この変更を含む現在のstage2 compilerを
+生成して同じ2例を再実行し、結果一致を確認した。圧縮BF全体の検証では、count 0〜255を含む
+repeat出力の検証も通している。
+
+今後の候補として、比較命令の復元、global/static cellのアドレス解決メモ化、
+`arena_read`/`arena_advance`の特殊化、continuationをまたぐ制御構造の再配置がある。
+これらはfull23だけでは効果と正しさを断定できないため、今回のコミットでは保留する。
+
 以下は各実験の設計と検証条件。実験1のIR部分と実験2の空Goto・2c部分は完了しており、
 既存実装を足場に未完項目へ進む。実装済み部分の再作成は不要。
 
