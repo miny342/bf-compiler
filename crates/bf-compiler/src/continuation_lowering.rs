@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 
 mod local_frame;
+mod structured_frame;
 
 use crate::continuation_ir::{
     Address, AggregateRegion, Continuation, ContinuationId, ContinuationIrError,
@@ -393,6 +394,9 @@ struct FunctionLowerer<'a, 'ids> {
     main: bool,
     ids: &'ids mut IdAllocator,
     current: Option<OpenContinuation>,
+    // Nested frame bodies can diverge, but only the enclosing continuation
+    // should receive the unreachable terminator after an infinite loop.
+    capturing_frame: bool,
     continuations: Vec<Continuation>,
     local_storage: Vec<LocalStorage>,
     frame_aggregates: Vec<FrameAggregateDescriptor>,
@@ -437,6 +441,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 id: entry,
                 body: Vec::new(),
             }),
+            capturing_frame: false,
             continuations: Vec::new(),
             local_storage,
             frame_aggregates,
@@ -542,7 +547,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             HirStatementKind::Block(statements) => {
                 for statement in statements {
                     self.lower_statement(statement)?;
-                    if self.current.is_none() {
+                    if self.current.is_none() || structured_frame::statement_stops(statement) {
                         break;
                     }
                 }
@@ -593,6 +598,14 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 else_branch,
             } => self.lower_if(condition, then_branch, else_branch.as_deref())?,
             HirStatementKind::While { condition, body } => self.lower_while(condition, body)?,
+        }
+        if !self.capturing_frame
+            && structured_frame::statement_stops(statement)
+            && let Some(current) = &self.current
+        {
+            // A structured infinite loop cannot reach its terminator. Close
+            // the block without allocating a dispatcher ID or a return value.
+            self.finish(Terminator::Goto { target: current.id });
         }
         Ok(())
     }
@@ -727,6 +740,24 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             return Ok(());
         }
         let condition_value = self.evaluate_scalar_temporary(condition)?;
+        if self.statement_is_frame_only(then_branch)
+            && else_branch.is_none_or(|branch| self.statement_is_frame_only(branch))
+        {
+            let then_body =
+                self.capture_frame_instructions(|this| this.lower_statement(then_branch))?;
+            let else_body = self.capture_frame_instructions(|this| {
+                if let Some(branch) = else_branch {
+                    this.lower_statement(branch)?;
+                }
+                Ok(())
+            })?;
+            self.emit(FrameInstruction::Branch {
+                condition: condition_value,
+                then_body,
+                else_body,
+            });
+            return Ok(());
+        }
         let then_id = self.ids.allocate()?;
         let else_id = self.ids.allocate()?;
         self.finish(Terminator::Branch {
@@ -769,10 +800,32 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         body: &HirStatement,
     ) -> Result<(), ContinuationLoweringError> {
         self.require_cell(condition)?;
-        if let Some(condition) = hir::constant_cell_value(condition) {
-            if condition == 0 {
-                return Ok(());
+        if hir::constant_cell_value(condition) == Some(0) {
+            return Ok(());
+        }
+        if self.expression_is_frame_only(condition) && self.statement_is_frame_only(body) {
+            if let Some(condition) = self.direct_loop_condition(condition) {
+                let body = self.capture_frame_instructions(|this| this.lower_statement(body))?;
+                self.emit(FrameInstruction::Loop { condition, body });
+            } else {
+                // Evaluate once before entry and again after each iteration,
+                // including input and short-circuit side effects.
+                let condition_value = self.evaluate_scalar_temporary(condition)?;
+                let body = self.capture_frame_instructions(|this| {
+                    this.lower_statement(body)?;
+                    if !structured_frame::statement_stops(body) {
+                        this.evaluate_scalar(condition, condition_value)?;
+                    }
+                    Ok(())
+                })?;
+                self.emit(FrameInstruction::Loop {
+                    condition: condition_value,
+                    body,
+                });
             }
+            return Ok(());
+        }
+        if hir::constant_cell_value(condition).is_some() {
             let body_id = self.ids.allocate()?;
             self.finish(Terminator::Goto { target: body_id });
             self.start(body_id);
@@ -1040,7 +1093,43 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         right: &HirExpression,
         destination: Address,
     ) -> Result<(), ContinuationLoweringError> {
+        if let Some(value) = hir::constant_cell_value(left) {
+            let short = (operator == BinaryOperator::LogicalAnd && value == 0)
+                || (operator == BinaryOperator::LogicalOr && value != 0);
+            if short {
+                self.emit(FrameInstruction::Set {
+                    dst: destination,
+                    value: u8::from(value != 0),
+                });
+            } else {
+                let right_value = self.evaluate_scalar_temporary(right)?;
+                self.boolean_from(right_value, destination, 1, 0);
+            }
+            return Ok(());
+        }
         let left_value = self.evaluate_scalar_temporary(left)?;
+        if self.expression_is_frame_only(right) {
+            let right_body = self.capture_frame_instructions(|this| {
+                let value = this.evaluate_scalar_temporary(right)?;
+                this.boolean_from(value, destination, 1, 0);
+                Ok(())
+            })?;
+            let short_body = vec![FrameInstruction::Set {
+                dst: destination,
+                value: u8::from(operator == BinaryOperator::LogicalOr),
+            }];
+            let (then_body, else_body) = if operator == BinaryOperator::LogicalAnd {
+                (right_body, short_body)
+            } else {
+                (short_body, right_body)
+            };
+            self.emit(FrameInstruction::Branch {
+                condition: left_value,
+                then_body,
+                else_body,
+            });
+            return Ok(());
+        }
         let right_id = self.ids.allocate()?;
         let short_id = self.ids.allocate()?;
         let join_id = self.ids.allocate()?;
@@ -1782,5 +1871,111 @@ mod tests {
             last_available.allocate(),
             Err(ContinuationLoweringError::ContinuationIdsExhausted)
         );
+    }
+
+    fn lower_unoptimized(source: &str) -> ContinuationProgram {
+        let ast = parser::parse(lexer::lex(source).unwrap()).unwrap();
+        let hir = semantic::analyze(&ast).unwrap();
+        // No continuation optimizer (including empty-goto threading) runs here.
+        lower_hir_with_slot_reuse(&hir, true).unwrap()
+    }
+
+    #[test]
+    fn frame_only_control_never_allocates_continuations() {
+        for source in [
+            "void main(){cell a=input();cell b=input();if(a<b){a+=b;}else{b-=a;}output(a&&b||input());}",
+            "void main(){cell n=input();while(n>1&&input()){if(n<3||n==4){n-=1;}else{n-=2;}}output(n);}",
+            "struct Pair{cell a;cell b;} Pair g; void main(){Pair p;cell n=input();while(n){p.a=n;g=p;if(g.a){g.b+=p.a;}n-=1;}}",
+            "cell[2] g;void main(){cell[2] a;cell n=input();while(n){a[0]=n;g=a;if(g[0]){output(g[1]);}n-=1;}}",
+            "void main(){cell[0] a;while(input()){output(a[input()]);a[input()]=input();}}",
+            "cell fail(){abort();}void main(){cell n=input();while(n){if(0){abort();}while(0){output(fail());}output(0&&fail());output(1||fail());n-=1;}}",
+        ] {
+            let program = lower_unoptimized(source);
+            for function in program.functions() {
+                assert_eq!(
+                    program
+                        .continuations()
+                        .iter()
+                        .filter(|c| c.function() == function.id())
+                        .count(),
+                    1,
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unconditional_expression_effects_do_not_split_the_following_frame_branch() {
+        for expression in [
+            "if(read()){output(1);}else{output(2);}",
+            "output(read()&&input());",
+            "output(read()||input());",
+        ] {
+            let source = format!("cell read(){{return input();}}void main(){{{expression}}}");
+            let program = lower_unoptimized(&source);
+            assert_eq!(program.continuations().len(), 3, "{source}");
+            assert_eq!(
+                program
+                    .continuations()
+                    .iter()
+                    .filter(|c| matches!(c.terminator(), Terminator::Call { .. }))
+                    .count(),
+                1
+            );
+            assert!(!program.continuations().iter().any(|c| matches!(
+                c.terminator(),
+                Terminator::Branch { .. } | Terminator::Goto { .. }
+            )));
+        }
+    }
+
+    #[test]
+    fn yielding_branches_and_loop_conditions_keep_continuation_boundaries() {
+        for source in [
+            "cell read(){return input();}void main(){while(read()){output(1);}}",
+            "cell read(){return input();}void main(){output(input()&&read());output(input()||read());}",
+            "cell[2] a;void main(){cell n=input();if(n){a[n]=1;}while(a[n]){a[n]-=1;}}",
+            "void main(){while(input()){if(input()){return;}else{abort();}}}",
+        ] {
+            let program = lower_unoptimized(source);
+            assert!(
+                program
+                    .continuations()
+                    .iter()
+                    .any(|c| matches!(c.terminator(), Terminator::Branch { .. })),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn infinite_frame_loops_do_not_need_a_return_or_extra_ids() {
+        for body in [
+            "while(1){output(2);}",
+            "if(input()){while(1){output(2);}}else{while(1){output(3);}}",
+            "while(1){if(input()){while(1){output(2);}}output(3);}abort();",
+        ] {
+            let program = lower_unoptimized(&format!(
+                "cell spin(){{{body}}}void main(){{output(spin());}}"
+            ));
+            let spin = program
+                .functions()
+                .iter()
+                .find(|f| f.name() == Some("spin"))
+                .unwrap();
+            let nodes: Vec<_> = program
+                .continuations()
+                .iter()
+                .filter(|c| c.function() == spin.id())
+                .collect();
+            assert_eq!(nodes.len(), 1, "{body}");
+            assert_eq!(
+                nodes[0].terminator(),
+                &Terminator::Goto {
+                    target: nodes[0].id()
+                }
+            );
+        }
     }
 }

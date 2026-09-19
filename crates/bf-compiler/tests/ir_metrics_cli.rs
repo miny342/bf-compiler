@@ -324,7 +324,7 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     fs::create_dir_all(&root).unwrap();
     fs::write(
         root.join("loop.bfc"),
-        // Keep this a CFG-restoration test, not a direct scalar-loop test.
+        // Source loops are structured before either CFG option runs.
         "void main(){cell n=input();while(n != 0){n-=1;output(n+0);}output(n);}",
     )
     .unwrap();
@@ -352,16 +352,9 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     let before = read("baseline.json");
     let after = read("candidate.json");
     assert_ne!(before["artifact_identity"], after["artifact_identity"]);
-    assert!(
-        after["optimization"]["local_structure"]["loops"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
-    assert!(
-        after["run"]["executed_continuations"].as_u64().unwrap()
-            < before["run"]["executed_continuations"].as_u64().unwrap()
-    );
+    assert_eq!(after["optimization"]["local_structure"]["loops"], 0);
+    assert_eq!(before["run"]["executed_continuations"], 1);
+    assert_eq!(after["run"]["executed_continuations"], 1);
     assert_eq!(after["accounting"]["ok"], true);
     assert_eq!(
         after["artifact_identity_definition"]["version"],

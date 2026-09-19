@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_regions_recompute_conditions_and_preserve_io() {
+    fn source_nested_regions_are_already_structured_and_preserve_io() {
         let source = r"void main() {
             cell n = input();
             while (n != 0) {
@@ -347,7 +347,8 @@ mod tests {
             }
             output(n);
         }";
-        // Both the ordinary source CFG and the 2c back-edge form are covered.
+        // HIR lowering already preserves these regions, independently of either
+        // CFG option. The reconstruction pass must leave them intact.
         for inline_branch_successors in [false, true] {
             let (program, _) = crate::lower_source_with_options(
                 source,
@@ -368,10 +369,10 @@ mod tests {
             let (explicit, explicit_stats) = structure_local_control_flow(&program).unwrap();
             assert_eq!(integrated, explicit);
             assert_eq!(integrated_stats.local_structure, explicit_stats);
+            assert_eq!(integrated_stats.continuations_before, 1);
             for input in [0, 3] {
                 let stats = check(&program, &[input]);
-                assert!(stats.loops >= 2, "{stats:?}");
-                assert!(stats.branches >= 2, "{stats:?}");
+                assert_eq!(stats, LocalStructureStats::default());
             }
         }
     }

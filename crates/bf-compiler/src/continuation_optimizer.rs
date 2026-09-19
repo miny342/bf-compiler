@@ -1,7 +1,7 @@
 //! Control-flow simplification for continuation IR.
 //!
-//! The lowering of structured source control flow deliberately keeps each
-//! continuation boundary explicit.  Some of those boundaries have no frame
+//! Source lowering keeps frame-only control flow structured. The remaining
+//! boundaries (and imported CIR) can still have continuations with no frame
 //! instructions and only jump to another continuation.  Threading those jumps
 //! before ABI lowering removes dispatcher visits.  The surviving IDs are
 //! compacted afterwards so the ABI can continue to use dense countdown pages.
@@ -19,6 +19,8 @@ pub struct ContinuationOptimizationOptions {
     /// Inline a nonempty same-function Branch successor into a Goto source.
     pub inline_branch_successors: bool,
     /// Reconstruct single-entry local branches and loops after CFG cleanup.
+    /// HIR regions that need no continuation boundary are always lowered to
+    /// structured frame instructions, independently of this option.
     pub structure_local_control_flow: bool,
 }
 

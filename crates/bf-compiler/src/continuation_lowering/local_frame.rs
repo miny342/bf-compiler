@@ -28,7 +28,7 @@ impl FunctionLowerer<'_, '_> {
     }
 
     /// Truth contexts need zero/nonzero, not a materialized canonical 0/1.
-    fn direct_loop_condition(&self, expression: &HirExpression) -> Option<Address> {
+    pub(super) fn direct_loop_condition(&self, expression: &HirExpression) -> Option<Address> {
         if expression.ty != TypeId::CELL {
             return None;
         }
@@ -111,8 +111,8 @@ impl FunctionLowerer<'_, '_> {
                 condition: self.direct_loop_condition(condition)?,
                 body: self.direct_frame_statement(body)?,
             }]),
-            // Calls, early exits, dynamic addresses, general predicates and
-            // branches retain the established continuation-based lowering.
+            // General expressions and control flow use the full lowerer, which
+            // also preserves frame-only branches and loops structurally.
             _ => None,
         }
     }

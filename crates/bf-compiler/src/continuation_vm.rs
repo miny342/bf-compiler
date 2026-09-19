@@ -1682,9 +1682,9 @@ mod tests {
 
     #[test]
     fn optionally_collects_hot_continuation_transitions() {
-        // Keep dispatcher edges in this transition-collection fixture.
+        // A scalar call keeps dispatcher edges even with structured HIR loops.
         let (program, _) = crate::lower_source_with_options(
-            "void main() { cell value = input(); while (value != 0) { output(value); value = value - 1; } }",
+            "cell decrement(cell value) { return value - 1; } void main() { cell value = input(); while (value != 0) { output(value); value = decrement(value); } }",
             crate::ContinuationOptimizationOptions {
                 structure_local_control_flow: false,
                 ..Default::default()
@@ -1711,7 +1711,7 @@ mod tests {
 
     #[test]
     fn transition_collection_does_not_change_execution_counters() {
-        let source = "void main() { cell value = input(); while (value != 0) { output(value); value = value - 1; } }";
+        let source = "cell decrement(cell value) { return value - 1; } void main() { cell value = input(); while (value != 0) { output(value); value = decrement(value); } }";
         let (program, _) = crate::lower_source_with_options(
             source,
             crate::ContinuationOptimizationOptions {
