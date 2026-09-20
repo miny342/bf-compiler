@@ -1641,7 +1641,12 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(l);
         });
         self.emit_loop(countdown);
-        self.set(e, false_value);
+        // The countdown leaves E zero. Selfhost comparisons use boolean
+        // outputs, so avoid materializing the false value and use the less
+        // branch's one-shot loop only to set a nonzero true value.
+        if false_value != 0 {
+            self.set(e, false_value);
+        }
         self.move_to(r);
         let less = self.capture_infallible(|emitter| {
             if difference.is_some() {
@@ -1655,8 +1660,16 @@ impl<'a> AbiEmitter<'a> {
             } else {
                 emitter.clear_current();
             }
-            emitter.set(e, true_value);
-            emitter.move_to(r);
+            if false_value == 0 {
+                if true_value != 0 {
+                    emitter.move_to(e);
+                    emitter.adjust(true_value);
+                }
+                emitter.move_to(r);
+            } else {
+                emitter.set(e, true_value);
+                emitter.move_to(r);
+            }
         });
         self.emit_loop(less);
         self.move_to(0);

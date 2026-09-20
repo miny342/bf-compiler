@@ -144,6 +144,23 @@ Rust backendで作った32-cell配列の反復fixtureでは、出力SHA-256が�
 | `stage7_globals` | 143,191,838 | 141,787,622 | 0.98% |
 | `stage8_aggregates` | 130,034,354 | 128,763,436 | 0.98% |
 
+sourceが後続で読み取りなしに上書きされる局所`Copy`を、destination clearと破壊的`Transfer`へ変換する試作も行った。
+compiler artifactは983 bytesだけ縮んだが、hello/stage7/stage8の実行統計は完全に不変だったため撤回した。
+
+比較loweringについては、countdown後にzeroであるABI scratch `E`を再利用し、`false_value == 0`
+かつselfhostで使うboolean結果のときだけfalse値のmaterializeを省く試作を追加した。
+さらにless側で`true_value`を`set`せず直接incrementし、zeroの`E`を保つ。8-bit入力の全組合せと
+ABI配置を既存テストで検証し、compiler artifactは1,144 bytes減った。代表例では出力BFが一致し、
+native/RLE operationは次のように小さく減少した。
+
+| 入力 | baseline native | optimized native | native削減率 | RLE削減率 |
+|---|---:|---:|---:|---:|
+| `hello` | 10,908,004 | 10,904,979 | 0.028% | 0.018% |
+| `stage7_globals` | 141,787,622 | 141,740,331 | 0.033% | 0.021% |
+| `stage8_aggregates` | 128,763,436 | 128,722,044 | 0.032% | 0.021% |
+
+比較全体の支配的コストを消す規模ではないが、条件を限定した安全な削減として採用した。
+
 `cargo test --workspace`（175 passed, 1 ignored）と
 `verify-selfhost-compressed.py`は全例で成功した。全stage2 sourceをこの候補BFで一度に再コンパイルする
 試行は出力前に長時間化して停止したため、full selfhostの20%達成とは扱わない。
