@@ -1851,6 +1851,9 @@ impl<'a> AbiEmitter<'a> {
         // Returned frame data is zero, so writing the future parameter region
         // before allocation is safe.
         let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+        if !arguments.is_empty() {
+            self.clear_location(restore);
+        }
         for (&argument, &(parameter, parameter_cells)) in arguments.iter().zip(&parameters) {
             match (argument, parameter) {
                 (ValueOperand::Cell(argument), ParameterLocation::Cell(parameter)) => {
@@ -1858,7 +1861,7 @@ impl<'a> AbiEmitter<'a> {
                     let dst = Location::Relative(
                         callee_context_delta + callee_frame.frame_offset(parameter),
                     );
-                    self.copy_locations(src, dst, restore);
+                    self.copy_locations_to_zeroed_destination(src, dst, restore);
                 }
                 (
                     ValueOperand::Cell(argument),
@@ -1869,7 +1872,7 @@ impl<'a> AbiEmitter<'a> {
                         callee_context_delta
                             + callee_frame.aggregate_element_offset(aggregate, index)?,
                     );
-                    self.copy_locations(src, dst, restore);
+                    self.copy_locations_to_zeroed_destination(src, dst, restore);
                 }
                 (
                     ValueOperand::Array(_) | ValueOperand::Aggregate { .. },
@@ -1882,7 +1885,7 @@ impl<'a> AbiEmitter<'a> {
                             callee_context_delta
                                 + callee_frame.aggregate_element_offset(parameter, index)?,
                         );
-                        self.copy_locations(src, dst, restore);
+                        self.copy_locations_to_zeroed_destination(src, dst, restore);
                     }
                 }
                 _ => unreachable!("validated call operand and parameter types must match"),
@@ -1955,10 +1958,11 @@ impl<'a> AbiEmitter<'a> {
                     ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
                     _ => unreachable!("validated aggregate return type"),
                 };
+                self.clear_location(restore);
                 for index in 0..cells {
                     let src = self.value_operand_element_location(operand, index, callee)?;
                     let dst = Location::Relative(caller_delta + self.common_outbox_offset(index));
-                    self.copy_locations(src, dst, restore);
+                    self.copy_locations_with_zeroed_restore(src, dst, restore);
                 }
                 self.clear_location(caller_value);
             }
@@ -2034,10 +2038,11 @@ impl<'a> AbiEmitter<'a> {
             return Ok(());
         }
         let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+        self.clear_location(restore);
         for index in 0..cells {
             let src = self.array_element_location(src, index, function)?;
             let dst = self.array_element_location(dst, index, function)?;
-            self.copy_locations(src, dst, restore);
+            self.copy_locations_with_zeroed_restore(src, dst, restore);
         }
         Ok(())
     }
@@ -2055,10 +2060,11 @@ impl<'a> AbiEmitter<'a> {
             let layout = self.layout(site.function)?;
             debug_assert!(layout.portal_temporary_cells >= site.cells);
             let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+            self.clear_location(restore);
             for leaf in 0..site.cells {
                 let src = self.value_operand_element_location(source, leaf, site.function)?;
                 let dst = self.portal_temporary_location(site.function, leaf)?;
-                self.copy_locations(src, dst, restore);
+                self.copy_locations_with_zeroed_restore(src, dst, restore);
             }
         }
         self.emit_portal_call(site)
@@ -2096,19 +2102,20 @@ impl<'a> AbiEmitter<'a> {
         for field in AbiField::ALL {
             self.clear_location(self.portal_field_location(site.region, field, site.function)?);
         }
+        self.clear_location(restore);
         let offset_low = self.portal_field_location(site.region, AbiField::Index, site.function)?;
         let offset_high =
             self.portal_field_location(site.region, AbiField::Scratch0, site.function)?;
         match site.offset {
             PortalOffset::Byte(index) => {
                 let source = self.address_location(index, site.function)?;
-                self.copy_locations(source, offset_low, restore);
+                self.copy_locations_with_zeroed_restore(source, offset_low, restore);
             }
             PortalOffset::Word(offset) => {
                 let low = self.address_location(offset.low, site.function)?;
                 let high = self.address_location(offset.high, site.function)?;
-                self.copy_locations(low, offset_low, restore);
-                self.copy_locations(high, offset_high, restore);
+                self.copy_locations_with_zeroed_restore(low, offset_low, restore);
+                self.copy_locations_with_zeroed_restore(high, offset_high, restore);
             }
         }
         if let PortalOperation::Store { source } = site.operation {
@@ -2119,7 +2126,7 @@ impl<'a> AbiEmitter<'a> {
             };
             let value_port =
                 self.portal_field_location(site.region, AbiField::Value, site.function)?;
-            self.copy_locations(value_source, value_port, restore);
+            self.copy_locations_with_zeroed_restore(value_source, value_port, restore);
         }
         self.set_location(
             self.portal_field_location(site.region, AbiField::Active, site.function)?,
@@ -2150,6 +2157,7 @@ impl<'a> AbiEmitter<'a> {
         let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
         let route_low = self.route_location(ROUTE_OFFSET_LOW)?;
         let route_high = self.route_location(ROUTE_OFFSET_HIGH)?;
+        self.clear_location(restore);
         self.with_profile_site(
             "abi",
             "abi.portal.stage.offset",
@@ -2158,14 +2166,14 @@ impl<'a> AbiEmitter<'a> {
                 match site.offset {
                     PortalOffset::Byte(index) => {
                         let source = emitter.address_location(index, site.function)?;
-                        emitter.copy_locations(source, route_low, restore);
+                        emitter.copy_locations_with_zeroed_restore(source, route_low, restore);
                         emitter.clear_location(route_high);
                     }
                     PortalOffset::Word(offset) => {
                         let low = emitter.address_location(offset.low, site.function)?;
                         let high = emitter.address_location(offset.high, site.function)?;
-                        emitter.copy_locations(low, route_low, restore);
-                        emitter.copy_locations(high, route_high, restore);
+                        emitter.copy_locations_with_zeroed_restore(low, route_low, restore);
+                        emitter.copy_locations_with_zeroed_restore(high, route_high, restore);
                     }
                 }
 
@@ -2183,7 +2191,7 @@ impl<'a> AbiEmitter<'a> {
                     } else {
                         emitter.value_operand_element_location(source, site.leaf, site.function)?
                     };
-                    emitter.copy_locations(
+                    emitter.copy_locations_with_zeroed_restore(
                         value_source,
                         emitter.route_location(ROUTE_VALUE)?,
                         restore,
@@ -2818,11 +2826,12 @@ impl<'a> AbiEmitter<'a> {
                 && site.cells > 1
             {
                 let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
+                self.clear_location(restore);
                 for leaf in 0..site.cells {
                     let source = self.portal_temporary_location(site.function, leaf)?;
                     let destination =
                         self.value_operand_element_location(destination, leaf, site.function)?;
-                    self.copy_locations(source, destination, restore);
+                    self.copy_locations_with_zeroed_restore(source, destination, restore);
                 }
             }
             if site.cells > 1 {
@@ -3189,8 +3198,36 @@ impl<'a> AbiEmitter<'a> {
         if src == dst {
             return;
         }
-        self.clear_location(dst);
         self.clear_location(restore);
+        self.copy_locations_with_zeroed_restore(src, dst, restore);
+    }
+
+    fn copy_locations_with_zeroed_restore(
+        &mut self,
+        src: Location,
+        dst: Location,
+        restore: Location,
+    ) {
+        if src == dst {
+            return;
+        }
+        self.clear_location(dst);
+        self.copy_locations_to_zeroed_destination(src, dst, restore);
+    }
+
+    /// Copy a value when both the destination and restore cells are already
+    /// zero. The copy restores `src` and leaves both scratch cells zero.
+    /// Callers must establish the destination invariant, typically because a
+    /// fresh frame or a freshly cleared aggregate slot is being populated.
+    fn copy_locations_to_zeroed_destination(
+        &mut self,
+        src: Location,
+        dst: Location,
+        restore: Location,
+    ) {
+        if src == dst {
+            return;
+        }
         self.move_context_to_location(src);
         let body = self.capture_infallible(|emitter| {
             emitter.adjust(255);

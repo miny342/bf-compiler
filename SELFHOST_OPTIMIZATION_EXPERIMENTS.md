@@ -112,6 +112,32 @@ HEAD時点のstage2 compilerをbaseline、上記2点を入れたsourceをoptimiz
 今後の候補として残す。
 これらはfull23だけでは効果と正しさを断定できないため、今回のコミットでは保留する。
 
+## 2026-09-20: 連続copyのrestore共有と新規callee frameのzero契約
+
+full25で`abi.frame.copy`と`abi.frame.aggregate_copy`が大きかったため、
+`copy_locations`の復元用cellを複数copyのたびに初期化する経路を調べた。
+一つの連続copy列の各要素は、copy終了時にrestoreをzeroへ戻すため、列の先頭で一度だけ
+restoreをclearし、以後は`copy_locations_with_zeroed_restore`を使える。
+aggregate copy、aggregate引数・戻り値、portalの複数cell搬送、global portal stagingへ適用した。
+
+さらに`emit_call_inner`では、引数をcallee frameへ書く前にframe headをまだ割り当てておらず、
+return時にframe data全体をzero化する既存ABI契約がある。このため新規callee frameの引数領域は
+zeroであり、引数copy専用の`copy_locations_to_zeroed_destination`ではdestinationのclearも省ける。
+この経路は通常のcopyには使わず、呼び出し引数の書き込みだけに限定した。
+
+Rust backendで作った32-cell配列の反復fixtureでは、出力SHA-256が一致し、旧実装からの差は次のとおり。
+
+| fixture | baseline native | optimized native | baseline RLE | optimized RLE | BF bytes |
+|---|---:|---:|---:|---:|---:|
+| aggregate copy, 32 cells × 32 | 18,751 | 14,754 | 8,392 | 6,379 | 3,805 → 3,428 |
+| aggregate argument/return, 32 cells × 32 | 69,631 | 55,586 | 32,596 | 25,527 | 10,898 → 9,484 |
+
+後者ではnative operationが20.2%、RLE operationが21.7%、raw executed instructionが23.0%減った。
+これはaggregate-heavyな合成例でありfull selfhost全体の速度向上率ではない。
+`cargo test --workspace`（175 passed, 1 ignored）と
+`verify-selfhost-compressed.py`は全例で成功した。全stage2 sourceをこの候補BFで一度に再コンパイルする
+試行は出力前に長時間化して停止したため、full selfhostの20%達成とは扱わない。
+
 ## 2026-09-20: Rust loweringでのゼロ比較の直接分岐
 
 BF側で頻出する`value != 0` / `value == 0`について、Rust backendのlowering時にゼロ側を
