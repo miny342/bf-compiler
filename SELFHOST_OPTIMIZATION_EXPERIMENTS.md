@@ -65,14 +65,16 @@ full19からfull23までのselfhost実験で、BF側の比較・継続・値コ�
   一方、`abi.frame.compare`は9.575%から12.961%へ増え、固定展開が比較とdispatcher countdownを
   別のボトルネックとして表面化させた。`emit_repeat_wide`のcontinuation数は50から166へ増えているため、
   継続を増やし過ぎない自動特殊化は将来候補だが、今回は実装しない。
-- 圧縮BFの`emit_repeat_character`も、100/10のwhileをやめ、200,100,50,20,10,10の
-  固定6比較（百の位2段、十の位4段）へ変更した。各減算はwrapping cellの補数加算にしている。
-  これは今回の新しい変更であり、full23のprofileにはまだ反映されていない。
+- 圧縮BFの`emit_repeat_character`は、full25で100/10のwhileから
+  200,100,50,20,10,10の固定6比較へ一度変更した。しかしfull25 profileでは
+  関数時間が344.6秒から482.0秒、内部compareが211.5秒から373.8秒へ増えたため、
+  full25取得後に元のwhile実装へ戻した。固定展開版のfull25 profileは、この撤回後の現ソースの
+  性能結果としては扱わない。
 
 full23の生成物を使った`hello.bfc`（`A!`）と`arithmetic.bfc`（出力byte列255,2,0）は、
-生成BFを実行した結果とRust IR実行結果が一致した。さらに、この変更を含む現在のstage2 compilerを
-生成して同じ2例を再実行し、結果一致を確認した。圧縮BF全体の検証では、count 0〜255を含む
-repeat出力の検証も通している。
+生成BFを実行した結果とRust IR実行結果が一致した。固定展開版のstage2 compilerでも同じ2例と
+count 0〜255を含むrepeat出力を検証し、結果一致を確認した。その後、固定展開版を撤回して
+元のwhile実装へ戻している。
 
 今後の候補として、比較命令の復元、global/static cellのアドレス解決メモ化、
 `arena_read`/`arena_advance`の特殊化、continuationをまたぐ制御構造の再配置がある。

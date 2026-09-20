@@ -7,34 +7,14 @@ void emit_repeat_character(cell character, cell count) {
         if (count != 0) {
             compiler_output!(character);
             if (count != 1) {
-                // count is a cell, so use a fixed greedy decimal expansion.
-                // The complements are wrapping-safe because each branch first
-                // proves that count is large enough.  This keeps the common
-                // compressed path out of repeated compare/subtract loops.
-                cell hundreds = 0;
-                cell tens = 0;
-                if (count >= 200) {
-                    count += 56;
-                    hundreds += 2;
-                }
-                if (count >= 100) {
-                    count += 156;
+                cell hundreds;
+                cell tens;
+                while (count >= 100) {
+                    count -= 100;
                     hundreds += 1;
                 }
-                if (count >= 50) {
-                    count += 206;
-                    tens += 5;
-                }
-                if (count >= 20) {
-                    count += 236;
-                    tens += 2;
-                }
-                if (count >= 10) {
-                    count += 246;
-                    tens += 1;
-                }
-                if (count >= 10) {
-                    count += 246;
+                while (count >= 10) {
+                    count -= 10;
                     tens += 1;
                 }
                 if (hundreds != 0) {
