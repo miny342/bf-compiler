@@ -1604,11 +1604,9 @@ impl<'a> AbiEmitter<'a> {
         if left == right {
             self.copy_locations(left, Location::Relative(l), Location::Relative(e));
         } else {
-            self.move_location(left, Location::Relative(l));
+            self.move_location_to_zero(left, Location::Relative(l));
         }
-        self.move_location(right, Location::Relative(r));
-        self.clear(e);
-        self.clear(b);
+        self.move_location_to_zero(right, Location::Relative(r));
         if difference.is_some() {
             self.clear(remainder);
         }
