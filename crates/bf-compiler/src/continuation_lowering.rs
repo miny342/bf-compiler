@@ -739,14 +739,29 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             }
             return Ok(());
         }
-        let condition_value = self.evaluate_scalar_temporary(condition)?;
+        let (condition_expression, invert) = self
+            .zero_comparison_operand(condition)
+            .map_or((condition, false), |(expression, invert)| {
+                (expression, invert)
+            });
+        let condition_value = self.evaluate_scalar_temporary(condition_expression)?;
         if self.statement_is_frame_only(then_branch)
             && else_branch.is_none_or(|branch| self.statement_is_frame_only(branch))
         {
-            let then_body =
-                self.capture_frame_instructions(|this| this.lower_statement(then_branch))?;
+            let then_body = self.capture_frame_instructions(|this| {
+                if invert {
+                    if let Some(branch) = else_branch {
+                        this.lower_statement(branch)?;
+                    }
+                } else {
+                    this.lower_statement(then_branch)?;
+                }
+                Ok(())
+            })?;
             let else_body = self.capture_frame_instructions(|this| {
-                if let Some(branch) = else_branch {
+                if invert {
+                    this.lower_statement(then_branch)?;
+                } else if let Some(branch) = else_branch {
                     this.lower_statement(branch)?;
                 }
                 Ok(())
@@ -762,8 +777,8 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         let else_id = self.ids.allocate()?;
         self.finish(Terminator::Branch {
             condition: condition_value,
-            then_target: then_id,
-            else_target: else_id,
+            then_target: if invert { else_id } else { then_id },
+            else_target: if invert { then_id } else { else_id },
         });
         let mut join_id = None;
         self.start(then_id);
@@ -792,6 +807,34 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             self.start(join_id);
         }
         Ok(())
+    }
+
+    fn zero_comparison_operand<'b>(
+        &self,
+        expression: &'b HirExpression,
+    ) -> Option<(&'b HirExpression, bool)> {
+        let HirExpressionKind::Binary {
+            operator: BinaryOperator::Equal | BinaryOperator::NotEqual,
+            left,
+            right,
+        } = &expression.kind
+        else {
+            return None;
+        };
+        let invert = matches!(
+            expression.kind,
+            HirExpressionKind::Binary {
+                operator: BinaryOperator::Equal,
+                ..
+            }
+        );
+        if hir::constant_cell_value(right) == Some(0) {
+            Some((left, invert))
+        } else if hir::constant_cell_value(left) == Some(0) {
+            Some((right, invert))
+        } else {
+            None
+        }
     }
 
     fn lower_while(
@@ -842,11 +885,16 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             target: condition_id,
         });
         self.start(condition_id);
-        let condition_value = self.evaluate_scalar_temporary(condition)?;
+        let (condition_expression, invert) = self
+            .zero_comparison_operand(condition)
+            .map_or((condition, false), |(expression, invert)| {
+                (expression, invert)
+            });
+        let condition_value = self.evaluate_scalar_temporary(condition_expression)?;
         self.finish(Terminator::Branch {
             condition: condition_value,
-            then_target: body_id,
-            else_target: after_id,
+            then_target: if invert { after_id } else { body_id },
+            else_target: if invert { body_id } else { after_id },
         });
         self.start(body_id);
         self.lower_statement(body)?;
@@ -1055,14 +1103,24 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 );
             }
             BinaryOperator::Equal | BinaryOperator::NotEqual => {
-                let left = self.evaluate_scalar_temporary(left)?;
-                let right = self.evaluate_scalar_temporary(right)?;
-                self.transfer(right, left, 255);
                 let (nonzero, zero) = if operator == BinaryOperator::Equal {
                     (0, 1)
                 } else {
                     (1, 0)
                 };
+                if hir::constant_cell_value(right) == Some(0) {
+                    let left = self.evaluate_scalar_temporary(left)?;
+                    self.boolean_from(left, destination, nonzero, zero);
+                    return Ok(());
+                }
+                if hir::constant_cell_value(left) == Some(0) {
+                    let right = self.evaluate_scalar_temporary(right)?;
+                    self.boolean_from(right, destination, nonzero, zero);
+                    return Ok(());
+                }
+                let left = self.evaluate_scalar_temporary(left)?;
+                let right = self.evaluate_scalar_temporary(right)?;
+                self.transfer(right, left, 255);
                 self.boolean_from(left, destination, nonzero, zero);
             }
             BinaryOperator::Less

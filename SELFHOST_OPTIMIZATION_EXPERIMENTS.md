@@ -112,6 +112,31 @@ HEAD時点のstage2 compilerをbaseline、上記2点を入れたsourceをoptimiz
 今後の候補として残す。
 これらはfull23だけでは効果と正しさを断定できないため、今回のコミットでは保留する。
 
+## 2026-09-20: Rust loweringでのゼロ比較の直接分岐
+
+BF側で頻出する`value != 0` / `value == 0`について、Rust backendのlowering時にゼロ側を
+一時cellへmaterializeしてから比較する経路を避け、非ゼロ側の値をそのまま`Branch`へ渡すようにした。
+通常の二項比較でも、片側がcompile-time zeroなら相手の値からbooleanを生成し、不要なzero operandの
+copyとtransferを省く。`if`と通常の`while`では`== 0`のときだけ分岐先を反転する。
+frame-onlyの既存経路と、ゼロ以外を比較する一般経路は変更していない。
+
+full selfhostの再取得はまだ行っていない。baseline BFと変更後のcompilerでstage2の代表例を同一
+interpreterへ投入したところ、出力SHA-256は一致した。
+
+| 入力 | baseline native operations | optimized native operations | raw executed instructionsの削減 |
+|---|---:|---:|---:|
+| `hello` | 11074263 | 11027989 | 0.00009% |
+| `stage7_globals` | 144119134 | 143461836 | 0.00007% |
+| `stage8_aggregates` | 130851558 | 130263807 | 0.00009% |
+
+代表例でのnative operation削減は0.4〜0.5%程度で、BF側比較全体を解消するものではないが、
+条件式の頻度に比例して効く小さなproduction変更として採用する。`cargo test -p bf-compiler`は
+175 passed、既存の`verify-selfhost-compressed.py`も全例で成功した。
+
+定数`Copy`を`Set`へ変換するframe fusion案は、代表例と長いglobal配列の合成例でこの変更への
+増分効果を確認できなかったため採用しない。decimal digit cache、`emit_repeat_wide`のさらなる
+inline化、比較命令の復元も同様に今回のproduction変更には含めない。
+
 以下は各実験の設計と検証条件。実験1のIR部分と実験2の空Goto・2c部分は完了しており、
 既存実装を足場に未完項目へ進む。実装済み部分の再作成は不要。
 
