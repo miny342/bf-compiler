@@ -24,6 +24,9 @@
 | wide serializerの補数側比較 | 採用 | `K>128`の`x<K; x-=K`をwrap後の小さい補数比較へ変形。0〜999のserializer fixtureで出力一致、native 10.70%、RLE 12.81%、raw 5.04%減。代表stage2例の統計差はなく、wide経路限定の改善。 |
 | global copy内のdecimal digit再利用 | 保留 | 距離桁を6往復で共有する候補。出力一致、wide-global合成例でnative 0.76%減だが、代表例は±0.04%程度でartifact約37KB増。 |
 | transfer内部の既知位置展開 | 不採用・撤回 | source/destination往復の`emit_move_to`を直接展開。stage8出力は一致したが、native 0.88%、RLE 1.07%、execute 5.3%悪化。 |
+| portal windowのstage-aware zero lane | 採用 | D=16の往路・復路で消費済みnibble counterを後続stageのzero laneへ追加。異なる値を持つ4096セル相当のglobal配列を複数chunk・長距離offsetで検証して出力一致。global-largeではBF 185,487→184,673 bytes、同一入力の1 requestあたりnative 16.2%、RLE 11.9%減。load/storeのpayload laneは不変条件が不足するため追加していない。 |
+| global copyのstatic-side restore scratch | 不採用・撤回 | global→frame scalar copyのrestoreだけをD=16 static scratchへ移した。出力は一致したが、global-triple BF 35,330→36,674 bytes、global-large 184,673→221,538 bytesとなり、static navigationが増加分を上回った。 |
+| portal nibbleの固定距離dispatch | 不採用・撤回 | nibble値ごとのlocal equality dispatchで、値ごとに一回の`value*stride`交換を試した。長い異値配列の出力は一致したが、heterogeneous fixtureのBF 21,613→83,003 bytes、global-large 184,673→307,453 bytes。4-bit popcount分解はこの比較表を使わない別実装が必要で、productionには残していない。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
 | 高い再訪率を根拠にportal batchを優先する判断 | 撤回 | 開始chunk再訪はphase全体の履歴指標。直前要求の近さやcall/I/O/aliasを跨ぐbatch安全性を示さない。候補を調べる根拠までに限定する。 |
 

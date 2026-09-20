@@ -2579,21 +2579,49 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn shift_portal_by_offset(&mut self, right: bool) -> Result<(), AbiCodegenError> {
+        // Each later nibble stage follows a destructive countdown of the
+        // earlier fields. Keep those consumed counters in the zero-lane mask
+        // so their exchange does not need a temporary cell.
         let digits = if right {
             [
-                (AbiField::Scratch1, 1),
-                (AbiField::PcLow, 16),
-                (AbiField::Scratch2, 256),
+                (AbiField::Scratch1, 1, 0),
+                (AbiField::PcLow, 16, 1 << AbiField::Scratch1.index()),
+                (
+                    AbiField::Scratch2,
+                    256,
+                    (1 << AbiField::Scratch1.index()) | (1 << AbiField::PcLow.index()),
+                ),
             ]
         } else {
             [
-                (AbiField::PcHigh, 256),
-                (AbiField::Condition, 16),
-                (AbiField::Restore, 1),
+                (
+                    AbiField::PcHigh,
+                    256,
+                    (1 << AbiField::Scratch1.index())
+                        | (1 << AbiField::PcLow.index())
+                        | (1 << AbiField::Scratch2.index()),
+                ),
+                (
+                    AbiField::Condition,
+                    16,
+                    (1 << AbiField::Scratch1.index())
+                        | (1 << AbiField::PcLow.index())
+                        | (1 << AbiField::Scratch2.index())
+                        | (1 << AbiField::PcHigh.index()),
+                ),
+                (
+                    AbiField::Restore,
+                    1,
+                    (1 << AbiField::Scratch1.index())
+                        | (1 << AbiField::PcLow.index())
+                        | (1 << AbiField::Scratch2.index())
+                        | (1 << AbiField::PcHigh.index())
+                        | (1 << AbiField::Condition.index()),
+                ),
             ]
         };
-        for (digit, chunks) in digits {
-            self.jump_portal_by_digit(digit, chunks, right)?;
+        for (digit, chunks, zero_lanes) in digits {
+            self.jump_portal_by_digit(digit, chunks, right, zero_lanes)?;
         }
         Ok(())
     }
@@ -2603,6 +2631,7 @@ impl<'a> AbiEmitter<'a> {
         digit: AbiField,
         chunks: isize,
         right: bool,
+        zero_lanes: u16,
     ) -> Result<(), AbiCodegenError> {
         self.with_profile_site(
             "abi",
@@ -2617,7 +2646,7 @@ impl<'a> AbiEmitter<'a> {
                 let body = emitter.capture_infallible(|emitter| {
                     emitter.adjust(255);
                     emitter.move_to(0);
-                    emitter.jump_portal_window(chunks, right);
+                    emitter.jump_portal_window(chunks, right, zero_lanes);
                     emitter.move_to(digit_offset);
                 });
                 emitter.emit_loop(body);
@@ -2630,7 +2659,7 @@ impl<'a> AbiEmitter<'a> {
     /// Swap the D=16 portal chunk with a payload chunk at a fixed distance.
     /// Intermediate payload chunks remain untouched. Applying the same swaps
     /// in reverse order restores the original aggregate layout exactly.
-    fn jump_portal_window(&mut self, chunks: isize, right: bool) {
+    fn jump_portal_window(&mut self, chunks: isize, right: bool, zero_lanes: u16) {
         debug_assert_eq!(self.config.chunk_cells(), 16);
         debug_assert!(chunks > 0);
         let stride = self.config.stride() as isize;
@@ -2654,7 +2683,8 @@ impl<'a> AbiEmitter<'a> {
                     let always_zero = lane == AbiField::NextPcLow.index()
                         || lane == AbiField::NextPcHigh.index()
                         || lane == AbiField::Scratch0.index()
-                        || lane == AbiField::Scratch3.index();
+                        || lane == AbiField::Scratch3.index()
+                        || (zero_lanes & (1 << lane)) != 0;
                     let local = cell(0, lane);
                     let remote = cell(delta, lane);
                     if always_zero {

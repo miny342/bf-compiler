@@ -193,6 +193,35 @@ native 0.88%、RLE 1.07%、execute 5.3%の悪化となったため撤回した�
 `verify-selfhost-compressed.py`は全例で成功した。全stage2 sourceをこの候補BFで一度に再コンパイルする
 試行は出力前に長時間化して停止したため、full selfhostの20%達成とは扱わない。
 
+## 2026-09-20: portal windowのstage-aware zero lane
+
+D=16の`jump_portal_window`では、offset nibbleを消費した後のcounter laneも後続のwindow stageでは
+zeroになる。往路では`Scratch1`、`PcLow`、`Scratch2`を順に消費し、復路では`PcHigh`、`Condition`、
+`Restore`を順に消費するため、後続stageのzero lane maskへ追加した。既存の`NextPcLow/High`、
+`Scratch0`、`Scratch3`のzero契約は維持している。
+
+store/loadのpayload laneは、途中のpayload chunkが任意の値を持ち得るため追加していない。特に同じ
+laneを複数chunkに跨って交換する場合、1回目の交換後にそのlaneがpayload値になる。payloadをzeroと
+みなすには、load/storeとstageごとのより強い不変条件が必要である。
+
+固定値ではなくセルごとに異なる値を持たせたfixtureで、64セル配列のindex 16〜63を全て実行し、
+さらに`cell[16][256]`の4096セル配列を用いてchunk境界・長距離offsetを含むindexをloadした。
+いずれもIR実行結果とBF実行結果がbyte一致した。`global-large`では既存4-lane版に対して同じ入力を
+使い、BFは185,487 bytesから184,673 bytesへ0.44%減、1 requestあたりnativeは16.2%、RLEは11.9%
+減った。これは小fixtureでの測定であり、full selfhostの速度改善率とは扱わない。
+
+global→frame copyのrestoreをstatic remote-copy scratchへ移す案も試した。scalarの出力は一致したが、
+static領域へのnavigationが増え、`global-triple-full`のBFは35,330→36,674 bytes、`global-large`は
+184,673→221,538 bytesとなったため撤回した。
+
+portal nibbleの値ごとのlocal equality dispatchで、値ごとに`value * chunks`の固定距離交換を1回だけ
+出す候補も試した。長い異値配列で出力は一致したが、equality表の生成量が大きく、異値fixtureのBFは
+21,613→83,003 bytes、`global-large`は184,673→307,453 bytesとなった。4-bitのpopcount分解を
+productionへ入れるには、16値の比較表を増やさずにbitを判定する別のscratch設計が必要である。
+
+`cargo test -p bf-compiler --test stage78`、上記長配列fixtureのIR/BF出力比較、既存portal fixtureの
+出力検証は成功した。dispatchの頻度配置（#4）はこの実験では変更していない。
+
 ## 2026-09-20: Rust loweringでのゼロ比較の直接分岐
 
 BF側で頻出する`value != 0` / `value == 0`について、Rust backendのlowering時にゼロ側を

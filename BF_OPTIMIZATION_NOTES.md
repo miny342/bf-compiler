@@ -655,6 +655,16 @@ windowを戻す時点ではquotientを消費済みの`Scratch1`, `Scratch2`も�
 D=8/16の全回帰、selfhostによる`hello.bfc`生成物のbyte一致、生成BFの`A!\n`出力を確認した。
 生成量と実行量がともに改善するため採用する。
 
+その後、zero laneをwindow全体で固定扱いするのではなく、offsetを消費したstageの後段だけへ
+拡張した。往路の`Scratch1`→`PcLow`→`Scratch2`、復路の`PcHigh`→`Condition`→`Restore`を
+順にzero maskへ加えた。異なる値の4096セル配列をchunk境界・長距離offsetでloadしてIR/BF出力を
+一致させた。`global-large`ではBF bytesが185,487→184,673、同一入力のnative/requestが16.2%、
+RLE/requestが11.9%減った。payload laneは任意の配列値を保持するためzero扱いしていない。
+
+static remote-copy scratchをglobal copyのrestoreに使う案は、navigation増加でBFが膨らんだため撤回した。
+nibble値ごとの固定距離dispatchも出力は一致したが、equality表のBF膨張が大きく撤回した。
+4-bit popcountは、比較表を増やさずbitを判定できるscratch設計ができた場合に再検討する。
+
 ### D=16 portal windowの固定距離nibble jump
 
 184,330-byteのproduction compilerをfull self-host samplingしたところ、1,980秒で入力42,552 byteまで
