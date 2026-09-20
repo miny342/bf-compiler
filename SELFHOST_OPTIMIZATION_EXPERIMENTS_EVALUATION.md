@@ -18,7 +18,7 @@
 | stage2 BF最適化器のcount読み書き削減 | 撤回（最適化器ごと撤去） | token kindに応じたlaneだけを読み書きし、相殺時の書き戻しを除去。最適化規則と生成出力は維持。小入力のbyte単位portal要求削減とIR/BF照合を確認。 |
 | HIRの局所Frame lowering | 採用 | 単純なローカルwhileの非ゼロ条件・Output・定数更新を直接Frame命令にし、割当て前に不要な一時セルと条件の0/1化を除く。emit_repeat_256の反復は通常BFの最小形となり出力ベンチを短縮。複雑な制御は従来経路、多箇所inlineは未拡張。 |
 | Frame Compareと非同期分岐による比較 | 採用 | source/binary CIRの比較をABI loweringまで保持し、反復内のoperand複製を省く。全8-bit入力・両ABI配置を検証。比較ベンチの時間短縮を確認したが、付随する既存inline/CFG簡約も含む。一部生成BFサイズは増加。full selfhost時間は未測定。 |
-| 連続copyのrestore共有と新規callee frameのzero destination | 採用 | aggregate、aggregate引数/戻り値、portalの連続copyではrestoreを列の先頭で一度だけclearする。新規callee frameの引数領域だけdestination clearも省く。32-cell引数/戻り値fixtureでnative 20.2%、RLE 21.7%、raw executed 23.0%減、出力一致。full selfhost全体の速度向上率は未測定。 |
+| 連続copyのrestore共有とzero destination | 採用 | aggregate、aggregate引数/戻り値、portalの連続copyではrestoreを列の先頭で一度だけclearする。新規callee frameの引数領域と、直前にclearしたportal protocol fieldではdestination clearも省く。32-cell引数/戻り値fixtureでnative 20.2%、RLE 21.7%、raw executed 23.0%減、出力一致。full selfhost全体の速度向上率は未測定。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
 | 高い再訪率を根拠にportal batchを優先する判断 | 撤回 | 開始chunk再訪はphase全体の履歴指標。直前要求の近さやcall/I/O/aliasを跨ぐbatch安全性を示さない。候補を調べる根拠までに限定する。 |
 

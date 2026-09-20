@@ -2109,13 +2109,13 @@ impl<'a> AbiEmitter<'a> {
         match site.offset {
             PortalOffset::Byte(index) => {
                 let source = self.address_location(index, site.function)?;
-                self.copy_locations_with_zeroed_restore(source, offset_low, restore);
+                self.copy_locations_to_zeroed_destination(source, offset_low, restore);
             }
             PortalOffset::Word(offset) => {
                 let low = self.address_location(offset.low, site.function)?;
                 let high = self.address_location(offset.high, site.function)?;
-                self.copy_locations_with_zeroed_restore(low, offset_low, restore);
-                self.copy_locations_with_zeroed_restore(high, offset_high, restore);
+                self.copy_locations_to_zeroed_destination(low, offset_low, restore);
+                self.copy_locations_to_zeroed_destination(high, offset_high, restore);
             }
         }
         if let PortalOperation::Store { source } = site.operation {
@@ -2126,7 +2126,7 @@ impl<'a> AbiEmitter<'a> {
             };
             let value_port =
                 self.portal_field_location(site.region, AbiField::Value, site.function)?;
-            self.copy_locations_with_zeroed_restore(value_source, value_port, restore);
+            self.copy_locations_to_zeroed_destination(value_source, value_port, restore);
         }
         self.set_location(
             self.portal_field_location(site.region, AbiField::Active, site.function)?,

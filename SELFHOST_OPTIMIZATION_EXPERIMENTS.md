@@ -123,7 +123,8 @@ aggregate copy、aggregate引数・戻り値、portalの複数cell搬送、globa
 さらに`emit_call_inner`では、引数をcallee frameへ書く前にframe headをまだ割り当てておらず、
 return時にframe data全体をzero化する既存ABI契約がある。このため新規callee frameの引数領域は
 zeroであり、引数copy専用の`copy_locations_to_zeroed_destination`ではdestinationのclearも省ける。
-この経路は通常のcopyには使わず、呼び出し引数の書き込みだけに限定した。
+この経路は通常のcopyには使わず、呼び出し引数と、直前に全protocol fieldをclearしたportal requestの
+offset/payload書き込みに限定した。
 
 Rust backendで作った32-cell配列の反復fixtureでは、出力SHA-256が一致し、旧実装からの差は次のとおり。
 
@@ -134,6 +135,15 @@ Rust backendで作った32-cell配列の反復fixtureでは、出力SHA-256が�
 
 後者ではnative operationが20.2%、RLE operationが21.7%、raw executed instructionが23.0%減った。
 これはaggregate-heavyな合成例でありfull selfhost全体の速度向上率ではない。
+同じcurrent stage2 sourceをRust backendでcompiler BFへ生成し、旧比較artifactと同じinterpreterで
+代表入力を処理した場合は、出力BFが3例ともbyte一致し、native operationの減少は約1%だった。
+
+| 入力 | baseline native | optimized native | native削減率 |
+|---|---:|---:|---:|
+| `hello` | 11,012,694 | 10,908,004 | 0.95% |
+| `stage7_globals` | 143,191,838 | 141,787,622 | 0.98% |
+| `stage8_aggregates` | 130,034,354 | 128,763,436 | 0.98% |
+
 `cargo test --workspace`（175 passed, 1 ignored）と
 `verify-selfhost-compressed.py`は全例で成功した。全stage2 sourceをこの候補BFで一度に再コンパイルする
 試行は出力前に長時間化して停止したため、full selfhostの20%達成とは扱わない。
