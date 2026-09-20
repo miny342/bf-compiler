@@ -21,6 +21,9 @@
 | 連続copyのrestore共有とzero destination | 採用 | aggregate、aggregate引数/戻り値、portalの連続copyではrestoreを列の先頭で一度だけclearする。新規callee frameの引数領域と、直前にclearしたportal protocol fieldではdestination clearも省く。32-cell引数/戻り値fixtureでnative 20.2%、RLE 21.7%、raw executed 23.0%減、出力一致。full selfhost全体の速度向上率は未測定。 |
 | dead sourceのCopyを破壊的Transferへ変換 | 不採用・撤回 | 後続で読み取りなしに上書きされる局所Copyだけを変換。compiler artifactは983 bytes減ったが、代表compiler実行の統計は不変だった。 |
 | boolean Compareのzero scratch再利用 | 採用 | countdown後にzeroの`E`をfalse値のmaterializeへ再利用し、`false=0`ではless側のsetも省く。全8-bit入力・ABI配置と代表selfhost入力の出力一致を確認。artifact 1,144 bytes減、代表native削減は0.028–0.033%で、比較コスト全体を解消するものではない。 |
+| wide serializerの補数側比較 | 採用 | `K>128`の`x<K; x-=K`をwrap後の小さい補数比較へ変形。0〜999のserializer fixtureで出力一致、native 10.70%、RLE 12.81%、raw 5.04%減。代表stage2例の統計差はなく、wide経路限定の改善。 |
+| global copy内のdecimal digit再利用 | 保留 | 距離桁を6往復で共有する候補。出力一致、wide-global合成例でnative 0.76%減だが、代表例は±0.04%程度でartifact約37KB増。 |
+| transfer内部の既知位置展開 | 不採用・撤回 | source/destination往復の`emit_move_to`を直接展開。stage8出力は一致したが、native 0.88%、RLE 1.07%、execute 5.3%悪化。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
 | 高い再訪率を根拠にportal batchを優先する判断 | 撤回 | 開始chunk再訪はphase全体の履歴指標。直前要求の近さやcall/I/O/aliasを跨ぐbatch安全性を示さない。候補を調べる根拠までに限定する。 |
 

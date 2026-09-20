@@ -211,8 +211,10 @@ void emit_repeat_wide(cell character, WideValue count) {
         }
         if (count.high > 1 || (count.high == 1 &&
             (count.mid > 134 || (count.mid == 134 && count.low >= 160)))) {
-            cell borrow = count.low < 160;
-            count.low -= 160;
+            // For K > 128, x < K and x -= K can use the wrapped result:
+            // x += 256-K; borrow is then result >= 256-K.
+            count.low += 96;
+            cell borrow = count.low >= 96;
             cell next_borrow = count.mid < 134;
             count.mid -= 134;
             if (borrow) {
@@ -229,8 +231,8 @@ void emit_repeat_wide(cell character, WideValue count) {
         }
         if (count.high > 1 || (count.high == 1 &&
             (count.mid > 134 || (count.mid == 134 && count.low >= 160)))) {
-            cell borrow = count.low < 160;
-            count.low -= 160;
+            count.low += 96;
+            cell borrow = count.low >= 96;
             cell next_borrow = count.mid < 134;
             count.mid -= 134;
             if (borrow) {
@@ -322,8 +324,8 @@ void emit_repeat_wide(cell character, WideValue count) {
         // The 10^4 pass leaves a value below 10^4; high is now known zero.
         digit = 0;
         if (count.mid > 19 || (count.mid == 19 && count.low >= 136)) {
-            cell borrow = count.low < 136;
-            count.low -= 136;
+            count.low += 120;
+            cell borrow = count.low >= 120;
             count.mid -= 19;
             if (borrow) {
                 count.mid -= 1;
@@ -331,8 +333,8 @@ void emit_repeat_wide(cell character, WideValue count) {
             digit += 5;
         }
         if (count.mid > 7 || (count.mid == 7 && count.low >= 208)) {
-            cell borrow = count.low < 208;
-            count.low -= 208;
+            count.low += 48;
+            cell borrow = count.low >= 48;
             count.mid -= 7;
             if (borrow) {
                 count.mid -= 1;
@@ -340,8 +342,8 @@ void emit_repeat_wide(cell character, WideValue count) {
             digit += 2;
         }
         if (count.mid > 3 || (count.mid == 3 && count.low >= 232)) {
-            cell borrow = count.low < 232;
-            count.low -= 232;
+            count.low += 24;
+            cell borrow = count.low >= 24;
             count.mid -= 3;
             if (borrow) {
                 count.mid -= 1;
@@ -349,8 +351,8 @@ void emit_repeat_wide(cell character, WideValue count) {
             digit += 1;
         }
         if (count.mid > 3 || (count.mid == 3 && count.low >= 232)) {
-            cell borrow = count.low < 232;
-            count.low -= 232;
+            count.low += 24;
+            cell borrow = count.low >= 24;
             count.mid -= 3;
             if (borrow) {
                 count.mid -= 1;
@@ -363,8 +365,8 @@ void emit_repeat_wide(cell character, WideValue count) {
         // Probe the 10^2 digit with fixed greedy weights 5, 2, 1, 1.
         digit = 0;
         if (count.mid > 1 || (count.mid == 1 && count.low >= 244)) {
-            cell borrow = count.low < 244;
-            count.low -= 244;
+            count.low += 12;
+            cell borrow = count.low >= 12;
             count.mid -= 1;
             if (borrow) {
                 count.mid -= 1;
@@ -372,8 +374,8 @@ void emit_repeat_wide(cell character, WideValue count) {
             digit += 5;
         }
         if (count.mid != 0 || count.low >= 200) {
-            cell borrow = count.low < 200;
-            count.low -= 200;
+            count.low += 56;
+            cell borrow = count.low >= 56;
             if (borrow) {
                 count.mid -= 1;
             }

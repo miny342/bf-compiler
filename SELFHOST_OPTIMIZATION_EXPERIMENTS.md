@@ -161,6 +161,34 @@ native/RLE operationは次のように小さく減少した。
 
 比較全体の支配的コストを消す規模ではないが、条件を限定した安全な削減として採用した。
 
+## 2026-09-20: wide serializerの補数側比較
+
+full26では`emit_repeat_wide`の内部比較と`sub_with_borrow`が依然として大きかったため、
+cell wrappingを使って大きい定数との比較・減算を補数側へ変形した。
+`x < K; x -= K`（`K > 128`）を、`x += 256-K`の後のwrap結果に対する
+`result >= 256-K`へ置き換える。これにより244、232、208、200、160、136などの
+大きい定数比較を小さい補数比較にできる。変形後の値とborrowの意味は元の式と一致する。
+
+現行sourceをbaselineとcandidateに分け、`emit_repeat_wide`へ0〜999を入力するharnessで
+比較した。出力はbyte一致し、candidateのBFは92 bytes短くなった。
+
+| fixture | baseline native | candidate native | native削減 | RLE削減 | raw削減 |
+|---|---:|---:|---:|---:|---:|
+| `emit_repeat_wide`, 0〜999 | 11,065,176 | 9,881,241 | 10.70% | 12.81% | 5.04% |
+| `wide-globals` | 1,853,551,488 | 1,849,268,620 | 0.23% | 0.27% | 0.001% |
+
+hello、stage7_globals、stage8_aggregatesでは出力・実行統計に差がなかった。
+`scripts/verify-stage2-selfhost.sh`と`verify-selfhost-compressed.py`は成功したため、
+wide serializerに限定した小さなproduction変更として採用した。full selfhost全体の改善率は未測定。
+
+同時に、`emit_global_copy`内で距離の十進桁を一度だけ計算し、6回の往復で再利用する候補も
+現行compilerで再測定した。出力は一致したが、hello/stage7/stage8のnative差は
+`+0.044%/-0.024%/+0.012%`で、wide-globals合成例でも0.76%減に留まった。
+artifactは約37KB増えたため、今回は保留した。
+
+`emit_transfer`の内部source↔destination移動を直接展開する候補も試した。stage8の出力は一致したが、
+native 0.88%、RLE 1.07%、execute 5.3%の悪化となったため撤回した。
+
 `cargo test --workspace`（175 passed, 1 ignored）と
 `verify-selfhost-compressed.py`は全例で成功した。全stage2 sourceをこの候補BFで一度に再コンパイルする
 試行は出力前に長時間化して停止したため、full selfhostの20%達成とは扱わない。
