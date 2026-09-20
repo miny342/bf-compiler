@@ -1569,11 +1569,11 @@ impl<'a> AbiEmitter<'a> {
     }
 
     /// Destructive unsigned comparison on four adjacent ABI scratch cells:
-    /// L, R, E (else flag), B (zero landing cell). The inner non-destructive
-    /// test exits at E when R was nonzero, or stays at R when skipped. One
-    /// rightward step and the else arm join both paths at B. No operand is
-    /// copied inside the countdown, even when its value is 255.
-    /// Scratch0..3 are contiguous in both supported layouts, inaccessible as
+    /// L (right operand), E (initially 1), B (zero), R (left operand).
+    /// `[>>>[-<]<<-]` exits at L when right <= left, or at E otherwise.
+    /// Swapping the operands makes the second path exactly left < right,
+    /// without a separate equality test. Join the paths after the countdown.
+    /// Scratch0..3 are contiguous, inaccessible as
     /// public operand addresses, and all zero on exit. The context origin and
     /// surrounding structured-branch flags are preserved.
     #[allow(clippy::too_many_arguments)]
@@ -1597,81 +1597,74 @@ impl<'a> AbiEmitter<'a> {
         // Retain the countdown remainder here when both outputs are requested.
         let remainder = self.current_abi_offset(AbiField::Restore)?;
         let l = self.current_abi_offset(AbiField::Scratch0)?;
-        let r = self.current_abi_offset(AbiField::Scratch1)?;
-        let e = self.current_abi_offset(AbiField::Scratch2)?;
-        let b = self.current_abi_offset(AbiField::Scratch3)?;
-        debug_assert_eq!([r - l, e - r, b - e], [1, 1, 1]);
+        // Adjacent scratch cells: right operand, flag, zero, left operand.
+        let e = self.current_abi_offset(AbiField::Scratch1)?;
+        let b = self.current_abi_offset(AbiField::Scratch2)?;
+        let r = self.current_abi_offset(AbiField::Scratch3)?;
+        debug_assert_eq!([e - l, b - e, r - b], [1, 1, 1]);
         if left == right {
-            self.copy_locations(left, Location::Relative(l), Location::Relative(e));
+            self.copy_locations(right, Location::Relative(l), Location::Relative(e));
         } else {
-            self.move_location_to_zero(left, Location::Relative(l));
+            self.move_location_to_zero(right, Location::Relative(l));
         }
-        self.move_location_to_zero(right, Location::Relative(r));
+        self.move_location_to_zero(left, Location::Relative(r));
         if difference.is_some() {
             self.clear(remainder);
         }
+        self.move_to(e);
+        self.adjust(1);
         self.move_to(l);
         let countdown = self.capture_infallible(|emitter| {
-            emitter.move_to(e);
-            emitter.adjust(1);
             emitter.move_to(r);
             let nonzero = emitter.capture_infallible(|emitter| {
                 emitter.adjust(255);
-                emitter.move_to(l);
-                emitter.adjust(255);
-                emitter.move_to(e);
-                emitter.adjust(255);
-            });
-            emitter.emit_loop(nonzero);
-            // The runtime pointer is R (skipped) or E (entered). It cannot be
-            // represented by `position` until the two paths join at B.
-            emitter.push_move(1);
-            emitter.position = e; // entry to the else body is always E
-            let zero = emitter.capture_infallible(|emitter| {
-                emitter.adjust(255);
-                if difference.is_some() {
-                    emitter.move_value(l, remainder);
-                } else {
-                    emitter.clear(l);
-                }
                 emitter.move_to(b);
             });
-            emitter.emit_loop(zero);
-            emitter.position = b; // skipped and entered paths now agree
-            emitter.move_to(l);
+            emitter.emit_loop(nonzero);
+            // R nonzero exits at B; R zero stays at R. Subtract from L or E.
+            emitter.push_move(-2);
+            emitter.position = l;
+            emitter.adjust(255);
         });
         self.emit_loop(countdown);
-        // The countdown leaves E zero. Selfhost comparisons use boolean
-        // outputs, so avoid materializing the false value and use the less
-        // branch's one-shot loop only to set a nonzero true value.
-        if false_value != 0 {
-            self.set(e, false_value);
-        }
-        self.move_to(r);
-        let less = self.capture_infallible(|emitter| {
+        // Exit at L=0 for right <= left, otherwise E=0 with L=right-left.
+        self.push_move(1);
+        self.position = e;
+        let not_greater = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            if false_value != 0 {
+                emitter.adjust(false_value);
+            }
+            emitter.move_to(r);
+            if difference.is_some() {
+                emitter.move_value(r, remainder);
+            } else {
+                emitter.clear_current();
+            }
+            emitter.move_to(b);
+        });
+        self.emit_loop(not_greater);
+        self.position = b;
+        self.move_to(l);
+        let greater = self.capture_infallible(|emitter| {
             if difference.is_some() {
                 let subtract = emitter.capture_infallible(|emitter| {
                     emitter.adjust(255);
                     emitter.move_to(remainder);
                     emitter.adjust(255);
-                    emitter.move_to(r);
+                    emitter.move_to(l);
                 });
                 emitter.emit_loop(subtract);
             } else {
                 emitter.clear_current();
             }
-            if false_value == 0 {
-                if true_value != 0 {
-                    emitter.move_to(e);
-                    emitter.adjust(true_value);
-                }
-                emitter.move_to(r);
-            } else {
-                emitter.set(e, true_value);
-                emitter.move_to(r);
+            if true_value != 0 {
+                emitter.move_to(e);
+                emitter.adjust(true_value);
             }
+            emitter.move_to(l);
         });
-        self.emit_loop(less);
+        self.emit_loop(greater);
         self.move_to(0);
         if let Some(difference) = difference {
             self.move_location(Location::Relative(remainder), difference);

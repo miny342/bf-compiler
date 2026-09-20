@@ -13,6 +13,15 @@
 
 ## 現在地と次の作業
 
+- 2026-09-21追試: Rust backendの比較coreを短い非同期loopへ変更し、interpreterも新旧両形へ対応した。
+  compare専用認識なしの全pair比較で40.23%、短いコンパイル3例で1.20〜4.89%短縮。
+  認識ありではコンパイルはほぼ横ばい、比較ベンチは7.45%遅いというトレードオフがある。
+  詳細は評価文書の「比較idiom自体を短縮する追試」を参照。
+- 2026-09-21: interpreterで非同期比較のBF idiomを定数時間化し、clear loopの
+  正確な命令数計算も奇数増分の逆元による乗算へ置換した。full28と同じcompiler BFを
+  短い入力で交互比較し、wide-globalコンパイルのexecuteを12.28%削減した（profileなし）。
+  全自己入力の再実行はユーザーの追加指示に従い避けた。full全体の短縮率は未測定。
+  実装条件・他の入力・採否・再現手順は評価文書の「full28後のinterpreter比較・clear最適化」を参照。
 - 空Goto threading・到達不能除去・ID compactionはsource/CIR共通で採用済み。
 - HIRの単純なローカルwhileを、セル割当て前に直接Frame Loopへlowerする。
   非ゼロ条件は元セルを検査し、ローカルOutputの一時コピーと定数更新の一時セルを省く。

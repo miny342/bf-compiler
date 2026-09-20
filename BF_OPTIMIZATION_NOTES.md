@@ -760,6 +760,19 @@ source-levelの比較演算へは次の規則で使える。
 この方式はunsigned 8-bit値の大小比較に適する。wrapping subtractionの符号だけを見て
 比較する方式ではないため、`0`, `255`, equalを含む全`256 * 256`組で検証する。
 
+2026-09-21追試後に採用: `[>>>[-<]<<-]`を中心とする実装へRust backendを変更した。
+scratchには右operand、flag=1、zero=0、左operandの順で置き、右>左を判定することで
+strict lessのための追加の等値判定を省いた。boolean結果・差分・scratch cleanupまで含む。
+比較idiom認識のない同一interpreterによる4組の交互測定では、全unsigned pair・4比較の
+executeが40.23%、stage7/stage8/wide-globalsのコンパイルが1.20%/2.20%/4.89%短縮した。
+interpreterは旧形と新形の両方を認識する。認識ありでは短いコンパイル3例はほぼ横ばいで、
+比較ベンチ単体は7.45%遅くなるため、両条件を分けて評価した。
+現在は`--disable-compare`（APIでは`RunOptions::disable_compare`）で両形の専用認識を
+まとめてbypassできる。`--disable-remote-transfer`との併用も可能で、汎用のRLE・clear・
+scan・transfer最適化は有効のまま。同じinterpreterバイナリで比較認識のON/OFFを測定できる。
+`compare_loop`の`LOOP`は旧形の認識用fixtureとして残し、compilerの全出力を固定する
+契約テストとはしない。詳細・検証・再現ログは評価文書の追試節と`tmp/compare-template/`にある。
+
 ### 固定除数用divmod
 
 [divmodアルゴリズムと数値出力](https://zenn.dev/angel_p_57/articles/d5bd4cf2d32168)は、被除数を

@@ -299,8 +299,8 @@ mod tests {
     }
 
     fn compare(body: &[u8], tape: &[u8], origin: usize, expect_fast: bool) {
-        let optimized = parse_optimized_with_remote(body, None, true).unwrap();
-        let baseline = parse_optimized_with_remote(body, None, false).unwrap();
+        let optimized = parse_optimized_with_flags(body, None, true, true).unwrap();
+        let baseline = parse_optimized_with_flags(body, None, false, true).unwrap();
         let mut a = machine();
         let mut b = machine();
         a.tape[..tape.len()].copy_from_slice(tape);
@@ -368,7 +368,7 @@ mod tests {
         compare(b"@BFCRLE1;[->2[<]<]", &[1, 0, 0], 0, false);
         // Probe never grows memory. Normal execution may grow successfully.
         let source = b"@BFCRLE1;[->30000[>]+<30000]";
-        let optimized = parse_optimized_with_remote(source, None, true).unwrap();
+        let optimized = parse_optimized_with_flags(source, None, true, true).unwrap();
         let mut m = machine();
         m.grow_tape = true;
         m.tape[0] = 1;

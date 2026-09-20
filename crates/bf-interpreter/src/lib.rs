@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 pub use bf_profiling::{ProfileMap, ProfileSiteId};
 
+mod compare_loop;
 mod remote_transfer;
 
 /// Number of cells in the standard tape.
@@ -73,6 +74,8 @@ pub struct RunResult {
 pub struct RunOptions {
     /// Disable only RemoteTransfer recognition, for differential evaluation.
     pub disable_remote_transfer: bool,
+    /// Disable both comparison-loop idioms, leaving generic optimizations enabled.
+    pub disable_compare: bool,
     pub unbounded_tape: bool,
     pub collect_stats: bool,
     pub collect_timings: bool,
@@ -85,6 +88,7 @@ impl fmt::Debug for RunOptions {
         formatter
             .debug_struct("RunOptions")
             .field("disable_remote_transfer", &self.disable_remote_transfer)
+            .field("disable_compare", &self.disable_compare)
             .field("unbounded_tape", &self.unbounded_tape)
             .field("collect_stats", &self.collect_stats)
             .field("collect_timings", &self.collect_timings)
@@ -355,10 +359,11 @@ pub fn run_with_options(
     // 40-byte `Instruction` per BF byte before immediately coalescing those runs
     // multiplies a large source into tens of gigabytes. Build the fast representation
     // directly in both profiled and unprofiled modes.
-    let optimized = parse_optimized_with_remote(
+    let optimized = parse_optimized_with_flags(
         source,
         options.profile.as_ref().map(|profile| &profile.map),
         !options.disable_remote_transfer,
+        !options.disable_compare,
     )?;
     let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
     let build_elapsed = Duration::ZERO;
@@ -579,9 +584,11 @@ fn fold_countdown(instruction: FastInstruction) -> FastInstruction {
 
 #[derive(Debug, Clone)]
 enum LoopOptimization {
+    Compare,
+    CompareSlide,
     RemoteTransfer,
     Clear {
-        delta: u8,
+        iterations_factor: u8,
         body_raw_count: u64,
         body_rle_count: u64,
     },
@@ -660,6 +667,7 @@ struct FastBlock {
     last_rle: Option<RleOp>,
     opening_offset: Option<usize>,
     opening_site: Option<ResolvedProfileSite>,
+    opening_ordinal: u64,
 }
 
 impl FastBlock {
@@ -669,15 +677,21 @@ impl FastBlock {
             last_rle: None,
             opening_offset: None,
             opening_site: None,
+            opening_ordinal: 0,
         }
     }
 
-    fn nested(opening_offset: usize, opening_site: ResolvedProfileSite) -> Self {
+    fn nested(
+        opening_offset: usize,
+        opening_site: ResolvedProfileSite,
+        opening_ordinal: u64,
+    ) -> Self {
         Self {
             instructions: Vec::new(),
             last_rle: None,
             opening_offset: Some(opening_offset),
             opening_site: Some(opening_site),
+            opening_ordinal,
         }
     }
 
@@ -774,13 +788,14 @@ fn parse_optimized(
     source: &[u8],
     profile_map: Option<&ProfileMap>,
 ) -> Result<Vec<FastInstruction>, Error> {
-    parse_optimized_with_remote(source, profile_map, true)
+    parse_optimized_with_flags(source, profile_map, true, true)
 }
 
-fn parse_optimized_with_remote(
+fn parse_optimized_with_flags(
     source: &[u8],
     profile_map: Option<&ProfileMap>,
     remote_transfer: bool,
+    compare: bool,
 ) -> Result<Vec<FastInstruction>, Error> {
     let mut blocks = vec![FastBlock::root()];
     let mut ordinal = 0_u64;
@@ -830,7 +845,7 @@ fn parse_optimized_with_remote(
                 b',' => current.push_non_rle(FastInstruction::Input { site, mixed: false }),
                 b'[' => {
                     current.last_rle = None;
-                    blocks.push(FastBlock::nested(source_offset, site));
+                    blocks.push(FastBlock::nested(source_offset, site, ordinal - 1));
                 }
                 b']' => {
                     if blocks.len() == 1 {
@@ -840,7 +855,18 @@ fn parse_optimized_with_remote(
                     }
                     let block = blocks.pop().unwrap();
                     let body = block.instructions;
-                    let optimization = recognize_fast_loop(&body, remote_transfer);
+                    // Keep the nested comparison's counters at their original
+                    // sites when the idiom spans more than one profile range.
+                    let single_range = profile_map
+                        .is_none_or(|map| map.ranges[range_index].start <= block.opening_ordinal);
+                    let optimization = if compare && single_range && compare_loop::recognize(&body)
+                    {
+                        Some(LoopOptimization::Compare)
+                    } else if compare && single_range && compare_loop::recognize_slide(&body) {
+                        Some(LoopOptimization::CompareSlide)
+                    } else {
+                        recognize_fast_loop(&body, remote_transfer)
+                    };
                     let mut loop_site = block.opening_site.unwrap();
                     let mut mixed = false;
                     if optimization.is_some() {
@@ -973,7 +999,7 @@ fn recognize_fast_loop(
         && amount % 2 == 1
     {
         return Some(LoopOptimization::Clear {
-            delta: *amount,
+            iterations_factor: clear_iterations_factor(*amount),
             body_raw_count: *raw_count,
             body_rle_count: 1,
         });
@@ -1490,6 +1516,20 @@ impl<'a> Machine<'a> {
         optimization: Option<&LoopOptimization>,
     ) -> Result<(), Error> {
         match optimization {
+            Some(LoopOptimization::CompareSlide) => {
+                if self.execute_compare_slide::<false>(site) {
+                    Ok(())
+                } else {
+                    self.execute_generic_loop_light::<SAMPLE>(body)
+                }
+            }
+            Some(LoopOptimization::Compare) => {
+                if self.execute_compare_loop::<false>(site) {
+                    Ok(())
+                } else {
+                    self.execute_generic_loop_light::<SAMPLE>(body)
+                }
+            }
             Some(LoopOptimization::RemoteTransfer) => {
                 if self.execute_remote_transfer::<false>(site, body)? {
                     Ok(())
@@ -1498,12 +1538,13 @@ impl<'a> Machine<'a> {
                 }
             }
             Some(LoopOptimization::Clear {
-                delta,
+                iterations_factor,
                 body_raw_count,
                 body_rle_count,
             }) => {
                 self.optimization.clear_loops += 1;
-                let iterations = iterations_to_zero(self.tape[self.pointer], *delta);
+                let iterations =
+                    u64::from(self.tape[self.pointer].wrapping_mul(*iterations_factor));
                 self.add_counts_unprofiled(
                     1 + iterations * (body_raw_count + 1),
                     1 + iterations * (body_rle_count + 1),
@@ -1702,6 +1743,20 @@ impl<'a> Machine<'a> {
         optimization: Option<&LoopOptimization>,
     ) -> Result<Duration, Error> {
         match optimization {
+            Some(LoopOptimization::CompareSlide) => {
+                if self.execute_compare_slide::<true>(site) {
+                    Ok(Duration::ZERO)
+                } else {
+                    self.execute_generic_loop(site, body)
+                }
+            }
+            Some(LoopOptimization::Compare) => {
+                if self.execute_compare_loop::<true>(site) {
+                    Ok(Duration::ZERO)
+                } else {
+                    self.execute_generic_loop(site, body)
+                }
+            }
             Some(LoopOptimization::RemoteTransfer) => {
                 if self.execute_remote_transfer::<true>(site, body)? {
                     Ok(Duration::ZERO)
@@ -1710,12 +1765,13 @@ impl<'a> Machine<'a> {
                 }
             }
             Some(LoopOptimization::Clear {
-                delta,
+                iterations_factor,
                 body_raw_count,
                 body_rle_count,
             }) => {
                 self.optimization.clear_loops += 1;
-                let iterations = iterations_to_zero(self.tape[self.pointer], *delta);
+                let iterations =
+                    u64::from(self.tape[self.pointer].wrapping_mul(*iterations_factor));
                 self.add_counts(
                     site,
                     1 + iterations * (body_raw_count + 1),
@@ -1922,14 +1978,17 @@ impl<'a> Machine<'a> {
     }
 }
 
-fn iterations_to_zero(initial: u8, delta: u8) -> u64 {
-    let mut value = initial;
-    let mut iterations = 0;
-    while value != 0 {
-        value = value.wrapping_add(delta);
-        iterations += 1;
+/// For odd delta, n = initial * (-delta^-1) (mod 256) is the exact
+/// iteration count. Compute its multiplier once when parsing the clear loop.
+fn clear_iterations_factor(delta: u8) -> u8 {
+    debug_assert!(delta % 2 == 1);
+    // Every odd value is its own inverse modulo 8. Two Newton steps double
+    // the correct low bits from 3 to 6 to 12, covering the full byte.
+    let mut inverse = delta;
+    for _ in 0..2 {
+        inverse = inverse.wrapping_mul(2_u8.wrapping_sub(delta.wrapping_mul(inverse)));
     }
-    iterations
+    inverse.wrapping_neg()
 }
 
 fn execute(
@@ -2103,12 +2162,12 @@ mod tests {
         TEST_INTERRUPTED.load(Ordering::Relaxed)
     }
 
-    fn run_reference(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
+    pub(super) fn run_reference(source: &[u8], input: &[u8]) -> Result<RunResult, Error> {
         let instructions = parse(source)?;
         execute_reference(&instructions, input)
     }
 
-    fn assert_matches_reference(source: &[u8], input: &[u8]) -> RunResult {
+    pub(super) fn assert_matches_reference(source: &[u8], input: &[u8]) -> RunResult {
         let optimized = run_with_stats(source, input).unwrap();
         let reference = run_reference(source, input).unwrap();
         assert_eq!(optimized.output, reference.output);
@@ -2159,7 +2218,7 @@ mod tests {
         );
     }
 
-    fn test_profile_map(source: &[u8], ranges: Vec<ProfileRange>) -> ProfileMap {
+    pub(super) fn test_profile_map(source: &[u8], ranges: Vec<ProfileRange>) -> ProfileMap {
         ProfileMap {
             format: PROFILE_MAP_FORMAT.into(),
             version: PROFILE_MAP_VERSION,
@@ -2229,6 +2288,8 @@ mod tests {
                     },
                 ] {
                     let options = RunOptions {
+                        // Comparison bypass must not disable RemoteTransfer.
+                        disable_compare: true,
                         collect_stats: true,
                         profile: Some(ProfileOptions {
                             map: map.clone(),
@@ -2746,6 +2807,26 @@ mod tests {
         assert_eq!(source_offsets.get(2), 2);
         assert_eq!(source_offsets.get(3), 12);
         assert_eq!(source_offsets.get(5), 14);
+    }
+
+    #[test]
+    fn clear_iteration_factors_cover_every_odd_delta_and_initial_value() {
+        for delta in (1_u8..=255).step_by(2) {
+            let factor = clear_iterations_factor(delta);
+            for initial in 0_u8..=255 {
+                let mut value = initial;
+                let mut expected = 0_u64;
+                while value != 0 {
+                    value = value.wrapping_add(delta);
+                    expected += 1;
+                }
+                assert_eq!(u64::from(initial.wrapping_mul(factor)), expected);
+            }
+            for initial in [0, 1, 127, 255] {
+                let source = format!("{}[{}].", "+".repeat(initial), "+".repeat(delta as usize));
+                assert_matches_reference(source.as_bytes(), b"");
+            }
+        }
     }
 
     #[test]

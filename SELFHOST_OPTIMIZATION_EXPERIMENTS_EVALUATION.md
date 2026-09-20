@@ -6,6 +6,10 @@
 
 | 案 | 判断 | 根拠と制約 |
 |---|---|---|
+| interpreterの非同期比較idiomの一括化 | 採用 | 全256×256入力で出力・raw/RLE命令数を照合。実行時の補助セルと境界を検査し、不成立時は通常実行。full28と同じcompiler BFの短いwide-globalコンパイルでsample実行時間9.28%減。 |
+| clear loopの命令数を逆元で計算 | 採用 | 全256入力×128奇数増分で従来の反復数と一致。比較一括化との合計で短いwide-globalコンパイルを12.28%短縮（profileなし）。full自己入力は再測定していない。 |
+| emit_move_toの同一位置での早期return | 試作のみ・不採用 | 4入力で出力一致したがnative operationsが0.85〜1.09%増加。追加の等値比較・制御の費用が上回った。 |
+| emit_hex_byteのwhile化 | 試作のみ・保留 | 4入力で出力一致、native operations削減は0.024〜0.182%。速度改善は確認できずproductionに残していない。emit_repeat_characterの既存whileは維持。 |
 | 空Goto threading・到達不能除去・ID compaction | 採用 | source/CIRで出力一致、helloのprocess wall短縮。主効果はdispatcher往復削減。full selfhost改善は未確認。 |
 | continuation除去のみでIDを詰めない案 | 不採用 | 疎なpageがequality scanを選び、生成BFが増大した。密なID配置を維持する。 |
 | arena_advanceの桁上がり付き加算 | 不採用・試作撤回 | 境界とselfhost検証は通過したが、helloのraw/RLE換算命令とprocess wallが悪化。native operation削減だけでは採用しない。 |
@@ -279,3 +283,209 @@ kind/count配列とflush/resetを撤去し、反復回数の可逆な圧縮の�
 - `portal-profile`の出力fixture: 4 blockのIR/BF出力一致（420 bytes）。
 - serializer本体は`0400bc4`の実装との一致を確認。helloは通常848 bytes、圧縮276 bytes。
 ログは`tmp/simple-output-{compressed,stage2,limits}.log`。
+
+## full28後のinterpreter比較・clear最適化（2026-09-21）
+
+### 結果と測定範囲
+
+**interpreterの2変更を採用。短いwide-globalコンパイルでexecuteを12.28%削減した。**
+full28の自己入力による約48分の実行は、ユーザーの追加指示に従い再実行していない。
+したがってfull全体が10%以上速くなったという実測結果ではない。
+`metrics.sh`は評価設定の参照に使い、同じcompiler BFに短い入力を与えて比較した。
+
+baselineは`abe7863`から別directoryへ取り出してrelease buildしたinterpreter。
+candidateも同じtoolchainのrelease build。compiler BFは両者とも
+`logs/full-selfhost-20260921-025357/tmp.bf`で、FNV-1aは`1441e285160166f4`、
+展開後命令数は5,602,933,113。BFCソース、Rust compilerの生成物、ABIは共通である。
+各入力をAB/BA交互4組、他のbenchmarkと重ねずに測定し、内部execute時間の中央値を比較した。
+下表はprofileなし・stats有効・unlimited tape・progress無効。独立したwarmupは設けていない。
+
+| コンパイル入力 | baseline execute | candidate execute | 削減 | process全体 baseline → candidate |
+|---|---:|---:|---:|---:|
+| hello | 0.044437 s | 0.041698 s | 6.16% | 0.645271 → 0.587052 s |
+| stage7_globals | 0.566581 s | 0.522368 s | 7.80% | 1.100812 → 1.034080 s |
+| stage8_aggregates | 0.509171 s | 0.475530 s | 6.61% | 1.068841 → 0.973956 s |
+| wide-globals | 7.054007 s | 6.187741 s | 12.28% | 7.555080 → 6.705397 s |
+
+wide-globalsは16個の`cell[255][256]`配列に、各8組の定数indexによるstore/load/outputを行う
+7,256-byteの合成ソース。full28で熱いwide距離のBFシリアライズを短く再現する。
+実際のcompiler自己入力とはphase・値・関数の頻度分布が異なる。
+短い3例ではparseの約0.4〜0.5秒がprocess時間の大部分を占めるため、
+process時間の差をそのまま長時間selfhostへ外挿しない。
+
+全32 runで出力byte列、raw BF命令数、RLE命令数、最大pointerが一致した。
+wide-globalsのnative operationsは1,775,302,461 → 1,558,333,357（12.22%減）。
+clearの改善はnative operationの内部処理を減らすため、native数には現れない。
+全run・入力・出力・binary/BF SHA-256は`tmp/full29-compare/combined/`に保存した。
+
+`metrics.sh`と同じfull28 map・sample mode（1 ms）でもwide-globalsを別途4組交互測定した。
+execute中央値は**8.284547 → 7.253367秒（12.45%減）**。
+各pairの削減率は10.54%、12.85%、13.40%、9.72%で、常に10%以上という意味ではない。
+process全体は13.675600 → 12.667579秒。約30 MBのprofile JSON生成等の固定費用がある。
+短時間評価のためprogressは無効にした。ログは`tmp/full29-compare/combined-profile/`。
+
+比較一括化だけの独立評価では、同じfull28 profile mapを使うsample modeで
+hello 2.45%、stage7 3.50%、stage8 2.66%、wide-globals 9.28%のexecute削減だった。
+最後の中央値は8.326135 → 7.553816秒。
+ログは`tmp/full29-compare/bench.jsonl`、`tmp/full29-compare/wide/`。
+このsample測定と上表のprofileなし測定の差を、clear単独の効果として差し引かない。
+
+### 採用した実装
+
+1. `compare_loop.rs`でBF idiom
+   `[>>+<[-<->>-]>[-<<[-]>>>]<<<]`を認識する。
+   入口の4セルが`L,R,0,0`なら、出口は`0,max(R-L,0),0,0`、pointerは入口と同じ。
+   左右を同時に減らす回数と残余clear回数から、raw/RLE命令数・loop回数・移動量も正確に計算する。
+   補助セルが非ゼロ、または必要なセルが未確保なら、テープを変更せず通常実行へ戻す。
+   絶対アドレス・ABI field・profileのstable keyによる認識は行わない。
+   通常BFとBFCRLE1/2を扱い、複数profile rangeにまたがるものは融合しない。
+2. clear loopで残っていた`iterations_to_zero`のRust反復を除く。
+   奇数増分`d`のloop回数は`initial * (-inverse(d)) mod 256`。
+   読み込み時に逆元を計算しておき、実行時はwrapping乗算1回で求める。
+   `[-]`、`[+]`だけでなく、認識対象だった全128種類の奇数増分を扱う。
+   zeroへの書込み自体は以前から一括化されていたが、診断用の正確な計数には反復が残っていた。
+
+これらは現interpreter上での改善である。生成するBF命令列は変わらず、
+他のBF interpreterでも同じ速度向上が得られるという意味ではない。
+差分も返す比較の別templateは、今回の比較idiom認識には含めていない。
+
+### 探索した案と判断
+
+| 層・案 | 確認したこと | 判断 |
+|---|---|---|
+| BFC: emit_repeat_character | 既存whileが固定展開より速いというユーザーの実測と過去の記録を確認 | whileを維持 |
+| BFC: emit_hex_byteの4段比較をwhileへ変更 | 4入力の生成出力はbyte一致。native削減は0.024〜0.182%、単回のexecuteに改善なし | 試作を`tmp`に保持、productionは変更しない |
+| BFC: emit_move_toで現在位置と同じならreturn | global書き戻しを省けるが、4入力のnative数は0.85〜1.09%増加。出力は一致 | 不採用。追加比較・制御の負担を避ける |
+| Rust backend: 定数比較・比較template変更 | full28の比較は約20.3%。現templateを汎用BFとして一括実行できる。過去のCompareConst試作はnative削減がほぼなかった | 今回はinterpreter側を採用。生成BF削減とは分ける |
+| ABI: scalar globalの配置変更 | `StaticLayout`の実装は既にaggregateの後、anchor近傍へscalarとremote-copy scratchを配置している。ABI文書冒頭の概略図の順序だけから「巨大配列の向こうにscalarがある」と判断できない | 単なるscalar並べ替えでは動的stackのscan往復を解消できない |
+| ABI: D変更、専用lane、portal batch | D=16のoffset分解・window交換・frame予約と結び付いている。近接要求や同じchunkへの再訪だけでは、call・alias・再帰を跨ぐまとめ処理の安全性を示さない | 今回は保留。原理的に不可能とは結論しない |
+| dispatcherのさらなる一括化 | 現在もcountdown chainを認識するが、case後のtailではpointerとguardが動的に変わりうる | tailを単に削除することはできない。runtime guard付きの省略は将来候補 |
+| navigationの結果cache | stackのpush/popや任意値を持つauxの更新でscan経路が変わる | 固定アドレスだけのcacheは不正。書込みによる無効化か経路検証が必要 |
+
+BFCの2試作は`tmp/full29-compare/{hex-while,move-equal}.{bfc,bf}`、
+観測は`tmp/full29-compare/bfc-bench.jsonl`。単回時間は採用根拠にせず、
+追加実装に見合うnative削減がなかったことと、出力が一致したことを記録する。
+残るABI案には別の安全性検証・代表負荷での評価が必要であり、今回一括導入しない。
+
+### 検証と再現
+
+- `cargo test --release --workspace`: 296件成功、既存のignore 1件。
+  比較の全65,536入力、clearの全32,768入力/増分、テープ端・unbounded growth・
+  不正な補助セルからのfallback・near miss・profile境界・各profile modeと計数一致を含む。
+- `cargo clippy --release --workspace --all-targets -- -D warnings`: 成功。
+- 比較一括化を入れた段階の`verify-stage2-selfhost.sh`: 成功。
+  最終版のclear変更も全workspaceテストと全奇数増分照合で確認した。
+- 最終版の`verify-selfhost-compressed.py`: 全18例の展開後命令列、全byte反復数・
+  24-bit境界のIR/BF出力が一致。
+- ログ: `tmp/full29-compare/{final-workspace-tests,final-clippy,selfhost-tests,final-compressed-tests}.log`。
+
+短い同条件の再測定コマンド（`--out`には未使用directoryを指定する）:
+
+```sh
+python3 scripts/compare-loop/run.py \
+  --baseline tmp/full29-compare/bf-interpreter-baseline \
+  --candidate target/release/bf-interpreter \
+  --program logs/full-selfhost-20260921-025357/tmp.bf \
+  --profile-map logs/full-selfhost-20260921-025357/tmp.bfmap.json \
+  --case wide-globals --pairs 4 --out tmp/compare-loop-recheck
+```
+
+`--profile-map`を省くとprofileなし、`--case`を省くと上表の4入力を測定する。
+各processは60秒でtimeoutし、compiler自己入力は生成しない。
+runごとに出力と論理counterを照合し、fixture、manifest、時間、SHA-256を保存する。
+
+## 比較idiom自体を短縮する追試（2026-09-21）
+
+ユーザーの指摘を受け、`BF_OPTIMIZATION_NOTES.md`の「破壊的な大小比較と差分の同時計算」に
+リンクされた[記事](https://zenn.dev/angel_p_57/articles/2d6f2f36eb235a)の短いcoreを試し、採用した。
+前節では、このcompiler側の置換を比較せずinterpreterの認識を先に追加していた。
+
+旧Compareのcoreは`[>>+<[-<->>-]>[-<<[-]>>>]<<<]`。
+新形はscratchを`右operand,flag=1,zero=0,左operand`とし、coreを`[>>>[-<]<<-]`へ変更した。
+両counterが非ゼロの1反復はraw 18→11、RLE 14→8命令となる。
+新形は大小によって出口pointerが異なるため、その後の合流、boolean化、任意のtrue/false値、
+差分の符号、scratch全消去まで実装している。core単体の時間比較ではない。
+左右を入れ替えて「右>左」でstrict lessを求めることで、等値を区別する追加判定を省いた。
+差分は従来と同じwrappingの「左−右」、全operand/output aliasの契約を維持する。
+
+まず両者を同じ比較認識追加前のinterpreter
+`tmp/full29-compare/bf-interpreter-baseline`で実行した。
+RLE・clear・transfer等の既存最適化は有効だが、旧形・新形ともcompare専用認識はない。
+profileなし・stats有効・unlimited tape・progressなし、AB/BA交互4組のexecute中央値:
+
+| 入力 | 旧template | 新template | 短縮率 |
+|---|---:|---:|---:|
+| 全256×256 pairの4比較とoperand出力 | 0.932838 s | 0.557576 s | 40.23% |
+| stage7_globalsのコンパイル | 0.609192 s | 0.601861 s | 1.20% |
+| stage8_aggregatesのコンパイル | 0.541557 s | 0.529636 s | 2.20% |
+| wide-globalsのコンパイル | 7.349030 s | 6.989854 s | 4.89% |
+
+全32 runで出力byte列は一致。比較前後の移動・合流も変わるため、coreの短縮率を
+プログラム全体のraw命令数や時間へ適用しない。生成compiler BFは6,026,016→6,024,932 bytes。
+
+interpreterも新しいcoreを一括化できるようにし、旧形の認識も既存artifact用に保持した。
+新形はflag=1とzero=0、必要セルの確保を実行時検査し、不成立時は通常BF実行に戻す。
+入口counterがzeroなら補助セルを参照しない。終了pointerと残余もそのまま保持し、
+raw/RLE命令数・loop回数・移動量を正確に集計する。ABIアドレスやprofile keyには依存しない。
+
+旧compiler＋旧形認識VM（今回の開始時点）と、新compiler＋両形認識VMも別途4組で比較した:
+
+| 入力 | 変更前 | 変更後 | 観測 |
+|---|---:|---:|---|
+| 全pair・4比較 | 0.048015 s | 0.051593 s | 7.45%遅い |
+| stage7_globals | 0.551029 s | 0.546628 s | 0.80%短縮 |
+| stage8_aggregates | 0.500438 s | 0.497858 s | 0.52%短縮 |
+| wide-globals | 6.396115 s | 6.333606 s | 0.98%短縮 |
+
+専用認識ありでは短いコンパイル全体の差は小さく、ほぼ横ばいと解釈する。
+旧認識は残余Lのclearまで包含する一方、新形は終了pointer・残余を保存して出口処理へ渡すため、
+周辺処理の費用が残る。比較ベンチの後退を隠さず、汎用BFとしての改善とのトレードオフを保持する。
+full自己入力は実行していない。
+
+最終版の`cargo test --release --workspace`は298件成功、既存ignore 1件。
+`cargo clippy --release --workspace --all-targets -- -D warnings`も成功。
+比較・SubWithBorrowの全unsigned pair、source/CIR、operand保存、入力/出力alias、
+任意の真偽値、borrow chain、call frame、および新旧idiomのraw VM照合、終了pointer・残余、
+profile counters/sample/exact、圧縮形式、境界/growth/fallbackを検証した。
+`verify-selfhost-compressed.py`も全18例と反復数・24-bit境界でIR/BFの出力一致を確認した。
+新compilerで生成したcontinuation mapを付けてstage7を実行し、mapなしと出力・論理counter・
+native operationsが一致することも確認した。profile範囲によって新形の認識が外れていない。
+
+ログと再現用scriptは`tmp/compare-template/`:
+- `final-no-native-bench.jsonl` / `final-no-native-summary.json`: 認識なし。
+- `final-native-bench.jsonl` / `final-native-summary.json`: 認識あり。
+- `final-workspace-tests.log` / `final-clippy.log`: 最終版のテスト・lint。
+- `final-compressed-tests.log` / `map-check.json`: 圧縮出力と実際のcompiler profile mapの照合。
+- `final-no-native-bench.py` / `final-native-bench.py`: 短い入力の交互測定。
+
+旧形の`LOOP`定数はinterpreter認識器のfixtureであり、compilerが将来も同じコードを出すという
+契約ではない。compilerの出力が変わって認識に一致しなければ通常実行へ戻る。
+今回の新形は`SLIDE`のfixtureで別途検証し、旧形の回帰検証も維持する。
+
+### 専用認識のbypass（2026-09-21）
+
+上記の認識なし測定は保存済みの旧interpreterを使用したもの。
+その後、同一バイナリで比較認識だけを切り替えられる`--disable-compare`を追加した。
+旧形`Compare`・新形`CompareSlide`の両方をparse時に無効化する。
+既存の`--disable-remote-transfer`とは独立して指定でき、両方とも既定では認識有効。
+RLE・clear・scan・通常のtransfer等の汎用最適化は有効のまま残る。
+
+```sh
+# 比較の専用認識だけを無効化
+target/release/bf-interpreter --disable-compare --stats --no-progress program.bf
+
+# 比較とRemoteTransferの専用認識を両方無効化
+target/release/bf-interpreter --disable-compare --disable-remote-transfer --stats --no-progress program.bf
+```
+
+APIでは`RunOptions { disable_compare: true, disable_remote_transfer: true,
+..RunOptions::default() }`。実行時の安全条件によるfallbackと異なり、入力値によらず
+該当する専用認識を無効にできる。raw/RLE命令数などの論理counterは同じになり、
+実際のnative operationsや時間は変わる。
+
+検証: `cargo test --release -p bf-interpreter`の49件が成功。
+新旧idiomについて、profileなし/counters/exact/sample・BF/BFCRLE1/BFCRLE2・
+RemoteTransfer ON/OFFで比較bypass前後の出力と論理counterを照合した。
+CLIでも新旧比較とRemoteTransferの3 fixture×4設定を実行し、出力・論理counter一致と
+各flagの独立性を確認した（`tmp/compare-bypass/cli-check.json`）。
+`cargo clippy --release --workspace --all-targets -- -D warnings`も成功。full自己入力は未実行。

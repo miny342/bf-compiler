@@ -76,6 +76,7 @@ enum ProfileFormat {
 
 struct CliOptions {
     disable_remote_transfer: bool,
+    disable_compare: bool,
     print_stats: bool,
     print_timings: bool,
     unlimited_tape: bool,
@@ -168,6 +169,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         &input,
         RunOptions {
             disable_remote_transfer: options.disable_remote_transfer,
+            disable_compare: options.disable_compare,
             unbounded_tape: options.unlimited_tape,
             collect_stats: options.print_stats || profile.is_some(),
             collect_timings: options.print_timings || profile.is_some(),
@@ -243,6 +245,7 @@ fn parse_arguments(
     let mut print_timings = false;
     let mut unlimited_tape = false;
     let mut disable_remote_transfer = false;
+    let mut disable_compare = false;
     let mut program_path = None;
     let mut profile_map_path = None;
     let mut accept_embedded_profile = false;
@@ -263,6 +266,8 @@ fn parse_arguments(
             unlimited_tape = true;
         } else if argument == "--disable-remote-transfer" {
             disable_remote_transfer = true;
+        } else if argument == "--disable-compare" {
+            disable_compare = true;
         } else if argument == "--profile-map" {
             profile_map_path = Some(PathBuf::from(required_value(
                 executable,
@@ -345,6 +350,7 @@ fn parse_arguments(
     }
     Ok(CliOptions {
         disable_remote_transfer,
+        disable_compare,
         print_stats,
         print_timings,
         unlimited_tape,
@@ -846,10 +852,13 @@ fn duration_percent(numerator: u128, denominator: u128) -> f64 {
 
 fn usage(executable: &OsStr) -> String {
     format!(
-        "usage: {} [--stats] [--timings] [--unlimited-tape] [--disable-remote-transfer] [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
+        "usage: {} [--stats] [--timings] [--unlimited-tape] [--disable-remote-transfer] [--disable-compare] [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
          [--profile-mode counters|sample|exact] [--profile-sample-interval 1ms] \
          [--profile-output PATH] [--profile-format text|json] <program.bf>\n\
-         Accepts ordinary BF and auto-detects @BFCRLE1;/@BFCRLE2; compressed BF.",
+         Accepts ordinary BF and auto-detects @BFCRLE1;/@BFCRLE2; compressed BF.\n\
+         --disable-compare bypasses both comparison-loop idioms.\n\
+         --disable-remote-transfer bypasses scan-bearing remote transfers.\n\
+         These flags can be combined; generic loop and RLE optimizations remain enabled.",
         executable.to_string_lossy()
     )
 }
@@ -857,6 +866,25 @@ fn usage(executable: &OsStr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_independent_optimization_bypasses() {
+        for disable_compare in [false, true] {
+            for disable_remote_transfer in [false, true] {
+                let mut arguments = vec![OsString::from("program.bf")];
+                if disable_compare {
+                    arguments.push("--disable-compare".into());
+                }
+                if disable_remote_transfer {
+                    arguments.push("--disable-remote-transfer".into());
+                }
+                let options = parse_arguments(OsStr::new("bf-interpreter"), arguments).unwrap();
+                assert_eq!(options.disable_compare, disable_compare);
+                assert_eq!(options.disable_remote_transfer, disable_remote_transfer);
+                assert_eq!(options.program_path, PathBuf::from("program.bf"));
+            }
+        }
+    }
 
     #[test]
     fn parses_sampling_intervals() {
