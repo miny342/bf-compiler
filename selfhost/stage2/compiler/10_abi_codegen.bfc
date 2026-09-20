@@ -192,28 +192,51 @@ void emit_anchor_to_current(cell frame_cells) {
     target_position = 0;
 }
 
-void emit_anchor_to_global(WideValue global) {
-    emit_repeat_wide('<', wide_subtract(stage7_static_cells, global));
+void emit_anchor_to_global_distance(WideValue distance) {
+    emit_repeat_wide('<', distance);
     target_position = 0;
+}
+
+void emit_global_to_anchor_distance(WideValue distance) {
+    emit_repeat_wide('>', distance);
+    target_position = 0;
+}
+
+void emit_anchor_to_global(WideValue global) {
+    emit_anchor_to_global_distance(wide_subtract(stage7_static_cells, global));
 }
 
 void emit_global_to_anchor(WideValue global) {
-    emit_repeat_wide('>', wide_subtract(stage7_static_cells, global));
-    target_position = 0;
+    emit_global_to_anchor_distance(wide_subtract(stage7_static_cells, global));
 }
 
-void emit_current_to_global(WideValue global, cell frame_cells) {
+void emit_current_to_global_distance(WideValue distance, cell frame_cells) {
     emit_current_to_anchor(frame_cells);
-    emit_anchor_to_global(global);
+    emit_anchor_to_global_distance(distance);
 }
 
-void emit_global_to_current(WideValue global, cell frame_cells) {
-    emit_global_to_anchor(global);
+void emit_global_to_current_distance(WideValue distance, cell frame_cells) {
+    emit_global_to_anchor_distance(distance);
     emit_anchor_to_current(frame_cells);
 }
 
+void emit_current_to_global(WideValue global, cell frame_cells) {
+    emit_current_to_global_distance(
+        wide_subtract(stage7_static_cells, global),
+        frame_cells
+    );
+}
+
+void emit_global_to_current(WideValue global, cell frame_cells) {
+    emit_global_to_current_distance(
+        wide_subtract(stage7_static_cells, global),
+        frame_cells
+    );
+}
+
 void emit_global_constant(WideValue global, cell value, cell frame_cells) {
-    emit_current_to_global(global, frame_cells);
+    WideValue distance = wide_subtract(stage7_static_cells, global);
+    emit_current_to_global_distance(distance, frame_cells);
     compiler_output!('[');
     compiler_output!('-');
     compiler_output!(']');
@@ -225,32 +248,33 @@ void emit_global_constant(WideValue global, cell value, cell frame_cells) {
             value += 1;
         }
     }
-    emit_global_to_current(global, frame_cells);
+    emit_global_to_current_distance(distance, frame_cells);
 }
 
 void emit_global_copy(WideValue global, cell destination, cell frame_cells) {
+    WideValue distance = wide_subtract(stage7_static_cells, global);
     emit_clear(destination);
     emit_clear(FRAME_RESTORE);
-    emit_current_to_global(global, frame_cells);
+    emit_current_to_global_distance(distance, frame_cells);
     compiler_output!('[');
     compiler_output!('-');
-    emit_global_to_current(global, frame_cells);
+    emit_global_to_current_distance(distance, frame_cells);
     emit_move_to(destination);
     compiler_output!('+');
     emit_move_to(FRAME_RESTORE);
     compiler_output!('+');
     emit_move_to(0);
-    emit_current_to_global(global, frame_cells);
+    emit_current_to_global_distance(distance, frame_cells);
     compiler_output!(']');
-    emit_global_to_current(global, frame_cells);
+    emit_global_to_current_distance(distance, frame_cells);
 
     emit_move_to(FRAME_RESTORE);
     compiler_output!('[');
     compiler_output!('-');
     emit_move_to(0);
-    emit_current_to_global(global, frame_cells);
+    emit_current_to_global_distance(distance, frame_cells);
     compiler_output!('+');
-    emit_global_to_current(global, frame_cells);
+    emit_global_to_current_distance(distance, frame_cells);
     emit_move_to(FRAME_RESTORE);
     compiler_output!(']');
     emit_move_to(0);
@@ -263,20 +287,25 @@ void emit_transfer_to_global(
     cell clear_first,
     cell frame_cells
 ) {
+    WideValue distance = wide_subtract(stage7_static_cells, global);
     if (clear_first) {
-        emit_global_constant(global, 0, frame_cells);
+        emit_current_to_global_distance(distance, frame_cells);
+        compiler_output!('[');
+        compiler_output!('-');
+        compiler_output!(']');
+        emit_global_to_current_distance(distance, frame_cells);
     }
     emit_move_to(source);
     compiler_output!('[');
     compiler_output!('-');
     emit_move_to(0);
-    emit_current_to_global(global, frame_cells);
+    emit_current_to_global_distance(distance, frame_cells);
     if (subtract) {
         compiler_output!('-');
     } else {
         compiler_output!('+');
     }
-    emit_global_to_current(global, frame_cells);
+    emit_global_to_current_distance(distance, frame_cells);
     emit_move_to(source);
     compiler_output!(']');
     emit_move_to(0);

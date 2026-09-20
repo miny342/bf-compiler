@@ -78,6 +78,38 @@ count 0〜255を含むrepeat出力を検証し、結果一致を確認した。�
 
 今後の候補として、比較命令の復元、global/static cellのアドレス解決メモ化、
 `arena_read`/`arena_advance`の特殊化、continuationをまたぐ制御構造の再配置がある。
+
+## 2026-09-20: BF側の比較とglobal往復距離の追加調査
+
+full25のprofileでは、`emit_repeat_wide`、`emit_move_to`、
+`emit_anchor_to_global`、`emit_global_to_anchor`が引き続き上位だった。
+Rust backendに右辺定数専用の`CompareConst`を一時実装して人工的な比較ループで確認したが、
+BFのraw instructionは19%減った一方、native operationはほぼ変わらなかった。
+full25 stage2 compilerを`hello`と`stage8_aggregates`へ通した場合の削減は0.003〜0.007%で、
+selfhostの主経路では効果が薄かったためproductionには残していない。
+
+採用したのは次の2点である。
+
+- `emit_move_to`の相互排他的な移動方向を独立した2つの`if`から`if/else if`へ変更した。
+  右方向へ移動したときの2回目の比較を省く。
+- `emit_global_copy`、`emit_global_constant`、`emit_transfer_to_global`の一回のglobal往復内で、
+  `stage7_static_cells - global`を一度だけ`wide_subtract`し、その`WideValue`を両方向の移動へ渡すようにした。
+  同じ距離の十進変換自体はまだ2回行う。decimal digit列のcacheは、global cellへのcacheアクセスと
+  cache miss時の費用が未評価なので今回は入れていない。
+
+HEAD時点のstage2 compilerをbaseline、上記2点を入れたsourceをoptimizedとしてRust backendで生成し、
+同じinterpreterでstage2 examplesを実行した。出力SHA-256は3例とも一致した。
+
+| 入力 | baseline native operations | optimized native operations | raw executed instructionsの削減 |
+|---|---:|---:|---:|
+| `hello` | 11,085,218 | 11,078,287 | 0.00016% |
+| `stage7_globals` | 144,838,423 | 144,119,134 | 0.800% |
+| `stage8_aggregates` | 131,424,217 | 130,851,558 | 0.393% |
+
+`python3 scripts/verify-selfhost-compressed.py --compiler target/release/bfc --interpreter target/release/bf-interpreter`
+も全例で成功した。full selfhostの完走profileはまだ取得していないため、上記をfull25の速度向上率とは扱わない。
+`emit_repeat_wide`のdecimal digit列自体のmemo化と、静的global IDをIRに残してcache keyにする案は、
+今後の候補として残す。
 これらはfull23だけでは効果と正しさを断定できないため、今回のコミットでは保留する。
 
 以下は各実験の設計と検証条件。実験1のIR部分と実験2の空Goto・2c部分は完了しており、

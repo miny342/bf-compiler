@@ -6,8 +6,7 @@ void emit_move_to(cell destination) {
     cell tmp = target_position;
     if (tmp < destination) {
         emit_repeat_character('>', destination - tmp);
-    }
-    if (tmp > destination) {
+    } else if (tmp > destination) {
         emit_repeat_character('<', tmp - destination);
     }
     target_position = destination;
