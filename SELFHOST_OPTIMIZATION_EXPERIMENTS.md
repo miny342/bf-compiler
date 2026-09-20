@@ -23,7 +23,8 @@
   Tape IR導入、十進変換の定数特殊化、多箇所inline拡張は未実施。
 - BFCRLE v1はRust版の `--compressed-bf` で使用可能。通常BFとprofile互換を維持する。
 - セルフホスト版も`concat-stage2-compiler.sh compressed`でBFCRLE出力を選べる。
-  命令列の変更ではなく可逆な保存形式の変更。通常BFの`main`とbinary `cir`は維持する。
+  出力はBFCRLE v2（小文字の十六進run count）で、命令列の変更ではなく可逆な保存形式の変更。
+  interpreterはv1/v2の両方を受理し、通常BFの`main`とbinary `cir`は維持する。
 - interpreterのRemoteTransferを採用。Scan経路と更新先が独立な局所転送を実行時に
   一括化し、`--disable-remote-transfer`で比較可能。
   compiler側のportal batch/専用laneとは別の最適化として評価する。
@@ -78,6 +79,18 @@ count 0〜255を含むrepeat出力を検証し、結果一致を確認した。�
 
 今後の候補として、比較命令の復元、global/static cellのアドレス解決メモ化、
 `arena_read`/`arena_advance`の特殊化、continuationをまたぐ制御構造の再配置がある。
+
+## 2026-09-21: selfhost BFCRLE v2 の十六進run count
+
+セルフホストの`compressed` entryだけ、run countを十進数から小文字の十六進数へ変更した。
+出力ヘッダは`@BFCRLE2;`で、Rust版`--compressed-bf`の`@BFCRLE1;`出力は維持する。
+`+`、`-`、`<`、`>`のcountを同じ形式で読み取り、v2 parserは大文字・小文字の`A-F`を受理する。
+
+セルフホスト側は1〜255のcountを必要な桁だけ、256と65,536の固定runをそれぞれ`100`と`10000`、
+WideValueを6桁固定で出力する。したがってBF commandの展開後の意味は変わらず、主な効果は保存した
+BFCRLEの文字数である。v1/v2の実行・profile marker・Rust interpreterを回帰テストし、
+生成側のmacroはstage2 compiler sourceとしてコンパイルできることを確認する。
+selfhost全体の完走時間やBF実行時間の改善は、この形式変更単独では測定していない。
 
 ## 2026-09-20: BF側の比較とglobal往復距離の追加調査
 

@@ -5,6 +5,8 @@ use std::{
 };
 
 pub const HEADER: &str = "@BFCRLE1;";
+/// BFCRLE v2 uses hexadecimal counts after `+`, `-`, `<`, and `>`.
+pub const HEX_HEADER: &str = "@BFCRLE2;";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RleError(pub usize);
@@ -25,7 +27,20 @@ pub struct Run {
 }
 
 pub fn compressed(source: &[u8]) -> bool {
-    source.starts_with(HEADER.as_bytes())
+    source.starts_with(HEADER.as_bytes()) || source.starts_with(HEX_HEADER.as_bytes())
+}
+
+pub fn hex_compressed(source: &[u8]) -> bool {
+    source.starts_with(HEX_HEADER.as_bytes())
+}
+
+fn count_digit(byte: u8, hexadecimal: bool) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' if hexadecimal => Some(byte - b'a' + 10),
+        b'A'..=b'F' if hexadecimal => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Decode one command at `offset`. Non-command bytes are left to the caller.
@@ -33,15 +48,22 @@ pub fn run_at(source: &[u8], offset: usize, rle: bool) -> Result<Run, RleError> 
     let byte = source[offset];
     let mut end = offset + 1;
     let mut count = 1;
+    let hexadecimal = rle && hex_compressed(source);
     if rle
         && matches!(byte, b'+' | b'-' | b'<' | b'>')
-        && source.get(end).is_some_and(u8::is_ascii_digit)
+        && source
+            .get(end)
+            .and_then(|byte| count_digit(*byte, hexadecimal))
+            .is_some()
     {
         count = 0usize;
-        while let Some(digit) = source.get(end).filter(|b| b.is_ascii_digit()) {
+        while let Some(digit) = source
+            .get(end)
+            .and_then(|byte| count_digit(*byte, hexadecimal))
+        {
             count = count
-                .checked_mul(10)
-                .and_then(|n| n.checked_add((digit - b'0') as usize))
+                .checked_mul(if hexadecimal { 16 } else { 10 })
+                .and_then(|n| n.checked_add(usize::from(digit)))
                 .ok_or(RleError(offset))?;
             end += 1;
         }
@@ -133,10 +155,24 @@ mod tests {
                 expected
             );
         }
+        for (source, expected) in [
+            ("@BFCRLE2;+a>10-<f", vec![10, 16, 1, 15]),
+            ("@BFCRLE2;+A>10-<F", vec![10, 16, 1, 15]),
+            ("@BFCRLE2;+000f", vec![15]),
+        ] {
+            assert_eq!(
+                Runs::new(source.as_bytes())
+                    .map(|r| r.unwrap().count)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
         for source in [
             "@BFCRLE1;+0".into(),
             format!("@BFCRLE1;>{}+", isize::MAX),
             format!("@BFCRLE1;>{}", isize::MAX as u128 + 1),
+            "@BFCRLE2;+0".into(),
+            "@BFCRLE2;+000".into(),
         ] {
             assert!(
                 Runs::new(source.as_bytes())

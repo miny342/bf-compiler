@@ -849,7 +849,7 @@ fn usage(executable: &OsStr) -> String {
         "usage: {} [--stats] [--timings] [--unlimited-tape] [--disable-remote-transfer] [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
          [--profile-mode counters|sample|exact] [--profile-sample-interval 1ms] \
          [--profile-output PATH] [--profile-format text|json] <program.bf>\n\
-         Accepts ordinary BF and auto-detects @BFCRLE1; compressed BF.",
+         Accepts ordinary BF and auto-detects @BFCRLE1;/@BFCRLE2; compressed BF.",
         executable.to_string_lossy()
     )
 }

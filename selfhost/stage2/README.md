@@ -31,7 +31,9 @@ BF上で動くBFC製コンパイラの入力は1本のbyte streamなので、セ
 ### 巨大なBF出力を短縮する
 
 `main`の代わりに`compressed`を指定すると、セルフホストコンパイラ自身が
-`@BFCRLE1;`付きの可逆な短縮BFを出力する。通常BFの命令列は変更しない。
+`@BFCRLE2;`付きの可逆な短縮BFを出力する。run countは小文字の十六進数で、
+通常BFの命令列は変更しない。Rust側のinterpreterは`@BFCRLE1;`の十進形式も
+引き続き受理する。
 Rust側の`--compressed-bf`は「コンパイラを実装するBF」の圧縮、
 `compressed`エントリは「そのコンパイラが生成するBF」の圧縮で、独立している。
 
@@ -131,7 +133,7 @@ frameへmaterializeできる239 cell以下の値だけに対応する。旧第4�
 残している。
 
 エラーは`BFC_STAGE12_ERROR:AA`のように、呼び出し箇所を示す英大文字2文字と改行を付けて
-出力する。圧縮entryでは先頭の`@BFCRLE1;`に続いてこの診断が出る。例えば`AA`の場所は
+出力する。圧縮entryでは先頭の`@BFCRLE2;`に続いてこの診断が出る。例えば`AA`の場所は
 `rg -n "fail\('A', 'A'\)" selfhost/stage2/compiler`で検索できる。各`fail`呼び出しには
 固有の`fail('A', 'A')`形式のIDを割り当て、既存IDは行の移動やcallの追加で振り直さない。
 新しい箇所には未使用の組を使う（`AA`〜`ZZ`の676通り）。削除したIDも過去のログのために

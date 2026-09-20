@@ -527,7 +527,9 @@ pub fn base32_decode(input: &str) -> Result<Vec<u8>, EmbeddedProfileError> {
 }
 
 /// Emit a marker-bearing BF artifact. The underlying BF command stream is
-/// unchanged, so ordinary interpreters treat markers as comments.
+/// unchanged, so ordinary interpreters treat markers as comments. The
+/// compressed header and count alphabet are preserved when the input uses
+/// BFCRLE v1 or v2.
 pub fn embed_profile_markers(
     source: &str,
     map: &ProfileMap,
@@ -535,9 +537,15 @@ pub fn embed_profile_markers(
     map.validate_for_source(source.as_bytes())
         .map_err(EmbeddedProfileError::Map)?;
     let compressed = rle::compressed(source.as_bytes());
+    let hexadecimal = rle::hex_compressed(source.as_bytes());
+    let header = if hexadecimal {
+        rle::HEX_HEADER
+    } else {
+        rle::HEADER
+    };
     let mut output = String::new();
     if compressed {
-        output.push_str(rle::HEADER);
+        output.push_str(header);
     }
     output.push_str("@BFCDBG1;");
     for site in &map.sites {
@@ -550,7 +558,7 @@ pub fn embed_profile_markers(
     output.push_str("@ENDDBG;");
     let mut ordinal = 0_u64;
     let mut range_index = 0_usize;
-    let mut copied = if compressed { rle::HEADER.len() } else { 0 };
+    let mut copied = if compressed { header.len() } else { 0 };
     for run in rle::Runs::new(source.as_bytes()) {
         let run = run.map_err(|_| EmbeddedProfileError::MalformedMarker)?;
         output.push_str(&source[copied..run.offset]);
@@ -566,7 +574,11 @@ pub fn embed_profile_markers(
             output.push(run.byte as char);
             if compressed {
                 if count > 1 {
-                    output.push_str(&count.to_string());
+                    if hexadecimal {
+                        output.push_str(&format!("{count:x}"));
+                    } else {
+                        output.push_str(&count.to_string());
+                    }
                 }
             } else {
                 output.extend(std::iter::repeat_n(run.byte as char, count as usize - 1));
@@ -904,6 +916,23 @@ mod tests {
             Some(expected)
         );
         assert_eq!(embedded_profile_map(b"@P1;+").unwrap(), None);
+    }
+
+    #[test]
+    fn embedded_markers_preserve_hex_rle_v2() {
+        let source = "@BFCRLE2;+a>2";
+        let map = valid_map(source.as_bytes());
+        let embedded = embed_profile_markers(source, &map).unwrap();
+        assert!(embedded.starts_with("@BFCRLE2;"));
+        let mut expected = map;
+        expected.files.clear();
+        for site in &mut expected.sites {
+            site.source = None;
+        }
+        assert_eq!(
+            embedded_profile_map(embedded.as_bytes()).unwrap(),
+            Some(expected)
+        );
     }
 
     #[test]

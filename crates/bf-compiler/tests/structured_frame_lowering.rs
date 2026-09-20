@@ -125,7 +125,7 @@ fn dead_effects_and_constant_logical_operands_need_no_dispatch() {
 }
 
 #[test]
-fn selfhost_decimal_serializer_keeps_frame_control_and_exact_output() {
+fn selfhost_hex_serializer_keeps_frame_control_and_exact_output() {
     let source = format!(
         "const cell COMPRESSED_BF_OUTPUT=1;
          struct WideValue{{cell low;cell mid;cell high;}}
@@ -163,9 +163,9 @@ fn selfhost_decimal_serializer_keeps_frame_control_and_exact_output() {
         if count != 0 {
             expected.push('>');
             if count > 255 {
-                expected += &format!("{count:08}");
+                expected += &format!("{count:06x}");
             } else if count > 1 {
-                expected += &count.to_string();
+                expected += &format!("{count:x}");
             }
         }
         expected.push('.');

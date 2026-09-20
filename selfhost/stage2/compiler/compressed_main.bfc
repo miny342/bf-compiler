@@ -11,6 +11,6 @@ macro compiler_output(value) {
 
 void main() {
     output('@'); output('B'); output('F'); output('C');
-    output('R'); output('L'); output('E'); output('1'); output(';');
+    output('R'); output('L'); output('E'); output('2'); output(';');
     compile_program_stage12();
 }

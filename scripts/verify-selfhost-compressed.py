@@ -8,20 +8,32 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-HEADER = b"@BFCRLE1;"
+DECIMAL_HEADER = b"@BFCRLE1;"
+HEX_HEADER = b"@BFCRLE2;"
 
 
 def runs(data):
-    compressed = data.startswith(HEADER)
-    if compressed:
-        data = data[len(HEADER):]
-    pattern = rb"([+<>-])([0-9]*)|([\[\].,])" if compressed else rb"([+<>-])()|([\[\].,])"
+    if data.startswith(DECIMAL_HEADER):
+        compressed = True
+        base = 10
+        data = data[len(DECIMAL_HEADER):]
+    elif data.startswith(HEX_HEADER):
+        compressed = True
+        base = 16
+        data = data[len(HEX_HEADER):]
+    else:
+        compressed = False
+        base = 10
+    pattern = (rb"([+<>-])([0-9a-fA-F]*)|([\[\].,])"
+               if base == 16 else
+               rb"([+<>-])([0-9]*)|([\[\].,])") if compressed else \
+        rb"([+<>-])()|([\[\].,])"
     end = 0
     for match in re.finditer(pattern, data):
         assert match.start() == end, (end, data[end:end + 30])
         end = match.end()
         command = match[1] or match[3]
-        count = int(match[2] or b"1")
+        count = int(match[2] or b"1", base)
         assert count > 0
         yield command, count
     assert end == len(data)
@@ -63,16 +75,16 @@ def main():
             plain = run([compiler, "--run-ir", str(sources["main"])], example.read_bytes())
             compressed = run([interpreter, "--unlimited-tape", "--no-progress",
                               str(compiler_bf)], example.read_bytes())
-            assert compressed.startswith(HEADER), example
+            assert compressed.startswith((DECIMAL_HEADER, HEX_HEADER)), example
             assert normalized(plain) == normalized(compressed), example
             print(f"{example.name}: {len(plain)} -> {len(compressed)} bytes", flush=True)
 
         # Test the immediate serializer directly, including exact Add run counts.
-        # All cell counts, decimal boundaries, 256/65536 and maximum 24-bit count.
+        # All cell counts, count boundaries, 256/65536 and maximum 24-bit count.
         harness = sources["compressed"].read_text().split("void main() {")[0]
         harness += """void main() {
             output('@'); output('B'); output('F'); output('C'); output('R');
-            output('L'); output('E'); output('1'); output(';');
+            output('L'); output('E'); output('2'); output(';');
             cell n;
             emit_repeat_character('+', n); output('.');
             n = 1;

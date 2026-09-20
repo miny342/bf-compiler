@@ -9,6 +9,17 @@ BF IR peephole最適化とcontinuation dispatcherの二段countdownは採用済�
 lowering手法は未採用であり、実装時には生成BFの長さ、実行step、追加cell数を現在のloweringと
 比較してから選ぶ。
 
+## BFCRLE v2 の十六進run count
+
+2026-09-21: selfhostの`compressed` entryは`@BFCRLE2;`と小文字の十六進run countを出力する。
+Rust backendの`--compressed-bf`は互換性のため`@BFCRLE1;`と十進数を維持する。v2 parserは
+`0-9a-fA-F`を受理するため、Rust interpreter・profile marker・selfhost出力の間で形式を扱える。
+
+この変更は展開後のBF命令列や実行時の意味を変えず、巨大なselfhost出力を保存・読み込む際の文字数を
+減らすためのもの。固定幅WideValueは6桁、256/65,536回の固定runはそれぞれ`100`/`10000`とする。
+実行時間の効果はBF生成後のinterpreter処理、parse、I/Oに分かれるため、通常BFの実行高速化とは
+別に測定する。
+
 ## stage2の整数幅・不要処理の整理
 
 2026-09-15: streaming BF最適化追加後の自己入力失敗`BFC_STAGE12_ERROR:GX`は、

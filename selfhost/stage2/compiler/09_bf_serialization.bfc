@@ -1,5 +1,37 @@
 // Emit BF runs immediately, without a peephole buffer or cross-call state.
-// BFCRLE serialization matches the simple output path before 4f3a2b9.
+// BFCRLE2 serialization uses lowercase hexadecimal run counts.
+
+macro emit_hex_digit(value) {
+    if (value < 10) {
+        compiler_output!('0' + value);
+    } else {
+        compiler_output!('a' + value - 10);
+    }
+}
+
+macro emit_hex_byte(value, fixed_width) {
+    cell high_nibble = 0;
+    if (value >= 128) {
+        value -= 128;
+        high_nibble += 8;
+    }
+    if (value >= 64) {
+        value -= 64;
+        high_nibble += 4;
+    }
+    if (value >= 32) {
+        value -= 32;
+        high_nibble += 2;
+    }
+    if (value >= 16) {
+        value -= 16;
+        high_nibble += 1;
+    }
+    if (fixed_width || high_nibble != 0) {
+        emit_hex_digit!(high_nibble);
+    }
+    emit_hex_digit!(value);
+}
 
 // Repetition helpers are for the BF run commands +, -, < and > only.
 void emit_repeat_character(cell character, cell count) {
@@ -7,23 +39,7 @@ void emit_repeat_character(cell character, cell count) {
         if (count != 0) {
             compiler_output!(character);
             if (count != 1) {
-                cell hundreds;
-                cell tens;
-                while (count >= 100) {
-                    count -= 100;
-                    hundreds += 1;
-                }
-                while (count >= 10) {
-                    count -= 10;
-                    tens += 1;
-                }
-                if (hundreds != 0) {
-                    compiler_output!('0' + hundreds);
-                }
-                if (hundreds != 0 || tens != 0) {
-                    compiler_output!('0' + tens);
-                }
-                compiler_output!('0' + count);
+                emit_hex_byte!(count, 0);
             }
         }
         return;
@@ -37,7 +53,7 @@ void emit_repeat_character(cell character, cell count) {
 void emit_repeat_256(cell character) {
     if (COMPRESSED_BF_OUTPUT) {
         compiler_output!(character);
-        compiler_output!('2'); compiler_output!('5'); compiler_output!('6');
+        compiler_output!('1'); compiler_output!('0'); compiler_output!('0');
         return;
     }
     cell count;
@@ -52,8 +68,8 @@ void emit_repeat_256(cell character) {
 void emit_repeat_65536(cell character) {
     if (COMPRESSED_BF_OUTPUT) {
         compiler_output!(character);
-        compiler_output!('6'); compiler_output!('5'); compiler_output!('5');
-        compiler_output!('3'); compiler_output!('6');
+        compiler_output!('1'); compiler_output!('0'); compiler_output!('0');
+        compiler_output!('0'); compiler_output!('0');
         return;
     }
     cell count;
@@ -72,354 +88,9 @@ void emit_repeat_wide(cell character, WideValue count) {
             return;
         }
         compiler_output!(character);
-        // Little-endian base-256 digits of 10^7, 10^6, ..., 10^0.
-        // Keep each fixed-place loop here rather than calling a generic helper:
-        // the self-host compiler can then fuse the fixed subtraction and its
-        // borrow flag without adding eight dispatcher functions.
-        cell digit = 0;
-        if (count.high > 152 || (count.high == 152 &&
-            (count.mid > 150 || (count.mid == 150 && count.low >= 128)))) {
-            cell borrow = count.low < 128;
-            count.low -= 128;
-            cell next_borrow = count.mid < 150;
-            count.mid -= 150;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 152;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 1;
-        }
-        compiler_output!('0' + digit);
-
-        digit = 0;
-        if (count.high > 76 || (count.high == 76 &&
-            (count.mid > 75 || (count.mid == 75 && count.low >= 64)))) {
-            cell borrow = count.low < 64;
-            count.low -= 64;
-            cell next_borrow = count.mid < 75;
-            count.mid -= 75;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 76;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 5;
-        }
-        if (count.high > 30 || (count.high == 30 &&
-            (count.mid > 132 || (count.mid == 132 && count.low >= 128)))) {
-            cell borrow = count.low < 128;
-            count.low -= 128;
-            cell next_borrow = count.mid < 132;
-            count.mid -= 132;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 30;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 2;
-        }
-        if (count.high > 15 || (count.high == 15 &&
-            (count.mid > 66 || (count.mid == 66 && count.low >= 64)))) {
-            cell borrow = count.low < 64;
-            count.low -= 64;
-            cell next_borrow = count.mid < 66;
-            count.mid -= 66;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 15;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 1;
-        }
-        if (count.high > 15 || (count.high == 15 &&
-            (count.mid > 66 || (count.mid == 66 && count.low >= 64)))) {
-            cell borrow = count.low < 64;
-            count.low -= 64;
-            cell next_borrow = count.mid < 66;
-            count.mid -= 66;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 15;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 1;
-        }
-        compiler_output!('0' + digit);
-
-        digit = 0;
-        if (count.high > 7 || (count.high == 7 &&
-            (count.mid > 161 || (count.mid == 161 && count.low >= 32)))) {
-            cell borrow = count.low < 32;
-            count.low -= 32;
-            cell next_borrow = count.mid < 161;
-            count.mid -= 161;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 7;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 5;
-        }
-        if (count.high > 3 || (count.high == 3 &&
-            (count.mid > 13 || (count.mid == 13 && count.low >= 64)))) {
-            cell borrow = count.low < 64;
-            count.low -= 64;
-            cell next_borrow = count.mid < 13;
-            count.mid -= 13;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 3;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 2;
-        }
-        if (count.high > 1 || (count.high == 1 &&
-            (count.mid > 134 || (count.mid == 134 && count.low >= 160)))) {
-            // For K > 128, x < K and x -= K can use the wrapped result:
-            // x += 256-K; borrow is then result >= 256-K.
-            count.low += 96;
-            cell borrow = count.low >= 96;
-            cell next_borrow = count.mid < 134;
-            count.mid -= 134;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 1;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 1;
-        }
-        if (count.high > 1 || (count.high == 1 &&
-            (count.mid > 134 || (count.mid == 134 && count.low >= 160)))) {
-            count.low += 96;
-            cell borrow = count.low >= 96;
-            cell next_borrow = count.mid < 134;
-            count.mid -= 134;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            count.high -= 1;
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 1;
-        }
-        compiler_output!('0' + digit);
-
-        // The 10^5 pass leaves a value below 10^5; high may still be one.
-        digit = 0;
-        if (count.high != 0 || count.mid > 195 ||
-            (count.mid == 195 && count.low >= 80)) {
-            cell borrow = count.low < 80;
-            count.low -= 80;
-            cell next_borrow = count.mid < 195;
-            count.mid -= 195;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 5;
-        }
-        if (count.high != 0 || count.mid > 78 ||
-            (count.mid == 78 && count.low >= 32)) {
-            cell borrow = count.low < 32;
-            count.low -= 32;
-            cell next_borrow = count.mid < 78;
-            count.mid -= 78;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 2;
-        }
-        if (count.high != 0 || count.mid > 39 ||
-            (count.mid == 39 && count.low >= 16)) {
-            cell borrow = count.low < 16;
-            count.low -= 16;
-            cell next_borrow = count.mid < 39;
-            count.mid -= 39;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 1;
-        }
-        if (count.high != 0 || count.mid > 39 ||
-            (count.mid == 39 && count.low >= 16)) {
-            cell borrow = count.low < 16;
-            count.low -= 16;
-            cell next_borrow = count.mid < 39;
-            count.mid -= 39;
-            if (borrow) {
-                if (count.mid == 0) {
-                    next_borrow = 1;
-                }
-                count.mid -= 1;
-            }
-            if (next_borrow) {
-                count.high -= 1;
-            }
-            digit += 1;
-        }
-        compiler_output!('0' + digit);
-
-        // The 10^4 pass leaves a value below 10^4; high is now known zero.
-        digit = 0;
-        if (count.mid > 19 || (count.mid == 19 && count.low >= 136)) {
-            count.low += 120;
-            cell borrow = count.low >= 120;
-            count.mid -= 19;
-            if (borrow) {
-                count.mid -= 1;
-            }
-            digit += 5;
-        }
-        if (count.mid > 7 || (count.mid == 7 && count.low >= 208)) {
-            count.low += 48;
-            cell borrow = count.low >= 48;
-            count.mid -= 7;
-            if (borrow) {
-                count.mid -= 1;
-            }
-            digit += 2;
-        }
-        if (count.mid > 3 || (count.mid == 3 && count.low >= 232)) {
-            count.low += 24;
-            cell borrow = count.low >= 24;
-            count.mid -= 3;
-            if (borrow) {
-                count.mid -= 1;
-            }
-            digit += 1;
-        }
-        if (count.mid > 3 || (count.mid == 3 && count.low >= 232)) {
-            count.low += 24;
-            cell borrow = count.low >= 24;
-            count.mid -= 3;
-            if (borrow) {
-                count.mid -= 1;
-            }
-            digit += 1;
-        }
-        compiler_output!('0' + digit);
-
-        // The 10^3 pass leaves a value below 10^3; high remains zero.
-        // Probe the 10^2 digit with fixed greedy weights 5, 2, 1, 1.
-        digit = 0;
-        if (count.mid > 1 || (count.mid == 1 && count.low >= 244)) {
-            count.low += 12;
-            cell borrow = count.low >= 12;
-            count.mid -= 1;
-            if (borrow) {
-                count.mid -= 1;
-            }
-            digit += 5;
-        }
-        if (count.mid != 0 || count.low >= 200) {
-            count.low += 56;
-            cell borrow = count.low >= 56;
-            if (borrow) {
-                count.mid -= 1;
-            }
-            digit += 2;
-        }
-        if (count.mid != 0 || count.low >= 100) {
-            cell borrow = count.low < 100;
-            count.low -= 100;
-            if (borrow) {
-                count.mid -= 1;
-            }
-            digit += 1;
-        }
-        if (count.mid != 0 || count.low >= 100) {
-            cell borrow = count.low < 100;
-            count.low -= 100;
-            if (borrow) {
-                count.mid -= 1;
-            }
-            digit += 1;
-        }
-        compiler_output!('0' + digit);
-
-        // The 10^2 pass leaves a value below 100, so only low remains.
-        digit = 0;
-        if (count.low >= 50) {
-            count.low -= 50;
-            digit += 5;
-        }
-        if (count.low >= 20) {
-            count.low -= 20;
-            digit += 2;
-        }
-        if (count.low >= 10) {
-            count.low -= 10;
-            digit += 1;
-        }
-        if (count.low >= 10) {
-            count.low -= 10;
-            digit += 1;
-        }
-        compiler_output!('0' + digit);
-
-        compiler_output!('0' + count.low);
+        emit_hex_byte!(count.high, 1);
+        emit_hex_byte!(count.mid, 1);
+        emit_hex_byte!(count.low, 1);
         return;
     }
     while (count.high != 0) {

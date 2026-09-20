@@ -2369,10 +2369,14 @@ mod tests {
         assert_eq!(run(b"@P163;+163.", b"").unwrap(), [1]);
         assert_eq!(run(b"@BFCRLE1;+163.", b"").unwrap(), [163]);
         assert_eq!(run(b"@BFCRLE1;+513.", b"").unwrap(), [1]);
+        assert_eq!(run(b"@BFCRLE2;+a.", b"").unwrap(), [10]);
+        assert_eq!(run(b"@BFCRLE2;+A.", b"").unwrap(), [10]);
+        assert_eq!(run(b"@BFCRLE2;+ff.", b"").unwrap(), [255]);
         for source in [
             "@BFCRLE1;+0",
             "@BFCRLE1;>999999999999999999999999999",
-            "@BFCRLE2;+",
+            "@BFCRLE2;+0",
+            "@BFCRLE2;+000000",
         ] {
             assert!(matches!(
                 run(source.as_bytes(), b""),
