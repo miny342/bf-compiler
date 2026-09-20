@@ -39,7 +39,15 @@ void emit_repeat_character(cell character, cell count) {
         if (count != 0) {
             compiler_output!(character);
             if (count != 1) {
-                emit_hex_byte!(count, 0);
+                cell high_nibble = 0;
+                while (count >= 16) {
+                    count -= 16;
+                    high_nibble += 1;
+                }
+                if (high_nibble != 0) {
+                    emit_hex_digit!(high_nibble);
+                }
+                emit_hex_digit!(count);
             }
         }
         return;
