@@ -1024,3 +1024,22 @@ target/release/bf-interpreter --unlimited-tape \
 
 selfhostテスト全体の生成・実行は `FRAME_ALLOCATION.md` の再実行手順と同じ。
 測定前に `cargo build --release -p bf-compiler -p bf-interpreter` を実行する。
+
+### 2026-09-21: page portalのnibble単位ジャンプ
+
+page resolverがhigh byteを1 pageずつ消費しながら`INDEX`/`VALUE`を隣のportalへ
+移していたため、遠い配列pageでは転送反復とRLE instructionが増えていた。まず、high byteを
+low/high nibbleへ分解し、high nibbleは16 page分、low nibbleは1 page分の固定距離で
+request fieldを移す方式を実装した。復路もlow nibble、high nibbleの順に同じ距離を戻す。
+これはportalをScanで探索する版ではなく、既存のpage counterをbase-16化した限定的な変更である。
+
+`cargo test -p bf-compiler` は175 passed、1 ignored。`cell[32][256]`へ1024回の動的load/storeを
+行う大配列fixtureでは、high=0/1/15/31の全入力で期待出力と一致した。以前のpage resolverと
+比較したhigh=31のexact profileでは、RLE instructionが114,998,321から71,997,803へ減少し、
+portal page部分は107,151,730から42,929,568へ減少した。transfer iterationも16,828,846から
+10,737,664へ減少した。high=0/1/15では出力を保ったままRLEは同等か小幅増で、遠いpageほど
+nibble jumpの効果が大きい。
+
+このfixtureの詳細は`tmp/full31-array-patterns-exact/report.md`と同directoryのprofileに残す。
+次の確認ではfull selfhostを再実行し、`abi.portal.page`のRLE/transfer counterが同じ方向へ
+動くかを見る。現段階ではこの変更をfull測定結果なしにcommitしない。

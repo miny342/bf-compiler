@@ -596,7 +596,8 @@ version 0の1次元`cell[N]` accessは`OFFSET_HIGH = 0`、`OFFSET_LOW = INDEX`�
 portalのprimitive operationは、region payload内の1 logical cellを16-bit offsetでload/storeする。
 offsetのhigh byteはpage番号、low byteはpage内offsetとして扱う。low byteが0のときはrootまたは
 選択済みpage portalから直接payload dispatchし、high byteが0でないときはpage resolverが
-隣接するpage portalへrequest fieldを一つずつ移す。payload全体や中間pageの値は交換しない。
+page番号をlow/high nibbleへ分け、最大16 page単位の固定距離でrequest fieldを移す。payload全体や
+中間pageの値は交換しない。
 
 ```text
 load_cell(region, o):
@@ -624,13 +625,15 @@ accessorはさらに次を満たす。
 - offset値、`VALUE_PORT`、使用したscratchをresume時に0へ戻す。
 - global/local regionからcurrent frame frontierへversion 0と同じ規則でnormalizeする。
 
-page resolverは次のfieldだけをpage portal間で移動する。
+page resolverは次のfieldと内部scratchをpage portal間で移動する。
 
-- 往路: `INDEX`、store時の`VALUE_PORT`、`RESTORE`、`OFFSET_HIGH`。
-- 復路: load時の`VALUE_PORT`と`RESTORE`。
+- 往路: `INDEX`、store時の`VALUE_PORT`、page counterのnibble、復路用の`RESTORE`/scratch。
+- 復路: load時の`VALUE_PORT`と復路用counter。
 
-`OFFSET_HIGH`を1減らすたびに次のpage portalへ移動し、選択pageでversion 0と同じlow-byte
-countdownを一度だけ実行する。`RESTORE`は移動したpage数を数え、access後に逆方向へ戻る。
+`OFFSET_HIGH`をlow/high nibbleへ分解し、high nibbleは16 page、low nibbleは1 pageの固定距離
+移動回数として消費する。選択pageでversion 0と同じlow-byte countdownを一度だけ実行し、
+access後はlow nibble、high nibbleの順に逆方向へ戻る。これにより、遠いpageでもrequest fieldを
+1 pageずつ255回移す必要がない。
 このためpage portalはaccess中に別のuser codeや別regionのaccessorから再利用されないことが
 必要である。範囲外offsetは未定義動作なので、存在しないpageへ進む場合の値は保証しない。
 

@@ -2490,49 +2490,141 @@ impl<'a> AbiEmitter<'a> {
             "page portal resolver",
             |emitter| {
                 let page_span = aggregate_page_portal_offset(1, emitter.config)? as isize;
-                let high = emitter.current_abi_offset(AbiField::Scratch0)?;
-                let restore = emitter.current_abi_offset(AbiField::Restore)?;
-                emitter.move_to(high);
-                let forward = emitter.capture(|emitter| {
-                    emitter.adjust(255);
-                    emitter.move_to(restore);
-                    emitter.adjust(1);
-                    emitter.move_to(0);
-                    emitter.move_page_portal_field(AbiField::Index, page_span)?;
-                    if kind == PortalAccessKind::Store {
-                        emitter.move_page_portal_field(AbiField::Value, page_span)?;
-                    }
-                    emitter.move_page_portal_field(AbiField::Restore, page_span)?;
-                    emitter.move_page_portal_field(AbiField::Scratch0, page_span)?;
-                    emitter.migrate_context(page_span);
-                    emitter.move_to(high);
-                    Ok(())
-                })?;
-                emitter.emit_loop(forward);
-                emitter.move_to(0);
+                let sixteen_page_span = aggregate_page_portal_offset(16, emitter.config)? as isize;
+
+                // Split the page byte into base-16 digits.  Moving the request
+                // through sixteen pages at once avoids repeating the payload
+                // transfer for every individual page.  The low and high
+                // digits are kept in the current portal while the resolver
+                // advances; Restore and Scratch3 hold their copies for the
+                // reverse trip.
+                emitter.split_abi_nibbles(
+                    AbiField::Scratch0,
+                    AbiField::Scratch1,
+                    AbiField::Scratch2,
+                )?;
+                emitter.copy(
+                    emitter.current_abi_offset(AbiField::Scratch1)?,
+                    emitter.current_abi_offset(AbiField::Restore)?,
+                    emitter.current_abi_offset(AbiField::Scratch0)?,
+                );
+                emitter.copy(
+                    emitter.current_abi_offset(AbiField::Scratch2)?,
+                    emitter.current_abi_offset(AbiField::Scratch3)?,
+                    emitter.current_abi_offset(AbiField::Scratch0)?,
+                );
+
+                let high_fields: &[AbiField] = match kind {
+                    PortalAccessKind::Load => &[
+                        AbiField::Index,
+                        AbiField::Restore,
+                        AbiField::Scratch1,
+                        AbiField::Scratch2,
+                        AbiField::Scratch3,
+                    ],
+                    PortalAccessKind::Store => &[
+                        AbiField::Index,
+                        AbiField::Value,
+                        AbiField::Restore,
+                        AbiField::Scratch1,
+                        AbiField::Scratch2,
+                        AbiField::Scratch3,
+                    ],
+                };
+                emitter.emit_page_portal_digit(
+                    AbiField::Scratch2,
+                    sixteen_page_span,
+                    high_fields,
+                )?;
+                let low_fields: &[AbiField] = match kind {
+                    PortalAccessKind::Load => &[
+                        AbiField::Index,
+                        AbiField::Restore,
+                        AbiField::Scratch1,
+                        AbiField::Scratch3,
+                    ],
+                    PortalAccessKind::Store => &[
+                        AbiField::Index,
+                        AbiField::Value,
+                        AbiField::Restore,
+                        AbiField::Scratch1,
+                        AbiField::Scratch3,
+                    ],
+                };
+                emitter.emit_page_portal_digit(AbiField::Scratch1, page_span, low_fields)?;
 
                 // The low-byte direct resolver is emitted once. The moving
                 // page portal makes its relative payload offsets identical
                 // for every selected page.
                 emitter.emit_direct_payload_countdown(kind)?;
 
-                emitter.move_to(restore);
-                let reverse = emitter.capture(|emitter| {
-                    emitter.adjust(255);
-                    if kind == PortalAccessKind::Load {
-                        emitter.move_page_portal_field(AbiField::Value, -page_span)?;
-                    }
-                    emitter.move_page_portal_field(AbiField::Restore, -page_span)?;
-                    emitter.migrate_context(-page_span);
-                    emitter.move_to(restore);
-                    Ok(())
-                })?;
-                emitter.emit_loop(reverse);
-                emitter.move_to(0);
+                emitter.emit_page_portal_digit_reverse(
+                    AbiField::Restore,
+                    page_span,
+                    kind,
+                    &[AbiField::Scratch3],
+                )?;
+                emitter.emit_page_portal_digit_reverse(
+                    AbiField::Scratch3,
+                    sixteen_page_span,
+                    kind,
+                    &[],
+                )?;
 
                 Ok(())
             },
         )
+    }
+
+    fn emit_page_portal_digit(
+        &mut self,
+        counter: AbiField,
+        delta: isize,
+        carried: &[AbiField],
+    ) -> Result<(), AbiCodegenError> {
+        let counter_offset = self.current_abi_offset(counter)?;
+        self.move_to(counter_offset);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            for field in carried {
+                emitter.move_page_portal_field(*field, delta)?;
+            }
+            emitter.migrate_context(delta);
+            emitter.move_to(counter_offset);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn emit_page_portal_digit_reverse(
+        &mut self,
+        counter: AbiField,
+        delta: isize,
+        kind: PortalAccessKind,
+        carried: &[AbiField],
+    ) -> Result<(), AbiCodegenError> {
+        let counter_offset = self.current_abi_offset(counter)?;
+        self.move_to(counter_offset);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            if kind == PortalAccessKind::Load {
+                emitter.move_page_portal_field(AbiField::Value, -delta)?;
+            }
+            for field in carried {
+                emitter.move_page_portal_field(*field, -delta)?;
+            }
+            emitter.move_page_portal_field(counter, -delta)?;
+            emitter.migrate_context(-delta);
+            emitter.move_to(counter_offset);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
+        Ok(())
     }
 
     fn move_page_portal_field(
@@ -2579,7 +2671,6 @@ impl<'a> AbiEmitter<'a> {
     /// Consume a byte with a bounded countdown. Each entered level updates
     /// the result directly; after the source reaches zero, all enclosing
     /// loops exit without touching it. No binary carry scratch cells are needed.
-    #[cfg(test)]
     fn split_abi_nibbles(
         &mut self,
         source: AbiField,
@@ -2596,7 +2687,6 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    #[cfg(test)]
     fn split_nibble_level(&mut self, source: isize, low: isize, high: isize, level: u8) {
         self.move_to(source);
         let body = self.capture_infallible(|emitter| {
