@@ -382,6 +382,14 @@ fn map_successor_references(
             map(then_target, changed);
             map(else_target, changed);
         }
+        Terminator::BranchWithBodies {
+            then_target,
+            else_target,
+            ..
+        } => {
+            map(then_target, changed);
+            map(else_target, changed);
+        }
         Terminator::Call { return_to, .. }
         | Terminator::ArrayLoad { return_to, .. }
         | Terminator::ArrayStore { return_to, .. }
@@ -409,6 +417,11 @@ fn reachable_continuations(
         match continuation.terminator() {
             Terminator::Goto { target } => pending.push(*target),
             Terminator::Branch {
+                then_target,
+                else_target,
+                ..
+            } => pending.extend([*then_target, *else_target]),
+            Terminator::BranchWithBodies {
                 then_target,
                 else_target,
                 ..

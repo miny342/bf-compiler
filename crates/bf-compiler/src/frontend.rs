@@ -311,6 +311,68 @@ mod tests {
     }
 
     #[test]
+    fn yielding_while_prefix_and_suffix_preserve_backend_control_flow() {
+        let source = r#"
+            void tick() { output('X'); }
+            void main() {
+                cell count = input();
+                while (count) {
+                    count -= 1;
+                    tick();
+                    output('Y');
+                }
+                output(count);
+            }
+        "#;
+        let brainfuck = compile_source(source).unwrap();
+        assert_eq!(run(brainfuck.as_bytes(), &[2]).unwrap(), b"XYXY\0");
+    }
+
+    #[test]
+    fn yielding_if_else_arm_preserves_the_non_yielding_path() {
+        let source = r#"
+            void tick() { output('X'); }
+            void main() {
+                cell value = input();
+                if (value) {
+                    tick();
+                } else {
+                    value += 1;
+                    output('Y');
+                }
+                output(value);
+            }
+        "#;
+        let brainfuck = compile_source(source).unwrap();
+        assert_eq!(run(brainfuck.as_bytes(), &[0]).unwrap(), vec![b'Y', 1]);
+        assert_eq!(run(brainfuck.as_bytes(), &[1]).unwrap(), vec![b'X', 1]);
+    }
+
+    #[test]
+    fn yielding_branch_keeps_aggregate_values_live_during_slot_reuse() {
+        let source = r#"
+            cell[3] bump(cell[3] value) {
+                value[0] += 1;
+                return value;
+            }
+            void main() {
+                cell[3] value;
+                value[0] = 7;
+                cell selector = input();
+                if (selector) {
+                    selector = 9;
+                } else {
+                    value = bump(value);
+                }
+                output(value[0]);
+            }
+        "#;
+        let brainfuck = compile_source(source).unwrap();
+        assert_eq!(run(brainfuck.as_bytes(), &[1]).unwrap(), vec![7]);
+        assert_eq!(run(brainfuck.as_bytes(), &[0]).unwrap(), vec![8]);
+    }
+
+    #[test]
     fn arithmetic_wraps_and_variable_reads_are_non_destructive() {
         let source = r#"
             cell original = 'A';

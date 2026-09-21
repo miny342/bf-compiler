@@ -212,7 +212,11 @@ pub(crate) fn allocated_frame_chunks(
     let (descriptor, continuations) = crate::frame_allocation::allocate(descriptor, fused);
     let branch_cells = continuations
         .iter()
-        .map(|continuation| crate::abi_codegen::maximum_branch_depth(continuation.body()))
+        .map(|continuation| {
+            crate::abi_codegen::maximum_branch_depth(continuation.body()).max(
+                crate::abi_codegen::maximum_terminator_branch_depth(continuation.terminator()),
+            )
+        })
         .max()
         .unwrap_or(0);
     let portal_cells = continuations
@@ -830,6 +834,74 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             });
             return Ok(());
         }
+        // Keep the non-yielding arm in the branch terminator.  The other arm
+        // still gets a real continuation because it may call, access a
+        // portal, or otherwise change the execution context.  This is the
+        // first half of the yielding-region lowering: the split is now at
+        // the actual yield boundary instead of before both arms.
+        let then_frame_only = self.statement_is_frame_only(then_branch);
+        let else_frame_only = else_branch.is_some_and(|branch| {
+            self.statement_is_frame_only(branch) && !structured_frame::statement_stops(branch)
+        });
+        if then_frame_only
+            && !structured_frame::statement_stops(then_branch)
+            && else_branch.is_some()
+            && !else_frame_only
+        {
+            let then_body =
+                self.capture_frame_instructions(|this| this.lower_statement(then_branch))?;
+            if frame_instructions_are_scalar(&then_body) {
+                let other_id = self.ids.allocate()?;
+                let join_id = self.ids.allocate()?;
+                let (then_body, then_target, else_body, else_target) = if invert {
+                    (Vec::new(), other_id, then_body, join_id)
+                } else {
+                    (then_body, join_id, Vec::new(), other_id)
+                };
+                self.finish(Terminator::BranchWithBodies {
+                    condition: condition_value,
+                    then_body,
+                    then_target,
+                    else_body,
+                    else_target,
+                });
+                self.start(other_id);
+                self.lower_statement(else_branch.expect("checked above"))?;
+                if self.current.is_some() {
+                    self.finish(Terminator::Goto { target: join_id });
+                }
+                self.start(join_id);
+                return Ok(());
+            }
+        }
+        if else_frame_only && !then_frame_only {
+            let else_body = self.capture_frame_instructions(|this| {
+                this.lower_statement(else_branch.expect("checked above"))
+            })?;
+            if frame_instructions_are_scalar(&else_body) {
+                let other_id = self.ids.allocate()?;
+                let join_id = self.ids.allocate()?;
+                let (then_body, then_target, else_body, else_target) = if invert {
+                    (else_body, join_id, Vec::new(), other_id)
+                } else {
+                    (Vec::new(), other_id, else_body, join_id)
+                };
+                self.finish(Terminator::BranchWithBodies {
+                    condition: condition_value,
+                    then_body,
+                    then_target,
+                    else_body,
+                    else_target,
+                });
+                self.start(other_id);
+                self.lower_statement(then_branch)?;
+                if self.current.is_some() {
+                    self.finish(Terminator::Goto { target: join_id });
+                }
+                self.start(join_id);
+                return Ok(());
+            }
+        }
         let then_id = self.ids.allocate()?;
         let else_id = self.ids.allocate()?;
         self.finish(Terminator::Branch {
@@ -925,6 +997,13 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             }
             return Ok(());
         }
+        if self.expression_is_frame_only(condition)
+            && let Some((prefix, call, suffix)) = self.yielding_call_split(body)
+            && !prefix.is_empty()
+            && self.lower_yielding_call_while(condition, prefix, call, suffix)?
+        {
+            return Ok(());
+        }
         if hir::constant_cell_value(condition).is_some() {
             let body_id = self.ids.allocate()?;
             self.finish(Terminator::Goto { target: body_id });
@@ -962,6 +1041,69 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         }
         self.start(after_id);
         Ok(())
+    }
+
+    fn lower_yielding_call_while(
+        &mut self,
+        condition: &HirExpression,
+        prefix: &[HirStatement],
+        call: &HirStatement,
+        suffix: &[HirStatement],
+    ) -> Result<bool, ContinuationLoweringError> {
+        let HirStatementKind::Call {
+            function,
+            arguments,
+        } = &call.kind
+        else {
+            unreachable!("yielding_call_split returned a non-call statement");
+        };
+        let prefix_body = self.capture_frame_instructions(|this| {
+            for statement in prefix {
+                this.lower_statement(statement)?;
+            }
+            Ok(())
+        })?;
+        if !frame_instructions_are_scalar(&prefix_body) {
+            return Ok(false);
+        }
+        let condition_id = self.ids.allocate()?;
+        let call_id = self.ids.allocate()?;
+        let after_call_id = self.ids.allocate()?;
+        let after_id = self.ids.allocate()?;
+        self.finish(Terminator::Goto {
+            target: condition_id,
+        });
+        self.start(condition_id);
+        let (condition_expression, invert) = self
+            .zero_comparison_operand(condition)
+            .map_or((condition, false), |(expression, invert)| {
+                (expression, invert)
+            });
+        let condition_value = self.evaluate_scalar_temporary(condition_expression)?;
+        let (then_body, then_target, else_body, else_target) = if invert {
+            (Vec::new(), after_id, prefix_body, call_id)
+        } else {
+            (prefix_body, call_id, Vec::new(), after_id)
+        };
+        self.finish(Terminator::BranchWithBodies {
+            condition: condition_value,
+            then_body,
+            then_target,
+            else_body,
+            else_target,
+        });
+        self.start(call_id);
+        self.lower_call_with_return(*function, arguments, TypeId::VOID, Some(after_call_id))?;
+        for statement in suffix {
+            self.lower_statement(statement)?;
+        }
+        if self.current.is_some() {
+            self.finish(Terminator::Goto {
+                target: condition_id,
+            });
+        }
+        self.start(after_id);
+        Ok(true)
     }
 
     fn evaluate_scalar(
@@ -1278,6 +1420,16 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         arguments: &[HirExpression],
         expected_return: TypeId,
     ) -> Result<(), ContinuationLoweringError> {
+        self.lower_call_with_return(function, arguments, expected_return, None)
+    }
+
+    fn lower_call_with_return(
+        &mut self,
+        function: hir::FunctionId,
+        arguments: &[HirExpression],
+        expected_return: TypeId,
+        resume: Option<ContinuationId>,
+    ) -> Result<(), ContinuationLoweringError> {
         let callee = self
             .program
             .functions
@@ -1310,7 +1462,10 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 .outbox_cells
                 .max(self.program.types.cells(expected_return));
         }
-        let resume = self.ids.allocate()?;
+        let resume = match resume {
+            Some(resume) => resume,
+            None => self.ids.allocate()?,
+        };
         let lowered_callee = self
             .function_map
             .get(function.index())
@@ -1885,6 +2040,55 @@ fn less_than_instructions(
     }]
 }
 
+/// Branch bodies are emitted inside the branch terminator's condition loop.
+/// Keep aggregate-addressed operations on the older continuation path until
+/// the backend's nested frame/portal handling is proven safe there.
+fn frame_instructions_are_scalar(instructions: &[FrameInstruction]) -> bool {
+    fn address_is_scalar(address: Address) -> bool {
+        matches!(address, Address::Frame(_))
+    }
+
+    instructions.iter().all(|instruction| match instruction {
+        FrameInstruction::SubWithBorrow {
+            left,
+            right,
+            difference,
+            borrow,
+            ..
+        } => [left, right, difference, borrow]
+            .into_iter()
+            .copied()
+            .all(address_is_scalar),
+        FrameInstruction::Compare {
+            left, right, dst, ..
+        } => [left, right, dst]
+            .into_iter()
+            .copied()
+            .all(address_is_scalar),
+        FrameInstruction::Set { dst, .. }
+        | FrameInstruction::AddConst { dst, .. }
+        | FrameInstruction::Input { dst } => address_is_scalar(*dst),
+        FrameInstruction::Copy { src, dst } => address_is_scalar(*src) && address_is_scalar(*dst),
+        FrameInstruction::Transfer { src, targets } => {
+            address_is_scalar(*src) && targets.iter().all(|target| address_is_scalar(target.dst))
+        }
+        FrameInstruction::AggregateCopy { .. } => false,
+        FrameInstruction::Output { src } => address_is_scalar(*src),
+        FrameInstruction::Loop { condition, body } => {
+            address_is_scalar(*condition) && frame_instructions_are_scalar(body)
+        }
+        FrameInstruction::Branch {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            address_is_scalar(*condition)
+                && frame_instructions_are_scalar(then_body)
+                && frame_instructions_are_scalar(else_body)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2055,6 +2259,53 @@ mod tests {
     }
 
     #[test]
+    fn yielding_if_keeps_the_frame_only_arm_on_the_branch() {
+        let program = lower_unoptimized(
+            "cell read(){return input();}void main(){cell n=input();if(n){n+=1;}else{output(read());}output(n);}",
+        );
+        let branch = program
+            .continuations()
+            .iter()
+            .find_map(|continuation| match continuation.terminator() {
+                Terminator::BranchWithBodies {
+                    then_body,
+                    else_body,
+                    ..
+                } => Some((then_body, else_body)),
+                _ => None,
+            })
+            .expect("the yielding branch should retain its frame-only arm");
+        assert!(!branch.0.is_empty());
+        assert!(branch.1.is_empty());
+    }
+
+    #[test]
+    fn yielding_while_keeps_prefix_before_call_on_the_condition_branch() {
+        let program = lower_unoptimized(
+            "void tick(){output(1);}void main(){cell n=input();while(n){n-=1;tick();output(2);}output(n);}",
+        );
+        let branch = program
+            .continuations()
+            .iter()
+            .find_map(|continuation| match continuation.terminator() {
+                Terminator::BranchWithBodies {
+                    then_body,
+                    then_target,
+                    else_target,
+                    ..
+                } => Some((then_body, *then_target, *else_target)),
+                _ => None,
+            })
+            .expect("the loop condition should own the frame-only prefix");
+        assert!(!branch.0.is_empty());
+        assert!(program.continuations().iter().any(|continuation| {
+            continuation.id() == branch.1
+                && matches!(continuation.terminator(), Terminator::Call { .. })
+        }));
+        assert_ne!(branch.1, branch.2);
+    }
+
+    #[test]
     fn yielding_branches_and_loop_conditions_keep_continuation_boundaries() {
         for source in [
             "cell read(){return input();}void main(){while(read()){output(1);}}",
@@ -2064,10 +2315,10 @@ mod tests {
         ] {
             let program = lower_unoptimized(source);
             assert!(
-                program
-                    .continuations()
-                    .iter()
-                    .any(|c| matches!(c.terminator(), Terminator::Branch { .. })),
+                program.continuations().iter().any(|c| matches!(
+                    c.terminator(),
+                    Terminator::Branch { .. } | Terminator::BranchWithBodies { .. }
+                )),
                 "{source}"
             );
         }
