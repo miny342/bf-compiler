@@ -211,6 +211,7 @@ impl<'a> SemanticBuilder<'a> {
         Ok(HirProgram {
             entry,
             types: self.types,
+            source_files: Vec::new(),
             globals: hir_globals,
             functions: hir_functions,
         })

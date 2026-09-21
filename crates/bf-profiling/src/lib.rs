@@ -185,6 +185,7 @@ pub enum EmbeddedProfileError {
     MalformedMarker,
     InvalidBase32,
     InvalidSiteJson(String),
+    InvalidFileJson(String),
     DuplicateSite(ProfileSiteId),
     UnknownSite(ProfileSiteId),
     Map(ProfileMapError),
@@ -197,6 +198,9 @@ impl fmt::Display for EmbeddedProfileError {
             Self::InvalidBase32 => f.write_str("invalid embedded profile base32 payload"),
             Self::InvalidSiteJson(error) => {
                 write!(f, "invalid embedded profile site JSON: {error}")
+            }
+            Self::InvalidFileJson(error) => {
+                write!(f, "invalid embedded profile file JSON: {error}")
             }
             Self::DuplicateSite(id) => write!(f, "duplicate embedded profile site {}", id.0),
             Self::UnknownSite(id) => write!(f, "unknown embedded profile site {}", id.0),
@@ -548,10 +552,13 @@ pub fn embed_profile_markers(
         output.push_str(header);
     }
     output.push_str("@BFCDBG1;");
+    for file in &map.files {
+        let json = serde_json::to_vec(file)
+            .map_err(|error| EmbeddedProfileError::InvalidFileJson(error.to_string()))?;
+        output.push_str(&format!("@F{}:{};", file.id, base32_encode(&json)));
+    }
     for site in &map.sites {
-        let mut embedded_site = site.clone();
-        embedded_site.source = None;
-        let json = serde_json::to_vec(&embedded_site)
+        let json = serde_json::to_vec(site)
             .map_err(|error| EmbeddedProfileError::InvalidSiteJson(error.to_string()))?;
         output.push_str(&format!("@S{}:{};", site.id.0, base32_encode(&json)));
     }
@@ -609,9 +616,12 @@ pub fn embedded_profile_map(source: &[u8]) -> Result<Option<ProfileMap>, Embedde
         return Err(EmbeddedProfileError::MalformedMarker);
     }
     let mut cursor = header + b"@BFCDBG1;".len();
+    let mut files = Vec::new();
     let mut sites = Vec::new();
     while !source[cursor..].starts_with(b"@ENDDBG;") {
-        if !source[cursor..].starts_with(b"@S") {
+        let is_file = source[cursor..].starts_with(b"@F");
+        let is_site = source[cursor..].starts_with(b"@S");
+        if !is_file && !is_site {
             return Err(EmbeddedProfileError::MalformedMarker);
         }
         cursor += 2;
@@ -637,18 +647,27 @@ pub fn embedded_profile_map(source: &[u8]) -> Result<Option<ProfileMap>, Embedde
         let payload = std::str::from_utf8(&source[payload_start..cursor])
             .map_err(|_| EmbeddedProfileError::InvalidBase32)?;
         let decoded = base32_decode(payload)?;
-        let site: ProfileSite = serde_json::from_slice(&decoded)
-            .map_err(|error| EmbeddedProfileError::InvalidSiteJson(error.to_string()))?;
-        if site.id.0 != declared {
-            return Err(EmbeddedProfileError::MalformedMarker);
+        if is_file {
+            let file: ProfileFile = serde_json::from_slice(&decoded)
+                .map_err(|error| EmbeddedProfileError::InvalidFileJson(error.to_string()))?;
+            if file.id != declared {
+                return Err(EmbeddedProfileError::MalformedMarker);
+            }
+            files.push(file);
+        } else {
+            let site: ProfileSite = serde_json::from_slice(&decoded)
+                .map_err(|error| EmbeddedProfileError::InvalidSiteJson(error.to_string()))?;
+            if site.id.0 != declared {
+                return Err(EmbeddedProfileError::MalformedMarker);
+            }
+            if sites
+                .iter()
+                .any(|existing: &ProfileSite| existing.id == site.id)
+            {
+                return Err(EmbeddedProfileError::DuplicateSite(site.id));
+            }
+            sites.push(site);
         }
-        if sites
-            .iter()
-            .any(|existing: &ProfileSite| existing.id == site.id)
-        {
-            return Err(EmbeddedProfileError::DuplicateSite(site.id));
-        }
-        sites.push(site);
         cursor += 1;
     }
     cursor += b"@ENDDBG;".len();
@@ -708,7 +727,7 @@ pub fn embedded_profile_map(source: &[u8]) -> Result<Option<ProfileMap>, Embedde
         format: PROFILE_MAP_FORMAT.into(),
         version: PROFILE_MAP_VERSION,
         bf: bf_identity(source),
-        files: Vec::new(),
+        files,
         sites,
         ranges,
     };
@@ -906,11 +925,7 @@ mod tests {
                 .bytes()
                 .any(|byte| matches!(byte, b'<' | b'>' | b'+' | b'-' | b'.' | b',' | b'[' | b']'))
         );
-        let mut expected = map;
-        expected.files.clear();
-        for site in &mut expected.sites {
-            site.source = None;
-        }
+        let expected = map;
         assert_eq!(
             embedded_profile_map(embedded.as_bytes()).unwrap(),
             Some(expected)
@@ -924,11 +939,7 @@ mod tests {
         let map = valid_map(source.as_bytes());
         let embedded = embed_profile_markers(source, &map).unwrap();
         assert!(embedded.starts_with("@BFCRLE2;"));
-        let mut expected = map;
-        expected.files.clear();
-        for site in &mut expected.sites {
-            site.source = None;
-        }
+        let expected = map;
         assert_eq!(
             embedded_profile_map(embedded.as_bytes()).unwrap(),
             Some(expected)

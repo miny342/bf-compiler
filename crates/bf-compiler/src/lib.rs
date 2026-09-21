@@ -51,8 +51,8 @@ pub use continuation_ir::{
     Address, AggregateRegion, ArrayRegion, Continuation, ContinuationId, ContinuationIrError,
     ContinuationProgram, FrameAggregateDescriptor, FrameAggregateId, FrameArrayDescriptor,
     FrameArrayId, FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId,
-    GlobalDescriptor, GlobalId, LogicalOffset, ParameterLocation, Terminator, ValueOperand,
-    ValueType,
+    GlobalDescriptor, GlobalId, LogicalOffset, ParameterLocation, SourceFileDescriptor, SourceSpan,
+    Terminator, ValueOperand, ValueType,
 };
 pub use continuation_optimizer::{
     ContinuationOptimizationOptions, ContinuationOptimizationStats, optimize_continuations,

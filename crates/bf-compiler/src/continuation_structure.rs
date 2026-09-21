@@ -52,15 +52,26 @@ pub fn structure_local_control_flow(
                     && by_id[&target].function() == node.function()
             };
             let mut body = node.body().to_vec();
+            let mut body_sources = node.body_sources().to_vec();
             let mut removed = HashSet::new();
             let exit;
+            let terminator_source;
             match *node.terminator() {
                 Terminator::Goto { target } if single_entry(target) => {
                     let next = by_id[&target];
                     body.extend_from_slice(next.body());
+                    body_sources.extend_from_slice(next.body_sources());
                     removed.insert(target);
                     stats.straight_blocks += 1;
-                    replacement = Some((node.id(), body, next.terminator().clone(), removed));
+                    terminator_source = next.terminator_source();
+                    replacement = Some((
+                        node.id(),
+                        body,
+                        body_sources,
+                        next.terminator().clone(),
+                        terminator_source,
+                        removed,
+                    ));
                     break;
                 }
                 Terminator::Branch {
@@ -73,7 +84,10 @@ pub fn structure_local_control_flow(
                             dst: condition,
                             value: 0,
                         });
+                        body_sources
+                            .push(node.terminator_source().or_else(|| node.primary_source()));
                         exit = then_target;
+                        terminator_source = by_id[&exit].terminator_source();
                     } else if then_target == node.id()
                         || (single_entry(then_target)
                             && matches!(by_id[&then_target].terminator(),
@@ -94,7 +108,10 @@ pub fn structure_local_control_flow(
                             condition,
                             body: iteration,
                         });
+                        body_sources
+                            .push(node.terminator_source().or_else(|| node.primary_source()));
                         exit = else_target;
+                        terminator_source = by_id[&exit].terminator_source();
                         stats.loops += 1;
                     } else {
                         // Find the join of a diamond (including one empty arm).
@@ -160,29 +177,42 @@ pub fn structure_local_control_flow(
                             then_body,
                             else_body,
                         });
+                        body_sources
+                            .push(node.terminator_source().or_else(|| node.primary_source()));
                         exit = join;
+                        terminator_source = by_id[&exit].terminator_source();
                         stats.branches += 1;
                     }
                 }
                 _ => continue,
             }
-            replacement = Some((node.id(), body, Terminator::Goto { target: exit }, removed));
+            replacement = Some((
+                node.id(),
+                body,
+                body_sources,
+                Terminator::Goto { target: exit },
+                terminator_source,
+                removed,
+            ));
             break;
         }
-        let Some((id, body, terminator, removed)) = replacement else {
+        let Some((id, body, body_sources, terminator, terminator_source, removed)) = replacement
+        else {
             break;
         };
         let function = by_id[&id].function();
         nodes.retain(|node| !removed.contains(&node.id()));
         *nodes.iter_mut().find(|node| node.id() == id).unwrap() =
-            Continuation::new(id, function, body, terminator);
+            Continuation::new(id, function, body, terminator)
+                .with_source_spans(body_sources, terminator_source);
     }
     let reduced = ContinuationProgram::new_with_globals(
         program.main(),
         program.globals().to_vec(),
         functions,
         nodes,
-    )?;
+    )?
+    .with_source_files(program.source_files().to_vec());
     let (compacted, _) = optimize_continuations_with_options(
         &reduced,
         ContinuationOptimizationOptions {

@@ -6,7 +6,7 @@ use crate::bf_optimizer::{optimize_annotated_bf, optimize_bf};
 use crate::continuation_ir::{
     Address, AggregateRegion, ArrayRegion, Continuation, ContinuationId, ContinuationProgram,
     FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId, GlobalId,
-    LogicalOffset, ParameterLocation, Terminator, ValueOperand, ValueType,
+    LogicalOffset, ParameterLocation, SourceSpan, Terminator, ValueOperand, ValueType,
 };
 use crate::frame_layout::{
     AbiConfig, AbiField, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,
@@ -26,8 +26,8 @@ pub enum ProfileGranularity {
     Continuation,
     /// Continuation provenance plus frame instructions and terminators.
     Instruction,
-    /// Currently the same sites as `Instruction`; source spans will be added
-    /// when continuation IR retains frontend provenance.
+    /// Instruction sites with source spans and source-file metadata when the
+    /// program originated in the BFC frontend.
     Source,
 }
 
@@ -763,6 +763,7 @@ struct AbiEmitter<'a> {
     position: isize,
     branch_temporary_depth: usize,
     nibble_transfer: bool,
+    current_source: Option<SourceSpan>,
 }
 
 impl<'a> AbiEmitter<'a> {
@@ -775,6 +776,19 @@ impl<'a> AbiEmitter<'a> {
         granularity: ProfileGranularity,
     ) -> Self {
         let dispatch_encoding = DispatchEncoding::new(program, portal);
+        let mut sites = ProfileSiteTable::with_root("BFC artifact");
+        if matches!(granularity, ProfileGranularity::Source) {
+            sites.set_source_files(
+                program
+                    .source_files()
+                    .iter()
+                    .map(|file| bf_profiling::ProfileFile {
+                        id: file.id,
+                        path: file.path.clone(),
+                    })
+                    .collect(),
+            );
+        }
         Self {
             program,
             layouts,
@@ -783,13 +797,14 @@ impl<'a> AbiEmitter<'a> {
             dispatch_encoding,
             config,
             output: Vec::new(),
-            sites: ProfileSiteTable::with_root("BFC artifact"),
+            sites,
             site_stack: vec![bf_profiling::ProfileSiteId(0)],
             instruction_path: Vec::new(),
             granularity,
             position: 0,
             branch_temporary_depth: 0,
             nibble_transfer: false,
+            current_source: None,
         }
     }
 
@@ -822,6 +837,17 @@ impl<'a> AbiEmitter<'a> {
             label,
             attributes,
         );
+        if matches!(self.granularity, ProfileGranularity::Source) {
+            self.sites.set_source(
+                site,
+                self.current_source
+                    .map(|source| bf_profiling::ProfileSourceSpan {
+                        file_id: source.file_id,
+                        start_byte: source.start_byte,
+                        end_byte: source.end_byte,
+                    }),
+            );
+        }
         self.site_stack.push(site);
         let result = emit(self);
         self.site_stack.pop();
@@ -836,6 +862,18 @@ impl<'a> AbiEmitter<'a> {
         self.instruction_path.push(segment.into());
         let result = emit(self);
         self.instruction_path.pop();
+        result
+    }
+
+    fn with_source_span<T>(
+        &mut self,
+        source: Option<SourceSpan>,
+        emit: impl FnOnce(&mut Self) -> Result<T, AbiCodegenError>,
+    ) -> Result<T, AbiCodegenError> {
+        let previous = self.current_source;
+        self.current_source = source;
+        let result = emit(self);
+        self.current_source = previous;
         result
     }
 
@@ -868,6 +906,17 @@ impl<'a> AbiEmitter<'a> {
             label,
             BTreeMap::new(),
         );
+        if matches!(self.granularity, ProfileGranularity::Source) {
+            self.sites.set_source(
+                site,
+                self.current_source
+                    .map(|source| bf_profiling::ProfileSourceSpan {
+                        file_id: source.file_id,
+                        start_byte: source.start_byte,
+                        end_byte: source.end_byte,
+                    }),
+            );
+        }
         self.site_stack.push(site);
         emit(self);
         self.site_stack.pop();
@@ -1274,19 +1323,21 @@ impl<'a> AbiEmitter<'a> {
         } else {
             let function = continuation.function().index();
             let continuation_id = continuation.id().get();
-            self.with_profile_site(
-                "function",
-                format!("function.{function}"),
-                format!("function {function}"),
-                |emitter| {
-                    emitter.with_profile_site(
-                        "continuation",
-                        format!("function.{function}.continuation.{continuation_id}"),
-                        format!("continuation {continuation_id}"),
-                        |emitter| emitter.emit_continuation_body_inner(continuation),
-                    )
-                },
-            )
+            self.with_source_span(continuation.primary_source(), |emitter| {
+                emitter.with_profile_site(
+                    "function",
+                    format!("function.{function}"),
+                    format!("function {function}"),
+                    |emitter| {
+                        emitter.with_profile_site(
+                            "continuation",
+                            format!("function.{function}.continuation.{continuation_id}"),
+                            format!("continuation {continuation_id}"),
+                            |emitter| emitter.emit_continuation_body_inner(continuation),
+                        )
+                    },
+                )
+            })
         }
     }
 
@@ -1295,8 +1346,14 @@ impl<'a> AbiEmitter<'a> {
         continuation: &Continuation,
     ) -> Result<(), AbiCodegenError> {
         self.branch_temporary_depth = 0;
-        self.emit_all(continuation.body(), continuation.function())?;
-        self.emit_terminator(continuation)
+        self.emit_all(
+            continuation.body(),
+            continuation.function(),
+            Some(continuation.body_sources()),
+        )?;
+        self.with_source_span(continuation.terminator_source(), |emitter| {
+            emitter.emit_terminator(continuation)
+        })
     }
 
     fn clear_branch_on_nonzero(&mut self, condition: AbiField) -> Result<(), AbiCodegenError> {
@@ -1317,6 +1374,7 @@ impl<'a> AbiEmitter<'a> {
         &mut self,
         instructions: &[FrameInstruction],
         function: FunctionId,
+        sources: Option<&[Option<SourceSpan>]>,
     ) -> Result<(), AbiCodegenError> {
         let mut index = 0;
         while index < instructions.len() {
@@ -1329,8 +1387,15 @@ impl<'a> AbiEmitter<'a> {
                 value: 0,
             } = instructions[index]
             else {
-                self.with_instruction_path(index.to_string(), |emitter| {
-                    emitter.emit_instruction(&instructions[index], function)
+                let source = sources
+                    .and_then(|sources| sources.get(index))
+                    .copied()
+                    .flatten()
+                    .or(self.current_source);
+                self.with_source_span(source, |emitter| {
+                    emitter.with_instruction_path(index.to_string(), |emitter| {
+                        emitter.emit_instruction(&instructions[index], function)
+                    })
                 })?;
                 index += 1;
                 continue;
@@ -1358,11 +1423,19 @@ impl<'a> AbiEmitter<'a> {
                     function,
                     &instructions[index..end],
                     index,
+                    sources,
                 )?;
             } else {
                 for (offset, instruction) in instructions[index..end].iter().enumerate() {
-                    self.with_instruction_path((index + offset).to_string(), |emitter| {
-                        emitter.emit_instruction(instruction, function)
+                    let source = sources
+                        .and_then(|sources| sources.get(index + offset))
+                        .copied()
+                        .flatten()
+                        .or(self.current_source);
+                    self.with_source_span(source, |emitter| {
+                        emitter.with_instruction_path((index + offset).to_string(), |emitter| {
+                            emitter.emit_instruction(instruction, function)
+                        })
                     })?;
                 }
             }
@@ -1379,6 +1452,7 @@ impl<'a> AbiEmitter<'a> {
         function: FunctionId,
         instructions: &[FrameInstruction],
         instruction_start: usize,
+        sources: Option<&[Option<SourceSpan>]>,
     ) -> Result<(), AbiCodegenError> {
         let base = self.portal_base_location(region, function)?;
         self.move_context_to_location(base);
@@ -1390,26 +1464,33 @@ impl<'a> AbiEmitter<'a> {
             if let Location::Relative(base) = base {
                 offset += base;
             }
-            self.with_instruction_path(
-                (instruction_start + instruction_offset).to_string(),
-                |emitter| {
-                    emitter.emit_instruction_site(
-                        &instructions[instruction_offset],
-                        function,
-                        |emitter| {
-                            emitter.with_profile_site(
-                                "abi",
-                                "abi.frame.set",
-                                "frame set",
-                                |emitter| {
-                                    emitter.clear(offset);
-                                    Ok(())
-                                },
-                            )
-                        },
-                    )
-                },
-            )?;
+            let source = sources
+                .and_then(|sources| sources.get(instruction_start + instruction_offset))
+                .copied()
+                .flatten()
+                .or(self.current_source);
+            self.with_source_span(source, |emitter| {
+                emitter.with_instruction_path(
+                    (instruction_start + instruction_offset).to_string(),
+                    |emitter| {
+                        emitter.emit_instruction_site(
+                            &instructions[instruction_offset],
+                            function,
+                            |emitter| {
+                                emitter.with_profile_site(
+                                    "abi",
+                                    "abi.frame.set",
+                                    "frame set",
+                                    |emitter| {
+                                        emitter.clear(offset);
+                                        Ok(())
+                                    },
+                                )
+                            },
+                        )
+                    },
+                )
+            })?;
         }
         self.move_location_to_context(base);
         Ok(())
@@ -1436,6 +1517,25 @@ impl<'a> AbiEmitter<'a> {
             ProfileGranularity::Abi | ProfileGranularity::Continuation
         ) {
             emit(self)
+        } else if matches!(self.granularity, ProfileGranularity::Source)
+            && let Some(source) = self.current_source
+        {
+            // Source maps are intended to answer which source operation is
+            // hot, not to repeat a million frame-instruction leaves. Keep
+            // the ABI child sites below this source site, but intern all
+            // instructions from the same source span together.
+            self.with_profile_site(
+                "source",
+                format!(
+                    "source.{}.{}.{}",
+                    source.file_id, source.start_byte, source.end_byte
+                ),
+                format!(
+                    "source file {} bytes {}..{}",
+                    source.file_id, source.start_byte, source.end_byte
+                ),
+                emit,
+            )
         } else {
             self.with_profile_site(
                 "frame_instruction",
@@ -1554,7 +1654,7 @@ impl<'a> AbiEmitter<'a> {
                 let body = self.capture(|emitter| {
                     emitter.move_location_to_context(condition);
                     emitter.with_instruction_path("loop", |emitter| {
-                        emitter.emit_all(body, function)
+                        emitter.emit_all(body, function, None)
                     })?;
                     emitter.move_context_to_location(condition);
                     Ok(())
@@ -1694,7 +1794,7 @@ impl<'a> AbiEmitter<'a> {
                 emitter.clear_current();
                 emitter.move_location_to_context(condition);
                 emitter.with_instruction_path("then", |emitter| {
-                    emitter.emit_all(then_body, function)
+                    emitter.emit_all(then_body, function, None)
                 })?;
                 emitter.clear_location(condition);
                 emitter.move_context_to_location(condition);
@@ -1712,8 +1812,9 @@ impl<'a> AbiEmitter<'a> {
         let then_loop = self.capture(|emitter| {
             emitter.clear_current();
             emitter.move_location_to_context(condition);
-            emitter
-                .with_instruction_path("then", |emitter| emitter.emit_all(then_body, function))?;
+            emitter.with_instruction_path("then", |emitter| {
+                emitter.emit_all(then_body, function, None)
+            })?;
             emitter.clear_location(condition);
             emitter.clear_location(flag);
             emitter.move_context_to_location(condition);
@@ -1726,8 +1827,9 @@ impl<'a> AbiEmitter<'a> {
         let else_loop = self.capture(|emitter| {
             emitter.clear_current();
             emitter.move_location_to_context(flag);
-            emitter
-                .with_instruction_path("else", |emitter| emitter.emit_all(else_body, function))?;
+            emitter.with_instruction_path("else", |emitter| {
+                emitter.emit_all(else_body, function, None)
+            })?;
             emitter.clear_location(condition);
             emitter.clear_location(flag);
             emitter.move_context_to_location(flag);

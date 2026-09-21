@@ -6,8 +6,8 @@
 artifact、compiler provenance、interpreter、CLI、report、検証方法を定める。
 
 最適化の優先順位と導入手順は[BF_OPTIMIZATION_PLAN.md](BF_OPTIMIZATION_PLAN.md)に定める。
-この仕様のversion 1は実装済みである。未実装のsource span、self-host compiler自身からのmarker生成、
-profile比較toolは本文で明記する。wire formatを変更する場合はformat versionと本文を同時に更新する。
+この仕様のversion 1は実装済みである。未実装のself-host compiler自身からのmarker生成、profile比較toolは
+本文で明記する。wire formatを変更する場合はformat versionと本文を同時に更新する。
 
 ## テキスト圧縮BFとの併用
 
@@ -380,19 +380,17 @@ marker自身とpayloadはASCIIの`><+-.,[]`を一切含んではならない。f
 
 ```text
 @BFCDBG1;                 stream header
+@F0:BASE32PAYLOAD;       source file 0のUTF-8 JSON record
 @S42:BASE32PAYLOAD;       site 42のUTF-8 JSON record
 @P42;                     以降のBF命令をsite 42へ切替
 @P0;                      root siteへ戻す
 @ENDDBG;                  metadata recordの終了
 ```
 
-`BASE32PAYLOAD`にはsidecarのsite object一個分に相当するUTF-8 JSONをencodeする。source file tableが必要な
-場合は、同様に`@F` recordを将来追加できる。unknown uppercase recordは末尾`;`まで安全文字だけで構成
-される場合に限り無視してよい。
+`BASE32PAYLOAD`にはsidecarのsite objectまたはsource file object一個分に相当するUTF-8 JSONをencodeする。
+`@F`は`@S`より前に置く。unknown uppercase recordは末尾`;`まで安全文字だけで構成される場合に限り無視してよい。
 
-version 1の埋め込みmarkerだけを使用するartifactでは、siteの`source`を`null`とする。source spanを含む
-profileにはsidecarを併用する。`@F` recordを正式に追加するときはmarker format versionを上げるか、
-version 1 readerが明示的に認識できるoptional recordとして仕様を更新する。
+source granularityの埋め込みartifactでは`@F` recordでsource file tableも保持し、siteのsource spanを復元する。
 
 interpreterはheaderがない`@P`文字列をprofile markerとして解釈せず、通常の無視されるcommentとして扱う。
 headerを認識した後にgrammar違反、duplicate site、unknown site selectionがあればprofile artifact errorとする。
@@ -625,10 +623,14 @@ profile site数とruntime overheadを制御するため、compilerはgranularity
 | `abi` | dispatcher、portal、call/return等のABI templateのみ |
 | `continuation` | `abi` + function、continuation |
 | `instruction` | `continuation` + FrameInstruction、Terminator |
-| `source` | `instruction` + source span |
+| `source` | `continuation` + source span leaf、Terminator。ABI siteはsource leafの子として保持 |
 
 defaultは`continuation`とする。最初のbottleneck調査では`abi`または`continuation`を使用し、site切替とmap sizeを
 抑える。特定functionを調査するときだけ`instruction`または`source`を使う。
+
+`source`は同じsource spanから生成されたframe instructionを一つのsource siteへまとめる。したがって、巨大な
+self-host artifactでもinstruction単位のsiteを百万個以上生成せず、source位置とABI childの対応を維持できる。
+source spanを持たない手書きCIRでは、`source`は`instruction`と同じframe-instruction leafへフォールバックする。
 
 将来、include/exclude filterを追加してよい。
 
@@ -758,7 +760,7 @@ full compiler BFの2 ms `sample`では同じ6秒時点の入力消費がprofile�
 3. serializerからsidecar rangeを生成する。（完了）
 4. interpreterがsidecarを検証し、site別counterを収集する。（完了）
 5. ABI granularityでcurrent self-host workloadをprofileする。（完了）
-6. continuation、instruction granularityを追加する。（完了。source granularityのsource spanは未実装）
+6. continuation、instruction、source granularityを追加する。（完了。source loweringはframe instruction／terminatorへbyte spanを搬送する）
 7. sampling profilerを追加する。（完了）
 8. exact profilerをmicrobenchmarkへ追加する。（完了）
 9. embedded numeric markerを追加する。（完了）

@@ -98,7 +98,10 @@ pub(crate) fn fuse_function(
         .into_iter()
         .map(|c| {
             let body = fuse_body(c.body(), base, &mut extra);
+            let body_len = body.len();
+            let source = c.primary_source();
             Continuation::new(c.id(), c.function(), body, c.terminator().clone())
+                .with_source_spans(vec![source; body_len], c.terminator_source())
         })
         .collect();
     (descriptor.with_frame_slots(base + extra), continuations)

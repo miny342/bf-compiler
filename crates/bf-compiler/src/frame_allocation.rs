@@ -240,6 +240,10 @@ pub(crate) fn allocate(
             map_body(&mut body, remap);
             map_terminator(&mut terminator, remap);
             Continuation::new(continuation.id(), continuation.function(), body, terminator)
+                .with_source_spans(
+                    continuation.body_sources().to_vec(),
+                    continuation.terminator_source(),
+                )
         })
         .collect();
     (descriptor, continuations)

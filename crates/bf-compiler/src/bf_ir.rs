@@ -1,6 +1,8 @@
 //! Brainfuck-shaped intermediate representation.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 
 use bf_profiling::ProfileSiteId;
@@ -12,6 +14,7 @@ pub struct ProfileSiteRecord {
     pub kind: String,
     pub stable_key: String,
     pub label: String,
+    pub source: Option<bf_profiling::ProfileSourceSpan>,
     pub attributes: BTreeMap<String, String>,
 }
 
@@ -22,10 +25,38 @@ pub struct ProfileSiteRecord {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProfileSiteTable {
     sites: Vec<ProfileSiteRecord>,
+    source_files: Vec<bf_profiling::ProfileFile>,
+    interned: HashMap<u64, ProfileSiteId>,
+    interned_collisions: HashMap<u64, Vec<ProfileSiteId>>,
+}
+
+fn profile_site_key_hash(parent: Option<ProfileSiteId>, kind: &str, stable_key: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    parent.hash(&mut hasher);
+    kind.hash(&mut hasher);
+    stable_key.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn profile_site_matches(
+    sites: &[ProfileSiteRecord],
+    site_id: ProfileSiteId,
+    parent: Option<ProfileSiteId>,
+    kind: &str,
+    stable_key: &str,
+) -> bool {
+    sites.get(site_id.0 as usize).is_some_and(|site| {
+        site.parent == parent && site.kind == kind && site.stable_key == stable_key
+    })
 }
 
 impl ProfileSiteTable {
     pub fn with_root(label: impl Into<String>) -> Self {
+        let mut interned = HashMap::new();
+        interned.insert(
+            profile_site_key_hash(None, "artifact", "artifact.root"),
+            ProfileSiteId(0),
+        );
         Self {
             sites: vec![ProfileSiteRecord {
                 id: ProfileSiteId(0),
@@ -33,13 +64,17 @@ impl ProfileSiteTable {
                 kind: "artifact".into(),
                 stable_key: "artifact.root".into(),
                 label: label.into(),
+                source: None,
                 attributes: BTreeMap::new(),
             }],
+            source_files: Vec::new(),
+            interned,
+            interned_collisions: HashMap::new(),
         }
     }
 
     pub fn new(parents: Vec<Option<ProfileSiteId>>) -> Self {
-        let sites = parents
+        let sites: Vec<ProfileSiteRecord> = parents
             .into_iter()
             .enumerate()
             .map(|(id, parent)| ProfileSiteRecord {
@@ -48,10 +83,29 @@ impl ProfileSiteTable {
                 kind: String::new(),
                 stable_key: String::new(),
                 label: String::new(),
+                source: None,
                 attributes: BTreeMap::new(),
             })
             .collect();
-        Self { sites }
+        let mut interned = HashMap::new();
+        let mut interned_collisions = HashMap::new();
+        for site in &sites {
+            let hash = profile_site_key_hash(site.parent, &site.kind, &site.stable_key);
+            if let Some(&existing) = interned.get(&hash) {
+                interned_collisions
+                    .entry(hash)
+                    .or_insert_with(|| vec![existing])
+                    .push(site.id);
+            } else {
+                interned.insert(hash, site.id);
+            }
+        }
+        Self {
+            sites,
+            source_files: Vec::new(),
+            interned,
+            interned_collisions,
+        }
     }
 
     pub fn parent(&self, site: ProfileSiteId) -> Option<ProfileSiteId> {
@@ -60,6 +114,26 @@ impl ProfileSiteTable {
 
     pub fn records(&self) -> &[ProfileSiteRecord] {
         &self.sites
+    }
+
+    pub fn source_files(&self) -> &[bf_profiling::ProfileFile] {
+        &self.source_files
+    }
+
+    pub fn set_source_files(&mut self, source_files: Vec<bf_profiling::ProfileFile>) {
+        self.source_files = source_files;
+    }
+
+    pub fn set_source(
+        &mut self,
+        site: ProfileSiteId,
+        source: Option<bf_profiling::ProfileSourceSpan>,
+    ) {
+        if let Some(record) = self.sites.get_mut(site.0 as usize)
+            && record.source.is_none()
+        {
+            record.source = source;
+        }
     }
 
     pub fn intern(
@@ -72,10 +146,18 @@ impl ProfileSiteTable {
     ) -> ProfileSiteId {
         let kind = kind.into();
         let stable_key = stable_key.into();
-        if let Some(site) = self.sites.iter().find(|site| {
-            site.parent == parent && site.kind == kind && site.stable_key == stable_key
-        }) {
-            return site.id;
+        let hash = profile_site_key_hash(parent, &kind, &stable_key);
+        if let Some(&site) = self.interned.get(&hash) {
+            if profile_site_matches(&self.sites, site, parent, &kind, &stable_key) {
+                return site;
+            }
+            if let Some(collisions) = self.interned_collisions.get(&hash) {
+                if let Some(&site) = collisions.iter().find(|&&site| {
+                    profile_site_matches(&self.sites, site, parent, &kind, &stable_key)
+                }) {
+                    return site;
+                }
+            }
         }
         let id = ProfileSiteId(self.sites.len() as u32);
         self.sites.push(ProfileSiteRecord {
@@ -84,8 +166,19 @@ impl ProfileSiteTable {
             kind,
             stable_key,
             label: label.into(),
+            source: None,
             attributes,
         });
+        if let Some(first) = self.interned.get(&hash).copied() {
+            // Keep the first entry in the compact index and retain later
+            // entries only for the (extremely rare) hash-collision case.
+            self.interned_collisions
+                .entry(hash)
+                .or_insert_with(|| vec![first])
+                .push(id);
+        } else {
+            self.interned.insert(hash, id);
+        }
         id
     }
 
@@ -193,9 +286,7 @@ impl AnnotatedBfProgram {
         self.to_source_and_ranges().0
     }
 
-    /// Build the versioned sidecar profile map for this program. Source spans
-    /// are not yet carried by continuation IR, so compiler-generated sites
-    /// currently have `source: null`.
+    /// Build the versioned sidecar profile map for this program.
     pub fn profile_map(&self) -> bf_profiling::ProfileMap {
         self.profile_artifact(false).map
     }
@@ -214,7 +305,7 @@ impl AnnotatedBfProgram {
             format: bf_profiling::PROFILE_MAP_FORMAT.to_owned(),
             version: bf_profiling::PROFILE_MAP_VERSION,
             bf: bf_profiling::bf_identity(source.as_bytes()),
-            files: Vec::new(),
+            files: self.sites.source_files().to_vec(),
             sites: self
                 .sites
                 .records()
@@ -225,7 +316,7 @@ impl AnnotatedBfProgram {
                     kind: site.kind.clone(),
                     stable_key: site.stable_key.clone(),
                     label: site.label.clone(),
-                    source: None,
+                    source: site.source.clone(),
                     attributes: site.attributes.clone(),
                 })
                 .collect(),

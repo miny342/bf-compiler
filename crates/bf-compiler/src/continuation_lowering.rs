@@ -11,7 +11,7 @@ use crate::continuation_ir::{
     ContinuationProgram, FrameAggregateDescriptor, FrameAggregateId, FrameInstruction, FrameSlot,
     FrameTransferTarget, FunctionDescriptor, FunctionId as ContinuationFunctionId,
     GlobalDescriptor, GlobalId as ContinuationGlobalId, LogicalOffset, ParameterLocation,
-    Terminator, ValueOperand, ValueType,
+    SourceFileDescriptor, SourceSpan, Terminator, ValueOperand, ValueType,
 };
 use crate::continuation_optimizer::{
     ContinuationOptimizationOptions, ContinuationOptimizationStats,
@@ -166,8 +166,18 @@ fn lower_hir_with_slot_reuse(
         continuations.extend(allocated);
     }
     let entry = function_map[program.entry.index()].expect("main must be reachable");
-    ContinuationProgram::new_with_globals(entry.id, globals, functions, continuations)
-        .map_err(Into::into)
+    let source_files = program
+        .source_files
+        .iter()
+        .map(|file| SourceFileDescriptor {
+            id: file.id,
+            path: file.path.clone(),
+        })
+        .collect();
+    Ok(
+        ContinuationProgram::new_with_globals(entry.id, globals, functions, continuations)?
+            .with_source_files(source_files),
+    )
 }
 
 /// Estimate a candidate's persistent frame after slot reuse, including the
@@ -346,6 +356,7 @@ impl IdAllocator {
 struct OpenContinuation {
     id: ContinuationId,
     body: Vec<FrameInstruction>,
+    body_sources: Vec<Option<SourceSpan>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -403,6 +414,7 @@ struct FunctionLowerer<'a, 'ids> {
     next_slot: usize,
     outbox_cells: usize,
     function_map: &'a [Option<LoweredFunction>],
+    current_source: Option<SourceSpan>,
 }
 
 impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
@@ -440,6 +452,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             current: Some(OpenContinuation {
                 id: entry,
                 body: Vec::new(),
+                body_sources: Vec::new(),
             }),
             capturing_frame: false,
             continuations: Vec::new(),
@@ -448,6 +461,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             next_slot,
             outbox_cells: 0,
             function_map,
+            current_source: None,
         })
     }
 
@@ -499,35 +513,78 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
 
     fn lower_global_initializers(&mut self) -> Result<(), ContinuationLoweringError> {
         for global in &self.program.globals {
-            let id = ContinuationGlobalId::new(global.id.index());
-            if self.program.types.is_scalar(global.ty) {
-                let destination = Address::Global(id);
-                self.emit(FrameInstruction::Set {
-                    dst: destination,
-                    value: 0,
-                });
-                if let Some(initializer) = &global.initializer {
-                    let value = self.evaluate_scalar_temporary(initializer)?;
-                    self.move_cell(value, destination);
-                }
-            } else {
-                let cells = self.program.types.cells(global.ty);
-                let destination = AggregateRef {
-                    region: AggregateRegion::Global(id),
-                    offset: 0,
-                    cells,
-                };
-                self.clear_aggregate(destination);
-                if let Some(initializer) = &global.initializer {
-                    let value = self.evaluate_aggregate(initializer)?;
-                    self.copy_aggregate(value, destination);
-                }
+            let previous_source = self.current_source;
+            self.current_source = self.source_span_at(global.offset);
+            let result = self.lower_global_initializer(global);
+            self.current_source = previous_source;
+            result?;
+        }
+        Ok(())
+    }
+
+    fn lower_global_initializer(
+        &mut self,
+        global: &hir::HirGlobal,
+    ) -> Result<(), ContinuationLoweringError> {
+        let id = ContinuationGlobalId::new(global.id.index());
+        if self.program.types.is_scalar(global.ty) {
+            let destination = Address::Global(id);
+            self.emit(FrameInstruction::Set {
+                dst: destination,
+                value: 0,
+            });
+            if let Some(initializer) = &global.initializer {
+                let value = self.evaluate_scalar_temporary(initializer)?;
+                self.move_cell(value, destination);
+            }
+        } else {
+            let cells = self.program.types.cells(global.ty);
+            let destination = AggregateRef {
+                region: AggregateRegion::Global(id),
+                offset: 0,
+                cells,
+            };
+            self.clear_aggregate(destination);
+            if let Some(initializer) = &global.initializer {
+                let value = self.evaluate_aggregate(initializer)?;
+                self.copy_aggregate(value, destination);
             }
         }
         Ok(())
     }
 
+    fn source_span_at(&self, offset: usize) -> Option<SourceSpan> {
+        self.program
+            .source_files
+            .iter()
+            .find(|file| offset >= file.start_byte && offset <= file.end_byte)
+            .and_then(|file| {
+                if file.start_byte == file.end_byte {
+                    return None;
+                }
+                let local = offset
+                    .saturating_sub(file.start_byte)
+                    .min(file.end_byte - file.start_byte - 1);
+                Some(SourceSpan {
+                    file_id: file.id,
+                    start_byte: local as u64,
+                    end_byte: local as u64 + 1,
+                })
+            })
+    }
+
     fn lower_statement(
+        &mut self,
+        statement: &HirStatement,
+    ) -> Result<(), ContinuationLoweringError> {
+        let previous_source = self.current_source;
+        self.current_source = self.source_span_at(statement.offset);
+        let result = self.lower_statement_inner(statement);
+        self.current_source = previous_source;
+        result
+    }
+
+    fn lower_statement_inner(
         &mut self,
         statement: &HirStatement,
     ) -> Result<(), ContinuationLoweringError> {
@@ -1691,16 +1748,22 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
     }
 
     fn emit(&mut self, instruction: FrameInstruction) {
-        self.current
+        let source = self.current_source;
+        let current = self
+            .current
             .as_mut()
-            .expect("instructions require a live continuation")
-            .body
-            .push(instruction);
+            .expect("instructions require a live continuation");
+        current.body.push(instruction);
+        current.body_sources.push(source);
     }
 
     fn start(&mut self, id: ContinuationId) {
         debug_assert!(self.current.is_none());
-        self.current = Some(OpenContinuation { id, body: vec![] });
+        self.current = Some(OpenContinuation {
+            id,
+            body: vec![],
+            body_sources: vec![],
+        });
     }
 
     fn finish(&mut self, terminator: Terminator) {
@@ -1708,12 +1771,15 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
             .current
             .take()
             .expect("terminators require a live continuation");
-        self.continuations.push(Continuation::new(
-            current.id,
-            self.function,
-            current.body,
-            terminator,
-        ));
+        let OpenContinuation {
+            id,
+            body,
+            body_sources,
+        } = current;
+        self.continuations.push(
+            Continuation::new(id, self.function, body, terminator)
+                .with_source_spans(body_sources, self.current_source),
+        );
     }
 
     fn transfer(&mut self, source: Address, destination: Address, factor: u8) {

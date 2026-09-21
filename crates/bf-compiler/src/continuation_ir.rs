@@ -54,6 +54,24 @@ impl GlobalId {
     }
 }
 
+/// A byte range in one source file carried through continuation lowering.
+///
+/// The frontend uses a combined byte stream while lowering several files. The
+/// file id and local offsets are restored before the profile map is emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceSpan {
+    pub file_id: u32,
+    pub start_byte: u64,
+    pub end_byte: u64,
+}
+
+/// A source file referenced by a continuation program's profile metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFileDescriptor {
+    pub id: u32,
+    pub path: String,
+}
+
 /// The identity of an aligned aggregate region in the current activation frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FrameAggregateId(usize);
@@ -561,7 +579,9 @@ pub struct Continuation {
     id: ContinuationId,
     function: FunctionId,
     body: Vec<FrameInstruction>,
+    body_sources: Vec<Option<SourceSpan>>,
     terminator: Terminator,
+    terminator_source: Option<SourceSpan>,
 }
 
 impl Continuation {
@@ -574,8 +594,10 @@ impl Continuation {
         Self {
             id,
             function,
+            body_sources: vec![None; body.len()],
             body,
             terminator,
+            terminator_source: None,
         }
     }
 
@@ -591,8 +613,42 @@ impl Continuation {
         &self.body
     }
 
+    /// Source spans for top-level frame instructions, when available.
+    pub fn body_sources(&self) -> &[Option<SourceSpan>] {
+        &self.body_sources
+    }
+
     pub const fn terminator(&self) -> &Terminator {
         &self.terminator
+    }
+
+    /// Source span of the continuation terminator, when available.
+    pub const fn terminator_source(&self) -> Option<SourceSpan> {
+        self.terminator_source
+    }
+
+    /// Attach source provenance without changing the continuation's ABI
+    /// instructions. Missing entries are deliberately allowed for generated
+    /// or imported IR and are represented by `None`.
+    pub fn with_source_spans(
+        mut self,
+        mut body_sources: Vec<Option<SourceSpan>>,
+        terminator_source: Option<SourceSpan>,
+    ) -> Self {
+        body_sources.resize(self.body.len(), None);
+        body_sources.truncate(self.body.len());
+        self.body_sources = body_sources;
+        self.terminator_source = terminator_source;
+        self
+    }
+
+    pub(crate) fn primary_source(&self) -> Option<SourceSpan> {
+        self.body_sources
+            .iter()
+            .flatten()
+            .copied()
+            .next()
+            .or(self.terminator_source)
     }
 }
 
@@ -603,6 +659,7 @@ pub struct ContinuationProgram {
     globals: Vec<GlobalDescriptor>,
     functions: Vec<FunctionDescriptor>,
     continuations: Vec<Continuation>,
+    source_files: Vec<SourceFileDescriptor>,
 }
 
 impl ContinuationProgram {
@@ -626,6 +683,7 @@ impl ContinuationProgram {
             globals,
             functions,
             continuations,
+            source_files: Vec::new(),
         })
     }
 
@@ -647,6 +705,17 @@ impl ContinuationProgram {
 
     pub fn continuations(&self) -> &[Continuation] {
         &self.continuations
+    }
+
+    /// Source files available to the profile-map emitter.
+    pub fn source_files(&self) -> &[SourceFileDescriptor] {
+        &self.source_files
+    }
+
+    /// Attach source-file names to an otherwise complete continuation program.
+    pub fn with_source_files(mut self, source_files: Vec<SourceFileDescriptor>) -> Self {
+        self.source_files = source_files;
+        self
     }
 
     pub fn function(&self, id: FunctionId) -> Option<&FunctionDescriptor> {

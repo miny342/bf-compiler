@@ -104,12 +104,18 @@ pub fn optimize_continuations_with_options(
     for continuation in continuations {
         let mut terminator = continuation.terminator().clone();
         map_successor_references(&mut terminator, &remap, &mut successor_references_rewritten);
-        rewritten.push(Continuation::new(
-            continuation.id(),
-            continuation.function(),
-            continuation.body().to_vec(),
-            terminator,
-        ));
+        rewritten.push(
+            Continuation::new(
+                continuation.id(),
+                continuation.function(),
+                continuation.body().to_vec(),
+                terminator,
+            )
+            .with_source_spans(
+                continuation.body_sources().to_vec(),
+                continuation.terminator_source(),
+            ),
+        );
     }
 
     let mut function_entries_rewritten = 0;
@@ -183,7 +189,8 @@ pub fn optimize_continuations_with_options(
         program.globals().to_vec(),
         functions,
         optimized_continuations,
-    )?;
+    )?
+    .with_source_files(program.source_files().to_vec());
     if options.structure_local_control_flow {
         let (structured, local_stats) =
             crate::continuation_structure::structure_local_control_flow(&optimized)?;
@@ -240,6 +247,15 @@ fn inline_branch_successors(continuations: Vec<Continuation>) -> (Vec<Continuati
                 body,
                 successor.terminator().clone(),
             )
+            .with_source_spans(
+                continuation
+                    .body_sources()
+                    .iter()
+                    .copied()
+                    .chain(successor.body_sources().iter().copied())
+                    .collect(),
+                successor.terminator_source(),
+            )
         })
         .collect();
     (rewritten, inlined, duplicated)
@@ -279,6 +295,10 @@ fn compact_ids(functions: &mut [FunctionDescriptor], continuations: &mut [Contin
             continuation.function(),
             continuation.body().to_vec(),
             terminator,
+        )
+        .with_source_spans(
+            continuation.body_sources().to_vec(),
+            continuation.terminator_source(),
         );
     }
     true

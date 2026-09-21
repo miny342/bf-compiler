@@ -152,10 +152,20 @@ pub(crate) enum VariableRef {
 pub(crate) struct HirProgram {
     pub(crate) entry: FunctionId,
     pub(crate) types: TypeTable,
+    /// Combined-source file ranges used to restore local profile offsets.
+    pub(crate) source_files: Vec<HirSourceFile>,
     /// Globals in declaration order. Initializers execute in this order.
     pub(crate) globals: Vec<HirGlobal>,
     /// Functions in ID order.
     pub(crate) functions: Vec<HirFunction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HirSourceFile {
+    pub(crate) id: u32,
+    pub(crate) path: String,
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

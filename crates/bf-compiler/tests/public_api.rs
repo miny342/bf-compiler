@@ -1,9 +1,9 @@
 use bf_compiler::{
     Address, Continuation, ContinuationId, ContinuationProgram, FrameInstruction, FrameSlot,
-    FunctionDescriptor, FunctionId, ProfileGranularity, Terminator, ValueType,
+    FunctionDescriptor, FunctionId, ProfileGranularity, SourceFile, Terminator, ValueType,
     compile_continuations, compile_continuations_unbounded,
     compile_continuations_unbounded_with_profile, compile_continuations_with_profile,
-    lower_continuations, lower_source,
+    lower_continuations, lower_source, lower_sources,
 };
 
 fn continuation_id(value: u16) -> ContinuationId {
@@ -65,10 +65,7 @@ fn profile_artifact_preserves_brainfuck_and_separates_abi_phases() {
                 .sites
                 .iter()
                 .any(|site| site.kind == "frame_instruction"),
-            matches!(
-                granularity,
-                ProfileGranularity::Instruction | ProfileGranularity::Source
-            )
+            matches!(granularity, ProfileGranularity::Instruction)
         );
     }
 }
@@ -203,4 +200,62 @@ fn instruction_and_source_profiles_distinguish_same_kind_frame_instructions() {
                 .any(|site| site.stable_key == "function.0.frame_instruction.1.set")
         );
     }
+}
+
+#[test]
+fn source_profile_maps_frame_and_global_backend_work_to_named_source() {
+    let source = "cell global; void main() { global = input(); output(global); }";
+    let program = lower_sources(&[SourceFile::new("main.bfc", source)]).unwrap();
+    let artifact =
+        compile_continuations_with_profile(&program, ProfileGranularity::Source).unwrap();
+
+    assert_eq!(
+        artifact.map.files,
+        vec![bf_profiling::ProfileFile {
+            id: 0,
+            path: "main.bfc".into(),
+        }]
+    );
+    let source_sites = artifact
+        .map
+        .sites
+        .iter()
+        .filter_map(|site| site.source.as_ref())
+        .collect::<Vec<_>>();
+    assert!(!source_sites.is_empty());
+    assert!(source_sites.iter().all(|span| {
+        span.file_id == 0 && span.start_byte < span.end_byte && span.end_byte <= source.len() as u64
+    }));
+    assert!(
+        artifact
+            .map
+            .sites
+            .iter()
+            .any(|site| { site.stable_key == "abi.navigation.global" && site.source.is_some() })
+    );
+    assert!(
+        artifact
+            .map
+            .sites
+            .iter()
+            .any(|site| site.kind == "source" && site.source.is_some())
+    );
+    assert!(
+        !artifact
+            .map
+            .sites
+            .iter()
+            .any(|site| site.kind == "frame_instruction")
+    );
+    artifact
+        .map
+        .validate_for_source(artifact.source.as_bytes())
+        .unwrap();
+    let embedded = artifact.embedded_source().unwrap();
+    assert_eq!(
+        bf_profiling::embedded_profile_map(embedded.as_bytes())
+            .unwrap()
+            .unwrap(),
+        artifact.map
+    );
 }
