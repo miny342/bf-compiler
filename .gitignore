@@ -3,3 +3,8 @@
 /new_logs/
 /fizzbuzz_logs/
 /tmp/
+/tools/cir-viewer/node_modules/
+/tools/cir-viewer/dist/
+/tools/cir-viewer/*.tsbuildinfo
+/tools/cir-viewer/vite.config.js
+/tools/cir-viewer/vite.config.d.ts
