@@ -129,7 +129,7 @@ export default function App() {
           hidden
         />
         <strong>{dropMessage}</strong>
-        <span>Drop .cir, bfmap.json, ir-metrics.json, or source files. Everything stays in this browser.</span>
+        <span>Drop binary self-host .cir, Rust internal .cir, bfmap.json, ir-metrics.json, or source files.</span>
       </section>
 
       {mergedWarnings.length > 0 && (
@@ -140,8 +140,8 @@ export default function App() {
 
       {!program ? (
         <section className="empty-state">
-          <h2>Start with a self-host CIR artifact</h2>
-          <p>The viewer reads the BFCIR binary directly. No compiler or interpreter is invoked.</p>
+          <h2>Start with a CIR artifact</h2>
+          <p>The viewer reads binary self-host CIR or Rust continuation-IR JSON directly. No compiler or interpreter is invoked.</p>
         </section>
       ) : (
         <section className="workspace">
@@ -168,7 +168,7 @@ export default function App() {
                   }}
                 >
                   <span className="function-id">fn#{fn.id}</span>
-                  <span className="function-name">{functionName(fn.id, names)}</span>
+                  <span className="function-name">{functionName(fn.id, names, program)}</span>
                   <span className="function-meta">entry c{fn.entry} · {continuationCount(program, fn.id)} cont</span>
                 </button>
               ))}
@@ -188,7 +188,7 @@ export default function App() {
                 <button type="button" className={callScope === "neighborhood" ? "active" : ""} onClick={() => setCallScope("neighborhood")}>Main neighborhood</button>
                 <button type="button" className={callScope === "all" ? "active" : ""} onClick={() => setCallScope("all")}>All functions</button>
               </>}
-              {mode === "cfg" && selected && <span className="selected-label">{functionName(selected.id, names)}</span>}
+              {mode === "cfg" && selected && <span className="selected-label">{functionName(selected.id, names, program)}</span>}
             </div>
             <GraphPane
               program={program}
@@ -292,7 +292,7 @@ function buildCallGraph(program: CirProgram, names: Map<number, string>, scope: 
     position: { x: (index % columns) * 230, y: Math.floor(index / columns) * 145 },
     data: {
       kind: "function" as const,
-      label: `${functionName(fn.id, names)}\nfn#${fn.id} · ${continuationCount(program, fn.id)} continuations`,
+      label: `${functionName(fn.id, names, program)}\nfn#${fn.id} · ${continuationCount(program, fn.id)} continuations`,
     },
     className: fn.id === program.mainFunction ? "main-node" : "",
     style: { width: 190 },
@@ -358,7 +358,7 @@ function buildCfg(program: CirProgram, names: Map<number, string>, selectedFunct
       edges.push(cfgEdge(continuation.id, term.thenTarget, "then", known));
       edges.push(cfgEdge(continuation.id, term.elseTarget, "else", known));
     } else if (term.kind === "call") {
-      edges.push(cfgEdge(continuation.id, term.returnTo, `call ${functionName(term.callee, names)} → resume`, known, true));
+      edges.push(cfgEdge(continuation.id, term.returnTo, `call ${functionName(term.callee, names, program)} → resume`, known, true));
     }
   }
   return { nodes, edges };
@@ -391,7 +391,7 @@ function DetailPane({ program, fn, names, sidecars }: {
     <aside className="detail-pane">
       <div className="detail-title">
         <div className="eyebrow">FUNCTION</div>
-        <h2>{functionName(fn.id, names)}</h2>
+        <h2>{functionName(fn.id, names, program)}</h2>
         <span>fn#{fn.id} · entry c{fn.entry}</span>
       </div>
       <dl className="facts">

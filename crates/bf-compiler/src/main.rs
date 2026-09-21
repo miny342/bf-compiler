@@ -28,6 +28,8 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut profile_granularity = None;
     let mut embed_profile = false;
     let mut run_ir = false;
+    let mut ir_dump_output = None;
+    let mut cir_output = None;
     let mut optimization_options = bf_compiler::ContinuationOptimizationOptions::default();
     let mut ir_metrics_output = None;
     let mut collect_ir_transitions = true;
@@ -70,6 +72,10 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         } else if argument == "--ir-metrics" {
             ir_metrics_output = Some(arguments.next().ok_or("--ir-metrics requires PATH")?);
             collect_ir_transitions = true;
+        } else if argument == "--ir-dump" {
+            ir_dump_output = Some(arguments.next().ok_or("--ir-dump requires PATH")?);
+        } else if argument == "--cir-output" {
+            cir_output = Some(arguments.next().ok_or("--cir-output requires PATH")?);
         } else if argument == "--no-ir-transitions" {
             collect_ir_transitions = false;
         } else if argument == "--ir-phase-config" {
@@ -90,7 +96,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     }
     if source_paths.is_empty() && cir_input.is_none() {
         return Err(format!(
-            "usage: {} [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
+            "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
             executable.to_string_lossy(),
             executable.to_string_lossy()
         )
@@ -101,6 +107,9 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     }
     if ir_metrics_output.is_some() && !run_ir {
         return Err("--ir-metrics requires --run-ir".into());
+    }
+    if ir_dump_output.is_some() && !run_ir {
+        return Err("--ir-dump requires --run-ir".into());
     }
     if ir_phase_config.is_some() != ir_artifact_id.is_some() {
         return Err("--ir-phase-config and --ir-artifact-id must be provided together".into());
@@ -138,6 +147,24 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(output) = &ir_metrics_output {
         validate_output_path(
             "--ir-metrics",
+            output,
+            &source_paths,
+            cir_input.as_ref(),
+            ir_phase_config.as_ref(),
+        )?;
+    }
+    if let Some(output) = &ir_dump_output {
+        validate_output_path(
+            "--ir-dump",
+            output,
+            &source_paths,
+            cir_input.as_ref(),
+            ir_phase_config.as_ref(),
+        )?;
+    }
+    if let Some(output) = &cir_output {
+        validate_output_path(
+            "--cir-output",
             output,
             &source_paths,
             cir_input.as_ref(),
@@ -216,7 +243,16 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             program.globals().len(),
             memory_metrics(),
         );
-        if run_ir {
+        if run_ir || cir_output.is_some() {
+            if let Some(path) = cir_output.as_deref() {
+                write_internal_cir(path, "cir", &artifact_identity, &program)?;
+            }
+            if !run_ir {
+                return Ok(());
+            }
+            if let Some(path) = ir_dump_output.as_deref() {
+                write_ir_dump(path, "cir", &artifact_identity, &program)?;
+            }
             let phase_config = ir_phase_config
                 .as_deref()
                 .map(|path| {
@@ -304,7 +340,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|(name, source, _)| bf_compiler::SourceFile::new(name, source))
         .collect();
-    if run_ir {
+    if run_ir || cir_output.is_some() {
         if let Some(cli_id) = ir_artifact_id.as_deref() {
             validate_cli_artifact_id(cli_id, &artifact_identity)?;
         }
@@ -320,6 +356,16 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             program.globals().len(),
             memory_metrics(),
         );
+
+        if let Some(path) = cir_output.as_deref() {
+            write_internal_cir(path, "source", &artifact_identity, &program)?;
+        }
+        if !run_ir {
+            return Ok(());
+        }
+        if let Some(path) = ir_dump_output.as_deref() {
+            write_ir_dump(path, "source", &artifact_identity, &program)?;
+        }
 
         let phase_config = ir_phase_config
             .as_deref()
@@ -413,6 +459,38 @@ struct IrArtifactMetadata<'a> {
     source_kind: &'a str,
     artifact_identity: &'a str,
     optimization_options: bf_compiler::ContinuationOptimizationOptions,
+}
+
+fn write_ir_dump(
+    path: &std::ffi::OsStr,
+    source_kind: &str,
+    artifact_identity: &str,
+    program: &bf_compiler::ContinuationProgram,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dump = json!({
+        "format": "bfc-continuation-ir-v1",
+        "source_kind": source_kind,
+        "artifact_identity": artifact_identity,
+        "program": program,
+    });
+    fs::write(Path::new(path), serde_json::to_vec_pretty(&dump)?)?;
+    Ok(())
+}
+
+fn write_internal_cir(
+    path: &std::ffi::OsStr,
+    source_kind: &str,
+    artifact_identity: &str,
+    program: &bf_compiler::ContinuationProgram,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dump = json!({
+        "format": "bfc-continuation-ir-v1",
+        "source_kind": source_kind,
+        "artifact_identity": artifact_identity,
+        "program": program,
+    });
+    fs::write(Path::new(path), serde_json::to_vec(&dump)?)?;
+    Ok(())
 }
 
 fn run_ir_program(

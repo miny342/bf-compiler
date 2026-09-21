@@ -23,6 +23,7 @@ export type CirFunction = {
   frameCells: number;
   returnType: ReturnTypeName;
   parameters: { destination: number; cells: number }[];
+  name?: string;
 };
 
 export type CirContinuation = {
@@ -37,7 +38,7 @@ export type CirProgram = {
   mainFunction: number;
   functions: CirFunction[];
   continuations: CirContinuation[];
-  format: "BFCIR-1";
+  format: "BFCIR-1" | "BFCIR-Rust-IR-1";
 };
 
 class Reader {
@@ -99,7 +100,11 @@ export function parseCir(input: ArrayBuffer | Uint8Array): CirProgram {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   const reader = new Reader(bytes);
   if (!looksLikeCir(bytes)) {
-    throw new Error("not a BFCIR version 1 file");
+    try {
+      return parseRustIr(JSON.parse(new TextDecoder().decode(bytes)));
+    } catch (error) {
+      throw new Error(`not a BFCIR version 1 file or Rust continuation IR JSON: ${messageOf(error)}`);
+    }
   }
   for (let index = 0; index < MAGIC.length; index += 1) reader.u8();
 
@@ -289,6 +294,254 @@ function readTerminator(reader: Reader): Terminator {
   throw new Error(`unknown terminator tag ${tag}`);
 }
 
+type JsonObject = Record<string, unknown>;
+
+function parseRustIr(value: unknown): CirProgram {
+  const root = asObject(value);
+  if (root.format !== "bfc-continuation-ir-v1") {
+    throw new Error("unknown continuation IR format");
+  }
+  const raw = asObject(root.program);
+  const functions = arrayAt(raw.functions).map((item) => {
+    const fn = asObject(item);
+    const id = requiredNumber(fn.id, "function id");
+    const parameterLocations = arrayAt(fn.parameter_locations);
+    return {
+      id,
+      entry: requiredNumber(fn.entry, `function ${id} entry`),
+      frameCells: numberAt(fn.frame_slots) ?? 0,
+      returnType: valueTypeName(fn.return_type),
+      parameters: parameterLocations.map((parameter) => parameterLocation(parameter)),
+      name: stringAt(fn.name),
+    };
+  });
+  const continuations = arrayAt(raw.continuations).map((item) => {
+    const continuation = asObject(item);
+    const id = requiredNumber(continuation.id, "continuation id");
+    return {
+      id,
+      functionId: requiredNumber(continuation.function, `continuation ${id} function`),
+      instructions: arrayAt(continuation.body).map((instruction) => ({
+        kind: "frame",
+        text: frameInstructionText(instruction),
+      })),
+      terminator: rustTerminator(continuation.terminator),
+    };
+  });
+  return {
+    staticCells: arrayAt(raw.globals).reduce<number>((total, item) => {
+      const global = asObject(item);
+      return total + valueTypeCells(global.value_type);
+    }, 0),
+    mainFunction: requiredNumber(raw.main, "main function"),
+    functions,
+    continuations,
+    format: "BFCIR-Rust-IR-1",
+  };
+}
+
+function rustTerminator(value: unknown): Terminator {
+  if (value === "Halt") return { kind: "halt", text: "halt" };
+  if (value === "Abort") return { kind: "abort", text: "abort" };
+  const term = asObject(value);
+  const [tag, payload] = singleEntry(term);
+  if (tag === "Goto") {
+    const target = requiredNumber(asObject(payload).target, "goto target");
+    return { kind: "goto", target, text: `goto c${target}` };
+  }
+  if (tag === "Branch") {
+    const branch = asObject(payload);
+    const condition = addressText(branch.condition);
+    const thenTarget = requiredNumber(branch.then_target, "branch then target");
+    const elseTarget = requiredNumber(branch.else_target, "branch else target");
+    return {
+      kind: "branch",
+      condition: 0,
+      thenTarget,
+      elseTarget,
+      text: `if (${condition} != 0) goto c${thenTarget} else goto c${elseTarget}`,
+    };
+  }
+  if (tag === "BranchWithBodies") {
+    const branch = asObject(payload);
+    const thenTarget = requiredNumber(branch.then_target, "branch then target");
+    const elseTarget = requiredNumber(branch.else_target, "branch else target");
+    return {
+      kind: "branch",
+      condition: 0,
+      thenTarget,
+      elseTarget,
+      text: `if (${addressText(branch.condition)} != 0) { ${bodyText(branch.then_body)} } -> c${thenTarget} else { ${bodyText(branch.else_body)} } -> c${elseTarget}`,
+    };
+  }
+  if (tag === "Call") {
+    const call = asObject(payload);
+    const callee = requiredNumber(call.callee, "call callee");
+    const returnTo = requiredNumber(call.return_to, "call return target");
+    const args = arrayAt(call.arguments).map(valueOperandText);
+    return {
+      kind: "call",
+      callee,
+      returnTo,
+      arguments: [],
+      text: `call fn#${callee}(${args.join(", ")}); resume c${returnTo}`,
+    };
+  }
+  if (tag === "Return") {
+    const returnedValue = asObject(payload).value;
+    const returned = returnedValue === null || returnedValue === undefined
+      ? ""
+      : ` ${valueOperandText(returnedValue)}`;
+    return { kind: "return-void", text: `return${returned}` };
+  }
+  if (tag === "ArrayLoad" || tag === "ArrayStore" || tag === "AggregateLoad" || tag === "AggregateStore") {
+    const operation = asObject(payload);
+    const returnTo = requiredNumber(operation.return_to, `${tag} return target`);
+    return { kind: "goto", target: returnTo, text: `${tag} ...; resume c${returnTo}` };
+  }
+  throw new Error(`unknown Rust continuation terminator ${tag}`);
+}
+
+function frameInstructionText(value: unknown): string {
+  const instruction = asObject(value);
+  const [tag, payload] = singleEntry(instruction);
+  const fields = asObject(payload);
+  if (tag === "SubWithBorrow") {
+    return `${addressText(fields.difference)} = ${addressText(fields.left)} - ${addressText(fields.right)}; borrow ${addressText(fields.borrow)}`;
+  }
+  if (tag === "Compare") {
+    return `${addressText(fields.dst)} = (${addressText(fields.left)} < ${addressText(fields.right)}) ? ${fields.true_value} : ${fields.false_value}`;
+  }
+  if (tag === "Set") return `${addressText(fields.dst)} = ${fields.value}`;
+  if (tag === "AddConst") return `${addressText(fields.dst)} += ${fields.value}`;
+  if (tag === "Copy") return `${addressText(fields.dst)} = ${addressText(fields.src)}`;
+  if (tag === "Transfer") {
+    const targets = arrayAt(fields.targets).map((target) => {
+      const item = asObject(target);
+      return `${addressText(item.dst)} * ${item.factor}`;
+    });
+    return `${addressText(fields.src)} -> ${targets.join(", ")}`;
+  }
+  if (tag === "AggregateCopy") {
+    return `copy ${regionText(fields.src)} -> ${regionText(fields.dst)} (${fields.cells} cells)`;
+  }
+  if (tag === "Input") return `${addressText(fields.dst)} = input()`;
+  if (tag === "Output") return `output(${addressText(fields.src)})`;
+  if (tag === "Loop") return `while (${addressText(fields.condition)} != 0) { ${bodyText(fields.body)} }`;
+  if (tag === "Branch") {
+    return `if (${addressText(fields.condition)} != 0) { ${bodyText(fields.then_body)} } else { ${bodyText(fields.else_body)} }`;
+  }
+  return `${tag} ${JSON.stringify(payload)}`;
+}
+
+function bodyText(value: unknown): string {
+  return arrayAt(value).map(frameInstructionText).join("; ");
+}
+
+function addressText(value: unknown): string {
+  if (typeof value === "number") return `f[${value}]`;
+  if (value === "AbiValue") return "abi.value";
+  const object = asObject(value);
+  const [tag, payload] = singleEntry(object);
+  if (tag === "Frame") return `f[${requiredNumber(payload, "frame slot")}]`;
+  if (tag === "Global") return `g[${requiredNumber(payload, "global id")}]`;
+  if (tag === "AbiValue") return "abi.value";
+  if (tag === "ArrayElement") {
+    const item = asObject(payload);
+    return `${regionText(item.array)}[${item.index}]`;
+  }
+  return JSON.stringify(value);
+}
+
+function regionText(value: unknown): string {
+  if (value === "Outbox") return "outbox";
+  const object = asObject(value);
+  const [tag, payload] = singleEntry(object);
+  if (tag === "Frame") return `frame#${requiredNumber(payload, "frame aggregate")}`;
+  if (tag === "Global") return `global#${requiredNumber(payload, "global aggregate")}`;
+  if (tag === "Outbox") return "outbox";
+  return JSON.stringify(value);
+}
+
+function valueOperandText(value: unknown): string {
+  const object = asObject(value);
+  const [tag, payload] = singleEntry(object);
+  if (tag === "Cell") return addressText(payload);
+  if (tag === "Array") return regionText(payload);
+  if (tag === "Aggregate") {
+    const item = asObject(payload);
+    return `${regionText(item.region)}[${item.offset}..${Number(item.offset) + Number(item.cells)}]`;
+  }
+  return JSON.stringify(value);
+}
+
+function parameterLocation(value: unknown): { destination: number; cells: number } {
+  const object = asObject(value);
+  const [tag, payload] = singleEntry(object);
+  if (tag === "Cell") return { destination: requiredNumber(payload, "parameter slot"), cells: 1 };
+  if (tag === "AggregateElement") {
+    const item = asObject(payload);
+    return { destination: requiredNumber(item.index, "parameter index"), cells: 1 };
+  }
+  return { destination: 0, cells: 1 };
+}
+
+function valueTypeName(value: unknown): ReturnTypeName {
+  if (value === "Void") return "void";
+  if (value === "Cell") return "cell";
+  const object = typeof value === "object" && value !== null ? value as JsonObject : undefined;
+  if (object?.Aggregate !== undefined) {
+    const payload = asObject(object.Aggregate);
+    return `aggregate(${requiredNumber(payload.cells, "aggregate cells")})`;
+  }
+  if (object?.Array !== undefined) return `aggregate(${requiredNumber(object.Array, "array cells")})`;
+  return "void";
+}
+
+function valueTypeCells(value: unknown): number {
+  if (value === "Cell") return 1;
+  if (value === "Void") return 0;
+  const object = typeof value === "object" && value !== null ? value as JsonObject : undefined;
+  if (object?.Array !== undefined) return requiredNumber(object.Array, "array cells");
+  if (object?.Aggregate !== undefined) return requiredNumber(asObject(object.Aggregate).cells, "aggregate cells");
+  return 0;
+}
+
+function singleEntry(value: JsonObject): [string, unknown] {
+  const entries = Object.entries(value);
+  if (entries.length !== 1) throw new Error("expected a tagged Rust enum value");
+  return entries[0] as [string, unknown];
+}
+
+function asObject(value: unknown): JsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("expected a JSON object");
+  }
+  return value as JsonObject;
+}
+
+function arrayAt(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function requiredNumber(value: unknown, label: string): number {
+  const result = numberAt(value);
+  if (result === undefined) throw new Error(`missing numeric ${label}`);
+  return result;
+}
+
+function numberAt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringAt(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function formatArithmetic(tag: number, destination: number, source: number): string {
   const unary = ["", "", "", "", "", "", "+", "-", "negate", "not", "bool"];
   if (tag >= 8 && tag <= 10) return `f[${destination}] = ${unary[tag]}(f[${destination}])`;
@@ -334,6 +587,6 @@ export function callEdges(program: CirProgram): { caller: number; callee: number
   return [...byPair.values()];
 }
 
-export function functionName(id: number, names: Map<number, string>): string {
-  return names.get(id) ?? `fn#${id}`;
+export function functionName(id: number, names: Map<number, string>, program?: CirProgram): string {
+  return names.get(id) ?? program?.functions.find((fn) => fn.id === id)?.name ?? `fn#${id}`;
 }

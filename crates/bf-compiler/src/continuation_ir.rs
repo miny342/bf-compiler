@@ -9,11 +9,13 @@ use std::error::Error;
 use std::fmt;
 use std::num::NonZeroU16;
 
+use serde::Serialize;
+
 /// The 16-bit logical offset can address this many payload cells.
 const MAX_AGGREGATE_CELLS: usize = u16::MAX as usize + 1;
 
 /// The stable identity of a function in a continuation program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct FunctionId(usize);
 
 impl FunctionId {
@@ -27,7 +29,7 @@ impl FunctionId {
 }
 
 /// One cell in the current function's frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct FrameSlot(usize);
 
 impl FrameSlot {
@@ -41,7 +43,7 @@ impl FrameSlot {
 }
 
 /// The stable identity of a file-scope object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct GlobalId(usize);
 
 impl GlobalId {
@@ -58,7 +60,7 @@ impl GlobalId {
 ///
 /// The frontend uses a combined byte stream while lowering several files. The
 /// file id and local offsets are restored before the profile map is emitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct SourceSpan {
     pub file_id: u32,
     pub start_byte: u64,
@@ -66,14 +68,14 @@ pub struct SourceSpan {
 }
 
 /// A source file referenced by a continuation program's profile metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceFileDescriptor {
     pub id: u32,
     pub path: String,
 }
 
 /// The identity of an aligned aggregate region in the current activation frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct FrameAggregateId(usize);
 
 impl FrameAggregateId {
@@ -92,7 +94,7 @@ pub type FrameArrayId = FrameAggregateId;
 /// A nonzero dispatcher identity.
 ///
 /// Zero is reserved by the ABI for the stopped dispatcher state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct ContinuationId(NonZeroU16);
 
 impl ContinuationId {
@@ -110,7 +112,7 @@ impl ContinuationId {
 }
 
 /// A source-language value category supported by the continuation ABI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum ValueType {
     Cell,
     /// Version-0 fixed-length `cell` array.
@@ -123,7 +125,7 @@ pub enum ValueType {
 }
 
 /// A statically allocated file-scope object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct GlobalDescriptor {
     id: GlobalId,
     value_type: ValueType,
@@ -156,7 +158,7 @@ impl GlobalDescriptor {
 }
 
 /// An aligned aggregate region owned by one function activation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct FrameAggregateDescriptor {
     id: FrameAggregateId,
     cells: usize,
@@ -180,7 +182,7 @@ impl FrameAggregateDescriptor {
 pub type FrameArrayDescriptor = FrameAggregateDescriptor;
 
 /// An aggregate region visible while the current function is active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum AggregateRegion {
     Frame(FrameAggregateId),
     Global(GlobalId),
@@ -192,7 +194,7 @@ pub enum AggregateRegion {
 pub type ArrayRegion = AggregateRegion;
 
 /// A compiler-owned little-endian 16-bit logical payload offset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct LogicalOffset {
     pub low: Address,
     pub high: Address,
@@ -205,7 +207,7 @@ impl LogicalOffset {
 }
 
 /// An address visible to frame-relative instructions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Address {
     /// A cell owned by the currently executing function frame.
     Frame(FrameSlot),
@@ -221,7 +223,7 @@ pub enum Address {
 }
 
 /// The storage initialized by one function argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum ParameterLocation {
     Cell(FrameSlot),
     /// One scalar cell inside an aligned aggregate region.
@@ -238,7 +240,7 @@ pub enum ParameterLocation {
 }
 
 /// A scalar or aggregate value passed across a continuation boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum ValueOperand {
     Cell(Address),
     /// Version-0 whole-array operand.
@@ -262,7 +264,7 @@ impl ValueOperand {
 }
 
 /// One destination of a destructive [`FrameInstruction::Transfer`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct FrameTransferTarget {
     pub dst: Address,
     /// The source value is multiplied by this value modulo 256 before being
@@ -271,7 +273,7 @@ pub struct FrameTransferTarget {
 }
 
 /// A structured operation whose frame addresses are resolved at run time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum FrameInstruction {
     /// Snapshot both unsigned inputs, clear them, then write the wrapping
     /// difference followed by the selected borrow value (`left < right`).
@@ -348,7 +350,7 @@ pub enum FrameInstruction {
 }
 
 /// Static metadata needed to enter and validate a function.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FunctionDescriptor {
     id: FunctionId,
     parameter_locations: Vec<ParameterLocation>,
@@ -513,7 +515,7 @@ impl FunctionDescriptor {
 }
 
 /// Control flow performed after a continuation's body.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Terminator {
     Goto {
         target: ContinuationId,
@@ -585,7 +587,7 @@ pub enum Terminator {
 }
 
 /// A straight-line instruction body and its single control-flow terminator.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Continuation {
     id: ContinuationId,
     function: FunctionId,
@@ -664,7 +666,7 @@ impl Continuation {
 }
 
 /// A validated collection of functions and dispatcher continuations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ContinuationProgram {
     main: FunctionId,
     globals: Vec<GlobalDescriptor>,
