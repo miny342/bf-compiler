@@ -18,6 +18,9 @@ pub const TAPE_CELLS: usize = 30_000;
 /// Number of logical cells shared by frame contexts and array portals.
 pub const PROTOCOL_CELLS: usize = 16;
 
+/// Number of payload cells covered by one page portal.
+pub const PAGE_CELLS: usize = 256;
+
 /// Default number of data cells in a physical chunk.
 pub const DEFAULT_CHUNK_CELLS: usize = 16;
 
@@ -209,16 +212,7 @@ impl FrameLayout {
                     aggregate: descriptor.id(),
                 });
             }
-            let chunks = if descriptor.cells() == 0 {
-                0
-            } else {
-                checked_chunks(
-                    PROTOCOL_CELLS
-                        .checked_add(descriptor.cells())
-                        .ok_or(FrameLayoutError::SizeOverflow)?,
-                    config,
-                )?
-            };
+            let chunks = aggregate_region_chunks(descriptor.cells(), config)?;
             let base_chunk = aggregate_chunks;
             aggregate_layouts.push(FrameAggregateLayout {
                 descriptor: *descriptor,
@@ -396,11 +390,7 @@ impl FrameLayout {
             });
         }
         Ok(self.aggregate_base_offset(aggregate)?
-            + self.config.try_logical_offset_from_head(
-                PROTOCOL_CELLS
-                    .checked_add(index)
-                    .ok_or(FrameLayoutError::SizeOverflow)?,
-            )? as isize)
+            + aggregate_element_physical_offset(index, self.config)? as isize)
     }
 
     /// Offset of a protocol field in an aligned aggregate portal.
@@ -618,6 +608,71 @@ fn checked_chunks(cells: usize, config: AbiConfig) -> Result<usize, FrameLayoutE
     cells
         .checked_add(config.chunk_cells() - 1)
         .map(|rounded| rounded / config.chunk_cells())
+        .ok_or(FrameLayoutError::SizeOverflow)
+}
+
+/// Number of physical chunks occupied by an aggregate with fixed page
+/// portals. Page zero uses the aggregate's request portal; every later page
+/// gets one additional protocol chunk before its 256 payload cells.
+pub(crate) fn aggregate_region_chunks(
+    cells: usize,
+    config: AbiConfig,
+) -> Result<usize, FrameLayoutError> {
+    if cells == 0 {
+        return Ok(0);
+    }
+    let data_chunks = checked_chunks(cells, config)?;
+    let pages = cells
+        .checked_add(PAGE_CELLS - 1)
+        .map(|rounded| rounded / PAGE_CELLS)
+        .ok_or(FrameLayoutError::SizeOverflow)?;
+    pages
+        .checked_mul(config.portal_chunks())
+        .and_then(|portal_chunks| data_chunks.checked_add(portal_chunks))
+        .ok_or(FrameLayoutError::SizeOverflow)
+}
+
+/// Physical offset of a payload cell from an aggregate's root portal head.
+pub(crate) fn aggregate_element_physical_offset(
+    index: usize,
+    config: AbiConfig,
+) -> Result<usize, FrameLayoutError> {
+    let page = index / PAGE_CELLS;
+    let within_page = index % PAGE_CELLS;
+    let page_chunks = PAGE_CELLS
+        .checked_add(config.chunk_cells() - 1)
+        .map(|rounded| rounded / config.chunk_cells())
+        .ok_or(FrameLayoutError::SizeOverflow)?;
+    let page_span = page_chunks
+        .checked_add(config.portal_chunks())
+        .ok_or(FrameLayoutError::SizeOverflow)?;
+    let chunk = page
+        .checked_mul(page_span)
+        .and_then(|offset| offset.checked_add(config.portal_chunks()))
+        .and_then(|offset| offset.checked_add(within_page / config.chunk_cells()))
+        .ok_or(FrameLayoutError::SizeOverflow)?;
+    chunk
+        .checked_mul(config.stride())
+        .and_then(|offset| offset.checked_add(1))
+        .and_then(|offset| offset.checked_add(within_page % config.chunk_cells()))
+        .ok_or(FrameLayoutError::SizeOverflow)
+}
+
+/// Physical offset of a page portal head from the aggregate's root portal
+/// head. Page zero is the root portal itself.
+pub(crate) fn aggregate_page_portal_offset(
+    page: usize,
+    config: AbiConfig,
+) -> Result<usize, FrameLayoutError> {
+    let page_chunks = PAGE_CELLS
+        .checked_add(config.chunk_cells() - 1)
+        .map(|rounded| rounded / config.chunk_cells())
+        .ok_or(FrameLayoutError::SizeOverflow)?;
+    let page_span = page_chunks
+        .checked_add(config.portal_chunks())
+        .ok_or(FrameLayoutError::SizeOverflow)?;
+    page.checked_mul(page_span)
+        .and_then(|chunk| chunk.checked_mul(config.stride()))
         .ok_or(FrameLayoutError::SizeOverflow)
 }
 
@@ -956,15 +1011,12 @@ mod tests {
 
             assert_eq!(
                 layout.aggregate_chunk_count(aggregate),
-                Ok((PROTOCOL_CELLS + 299).div_ceil(chunk_cells))
+                Ok(aggregate_region_chunks(299, config).unwrap())
             );
             for index in [0, 255, 256, 298] {
                 assert_eq!(
                     layout.aggregate_element_offset(aggregate, index),
-                    Ok(base
-                        + config
-                            .try_logical_offset_from_head(PROTOCOL_CELLS + index)
-                            .unwrap() as isize)
+                    Ok(base + aggregate_element_physical_offset(index, config).unwrap() as isize)
                 );
             }
             assert_eq!(

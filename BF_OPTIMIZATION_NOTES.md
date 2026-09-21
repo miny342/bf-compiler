@@ -712,6 +712,27 @@ executeはwarm実行3回の中央値、sample比率は別の2 ms sampling 1回�
 記号付きBFは説明用のコメントを含むため、そのままcompilerへ埋め込まず、entry/exit条件を
 持つlowering templateとして実装する。
 
+### 2026-09-21: 大きなaggregateのpage-local portal
+
+固定距離nibble jumpの`portal.window.exchange`は、16-bit offsetの遠いpayloadへ移動するたびに
+protocol laneとpayload laneを交換していた。これは中間payloadを一時的にportalへ載せるための
+実装であり、配列/aggregateのcell単位アクセスしか生成しない現行compilerには過剰だった。
+
+version 1 aggregateの物理layoutを256-cell page単位へ変更した。page 0はroot portalを再利用し、
+page 1以降は各payload pageの直前に16-cell portalを予約する。D=16では1 pageが16 data chunks
+と1 portal chunkなので、1 pageあたり17 chunksになる。`aggregate_element_physical_offset`と
+frame/static layoutを同じ式へ揃え、既存payloadとprotocolを混同しないようにした。
+
+accessorはoffsetのhigh byteをpage番号として、次のpage portalへ`INDEX`、store時の`VALUE`、
+`RESTORE`、`Scratch0`だけを移す。選択pageでlow byteのdirect countdownを一度だけ実行し、load時の
+`VALUE`と`RESTORE`だけを逆方向へ戻す。payload全体のexchangeや中間pageの内容の退避は行わない。
+page portalはnon-reentrantなaccess中だけ使用し、終了時にprotocol fieldがdirtyでも次回accessが
+必要なfieldをclearして上書きする契約とした。
+
+実装時に、frame/globalの299-cell aggregate、256-cell境界、16-bit offset `0x1fff`、中間payload
+sentinelのstore/load回帰を確認した。`bf-compiler`のunit testは175 passed、1 ignoredで通過した。
+生成BFの速度比較は未実施で、次は長いglobal aggregateのportal交換回数とBF実行量を測定する。
+
 ## 最優先で試す候補
 
 ### 非破壊的な非同期分岐

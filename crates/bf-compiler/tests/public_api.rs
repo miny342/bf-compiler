@@ -44,10 +44,8 @@ fn profile_artifact_preserves_brainfuck_and_separates_abi_phases() {
             "abi.return",
             "abi.portal.start",
             "abi.portal.accessor",
-            "abi.portal.offset",
-            "abi.portal.window.right",
-            "abi.portal.load",
-            "abi.portal.store",
+            "abi.portal.payload.direct",
+            "abi.portal.page",
             "abi.portal.resume",
             "abi.portal.router.global.0",
         ] {

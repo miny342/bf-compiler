@@ -8,7 +8,10 @@ use crate::continuation_ir::{
     FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId, GlobalId,
     LogicalOffset, ParameterLocation, Terminator, ValueOperand, ValueType,
 };
-use crate::frame_layout::{AbiConfig, AbiField, FrameLayout, FrameLayoutError, PROTOCOL_CELLS};
+use crate::frame_layout::{
+    AbiConfig, AbiField, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,
+    aggregate_element_physical_offset, aggregate_page_portal_offset,
+};
 use crate::static_layout::{StaticLayout, StaticLayoutError};
 use crate::{
     AnnotatedBfInstruction, AnnotatedBfOperation, AnnotatedBfProgram, BfProgram, ProfileSiteTable,
@@ -1380,7 +1383,7 @@ impl<'a> AbiEmitter<'a> {
         let base = self.portal_base_location(region, function)?;
         self.move_context_to_location(base);
         for (instruction_offset, index) in (first..first + cells).enumerate() {
-            let mut offset = self.config.logical_offset_from_head(PROTOCOL_CELLS + index) as isize;
+            let mut offset = aggregate_element_physical_offset(index, self.config)? as isize;
             // Global navigation rebases emitter bookkeeping at the aggregate
             // head. A frame-relative move retains the caller-context origin,
             // so keep the base displacement in that case.
@@ -2346,31 +2349,11 @@ impl<'a> AbiEmitter<'a> {
         &mut self,
         accessor: PortalAccessor,
     ) -> Result<(), AbiCodegenError> {
-        self.with_profile_site(
-            "abi",
-            "abi.portal.offset",
-            "portal offset calculation",
-            |emitter| emitter.compute_aggregate_chunk_offset(),
-        )?;
-        self.with_profile_site(
-            "abi",
-            "abi.portal.window.right",
-            "portal window right",
-            |emitter| emitter.shift_portal_by_offset(true),
-        )?;
-        let (access_key, access_label) = match accessor.kind {
-            PortalAccessKind::Load => ("abi.portal.load", "portal payload load"),
-            PortalAccessKind::Store => ("abi.portal.store", "portal payload store"),
-        };
-        self.with_profile_site("abi", access_key, access_label, |emitter| {
-            emitter.access_payload_with_remainder(accessor.kind)
-        })?;
-        self.with_profile_site(
-            "abi",
-            "abi.portal.window.left",
-            "portal window left",
-            |emitter| emitter.shift_portal_by_offset(false),
-        )?;
+        // A byte-sized logical offset can be dispatched directly without
+        // moving the portal context. Larger offsets use the page portal
+        // resolver, which moves only the request fields between page-local
+        // protocol prefixes.
+        self.emit_direct_or_page_accessor(accessor.kind)?;
         for field in [
             AbiField::Index,
             AbiField::Condition,
@@ -2386,123 +2369,183 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    fn compute_aggregate_chunk_offset(&mut self) -> Result<(), AbiCodegenError> {
-        // The only supported chunk widths are powers of two. For an offset
-        // H:L and D=2^shift, compute the portal displacement directly:
-        // remainder = L & (D - 1), quotient = (H << (8-shift)) | (L >> shift).
-        // This replaces up to 65,535 division ticks with two local byte
-        // decompositions whose work is bounded by the byte values.
-        let shift = self.config.chunk_cells().trailing_zeros() as usize;
-        debug_assert!(matches!(shift, 3 | 4));
-        if shift == 4 {
-            return self.compute_aggregate_chunk_nibbles();
-        }
-        self.move_abi_field(AbiField::Index, AbiField::PcLow);
-        self.move_abi_field(AbiField::Scratch0, AbiField::PcHigh);
+    fn emit_direct_or_page_accessor(
+        &mut self,
+        kind: PortalAccessKind,
+    ) -> Result<(), AbiCodegenError> {
+        // Preserve the high byte while using Condition as a destructive
+        // zero-test.  Branch is left set exactly when the high byte is zero.
+        self.copy_abi_field(AbiField::Scratch0, AbiField::Condition)?;
+        self.set_abi_field(AbiField::Branch, 1)?;
+        self.clear_branch_on_nonzero(AbiField::Condition)?;
 
-        let low_fields = [
-            AbiField::Index,
-            AbiField::Condition,
-            AbiField::Restore,
-            AbiField::Scratch1,
-            AbiField::Scratch0,
-            AbiField::Scratch2,
-            AbiField::Scratch3,
-            AbiField::NextPcLow,
-        ];
-        let low_bits = self.abi_field_offsets(low_fields)?;
-        let temporary = self.current_abi_offset(AbiField::Branch)?;
-        self.decompose_abi_byte(AbiField::PcLow, &low_bits, temporary)?;
-        for index in 1..shift {
-            self.move_static_value(low_bits[index], low_bits[0], 1_u8 << index);
-        }
-        for index in (shift + 1)..8 {
-            self.move_static_value(low_bits[index], low_bits[shift], 1_u8 << (index - shift));
-        }
+        // Keep a copy of the direct-path decision.  The first guarded body
+        // consumes Branch; the second one needs the inverse decision.
+        self.copy_abi_field(AbiField::Branch, AbiField::Condition)?;
 
-        let high_fields = [
-            AbiField::PcLow,
-            AbiField::Condition,
-            AbiField::Restore,
-            AbiField::Scratch2,
-            AbiField::Scratch0,
-            AbiField::Scratch3,
-            AbiField::NextPcLow,
-            AbiField::NextPcHigh,
-        ];
-        let high_bits = self.abi_field_offsets(high_fields)?;
-        self.decompose_abi_byte(AbiField::PcHigh, &high_bits, temporary)?;
-        let quotient_low = self.current_abi_offset(AbiField::Scratch1)?;
-        for (index, &bit) in high_bits.iter().take(shift).enumerate() {
-            self.move_static_value(bit, quotient_low, 1_u8 << (8 - shift + index));
-        }
-        for index in (shift + 1)..8 {
-            self.move_static_value(high_bits[index], high_bits[shift], 1_u8 << (index - shift));
-        }
+        let branch = self.current_abi_offset(AbiField::Branch)?;
+        self.move_to(branch);
+        let direct = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.emit_direct_payload_countdown(kind)?;
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.emit_loop(direct);
+        self.move_to(0);
 
-        let scratch = self.current_abi_offset(AbiField::Scratch0)?;
-        self.copy(
-            self.current_abi_offset(AbiField::Scratch1)?,
-            self.current_abi_offset(AbiField::Condition)?,
-            scratch,
-        );
-        self.copy(
-            self.current_abi_offset(AbiField::Scratch2)?,
-            self.current_abi_offset(AbiField::Restore)?,
-            scratch,
-        );
+        // Condition is one for the direct path and zero for the page path.
+        // Starting with Branch=1 and clearing it when Condition is nonzero
+        // therefore selects the page resolver only for a nonzero high byte.
+        self.set_abi_field(AbiField::Branch, 1)?;
+        self.clear_branch_on_nonzero(AbiField::Condition)?;
+        self.move_to(branch);
+        let page = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.emit_page_portal_accessor(kind)?;
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.emit_loop(page);
+        self.move_to(0);
         Ok(())
     }
 
-    /// Split a D=16 offset into its four-bit remainder and three four-bit
-    /// chunk-position digits. Keeping the quotient in base 16 lets the portal
-    /// jump by 1, 16, and 256 chunks with at most 45 swaps instead of walking
-    /// through as many as 4,095 adjacent chunks. The second copy of each digit
-    /// drives the same jumps in reverse order after the payload access.
-    fn compute_aggregate_chunk_nibbles(&mut self) -> Result<(), AbiCodegenError> {
-        debug_assert_eq!(self.config.chunk_cells(), 16);
-        self.move_abi_field(AbiField::Index, AbiField::PcLow);
-        self.move_abi_field(AbiField::Scratch0, AbiField::PcHigh);
-
+    fn emit_direct_payload_countdown(
+        &mut self,
+        kind: PortalAccessKind,
+    ) -> Result<(), AbiCodegenError> {
         self.with_profile_site(
             "abi",
-            "abi.portal.offset.split",
-            "abi.portal.offset.split",
+            "abi.portal.payload.direct",
+            "direct payload countdown",
             |emitter| {
-                emitter.split_abi_nibbles(AbiField::PcLow, AbiField::Index, AbiField::Scratch1)?;
-                emitter.split_abi_nibbles(AbiField::PcHigh, AbiField::PcLow, AbiField::Scratch2)?;
-
-                Ok(())
+                emitter.set_abi_field(AbiField::Branch, 1)?;
+                emitter.emit_direct_payload_countdown_level(0, u8::MAX, kind)
             },
-        )?;
-        self.with_profile_site(
-            "abi",
-            "abi.portal.offset.prepare",
-            "abi.portal.offset.prepare",
-            |emitter| {
-                let scratch = emitter.current_abi_offset(AbiField::Scratch0)?;
-                emitter.copy(
-                    emitter.current_abi_offset(AbiField::Scratch1)?,
-                    emitter.current_abi_offset(AbiField::Restore)?,
-                    scratch,
-                );
-                emitter.copy(
-                    emitter.current_abi_offset(AbiField::PcLow)?,
-                    emitter.current_abi_offset(AbiField::Condition)?,
-                    scratch,
-                );
-                emitter.copy(
-                    emitter.current_abi_offset(AbiField::Scratch2)?,
-                    emitter.current_abi_offset(AbiField::PcHigh)?,
-                    scratch,
-                );
+        )
+    }
 
-                Ok(())
-            },
-        )?;
+    fn emit_direct_payload_countdown_level(
+        &mut self,
+        level: u8,
+        maximum: u8,
+        kind: PortalAccessKind,
+    ) -> Result<(), AbiCodegenError> {
+        let index = self.current_abi_offset(AbiField::Index)?;
+        self.move_to(index);
+        let body = self.capture(|emitter| {
+            if level == maximum {
+                emitter.clear_current();
+                emitter.clear_abi_field(AbiField::Branch)?;
+            } else {
+                emitter.adjust(255);
+                emitter.move_to(0);
+                emitter.emit_direct_payload_countdown_level(level + 1, maximum, kind)?;
+            }
+            emitter.move_to(index);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
+        self.emit_direct_payload_countdown_case(level, kind)
+    }
+
+    fn emit_direct_payload_countdown_case(
+        &mut self,
+        element: u8,
+        kind: PortalAccessKind,
+    ) -> Result<(), AbiCodegenError> {
+        let branch = self.current_abi_offset(AbiField::Branch)?;
+        self.move_to(branch);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            let payload = emitter
+                .config
+                .logical_offset_from_head(PROTOCOL_CELLS + usize::from(element))
+                as isize;
+            let value = emitter.current_abi_offset(AbiField::Value)?;
+            match kind {
+                PortalAccessKind::Load => {
+                    let scratch = emitter.current_abi_offset(AbiField::Scratch2)?;
+                    emitter.copy(payload, value, scratch);
+                }
+                PortalAccessKind::Store => emitter.move_value(value, payload),
+            }
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
         Ok(())
     }
 
+    fn emit_page_portal_accessor(&mut self, kind: PortalAccessKind) -> Result<(), AbiCodegenError> {
+        self.with_profile_site(
+            "abi",
+            "abi.portal.page",
+            "page portal resolver",
+            |emitter| {
+                let page_span = aggregate_page_portal_offset(1, emitter.config)? as isize;
+                let high = emitter.current_abi_offset(AbiField::Scratch0)?;
+                let restore = emitter.current_abi_offset(AbiField::Restore)?;
+                emitter.move_to(high);
+                let forward = emitter.capture(|emitter| {
+                    emitter.adjust(255);
+                    emitter.move_to(restore);
+                    emitter.adjust(1);
+                    emitter.move_to(0);
+                    emitter.move_page_portal_field(AbiField::Index, page_span)?;
+                    if kind == PortalAccessKind::Store {
+                        emitter.move_page_portal_field(AbiField::Value, page_span)?;
+                    }
+                    emitter.move_page_portal_field(AbiField::Restore, page_span)?;
+                    emitter.move_page_portal_field(AbiField::Scratch0, page_span)?;
+                    emitter.migrate_context(page_span);
+                    emitter.move_to(high);
+                    Ok(())
+                })?;
+                emitter.emit_loop(forward);
+                emitter.move_to(0);
+
+                // The low-byte direct resolver is emitted once. The moving
+                // page portal makes its relative payload offsets identical
+                // for every selected page.
+                emitter.emit_direct_payload_countdown(kind)?;
+
+                emitter.move_to(restore);
+                let reverse = emitter.capture(|emitter| {
+                    emitter.adjust(255);
+                    if kind == PortalAccessKind::Load {
+                        emitter.move_page_portal_field(AbiField::Value, -page_span)?;
+                    }
+                    emitter.move_page_portal_field(AbiField::Restore, -page_span)?;
+                    emitter.migrate_context(-page_span);
+                    emitter.move_to(restore);
+                    Ok(())
+                })?;
+                emitter.emit_loop(reverse);
+                emitter.move_to(0);
+
+                Ok(())
+            },
+        )
+    }
+
+    fn move_page_portal_field(
+        &mut self,
+        field: AbiField,
+        delta: isize,
+    ) -> Result<(), AbiCodegenError> {
+        let field = self.current_abi_offset(field)?;
+        self.move_value(field, delta + field);
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn abi_field_offsets(&self, fields: [AbiField; 8]) -> Result<[isize; 8], AbiCodegenError> {
         let mut offsets = [0; 8];
         for (offset, field) in offsets.iter_mut().zip(fields) {
@@ -2511,6 +2554,7 @@ impl<'a> AbiEmitter<'a> {
         Ok(offsets)
     }
 
+    #[cfg(test)]
     fn decompose_abi_byte(
         &mut self,
         source: AbiField,
@@ -2535,6 +2579,7 @@ impl<'a> AbiEmitter<'a> {
     /// Consume a byte with a bounded countdown. Each entered level updates
     /// the result directly; after the source reaches zero, all enclosing
     /// loops exit without touching it. No binary carry scratch cells are needed.
+    #[cfg(test)]
     fn split_abi_nibbles(
         &mut self,
         source: AbiField,
@@ -2551,6 +2596,7 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn split_nibble_level(&mut self, source: isize, low: isize, high: isize, level: u8) {
         self.move_to(source);
         let body = self.capture_infallible(|emitter| {
@@ -2569,192 +2615,6 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(source);
         });
         self.emit_loop(body);
-    }
-
-    fn shift_portal_by_offset(&mut self, right: bool) -> Result<(), AbiCodegenError> {
-        // Each later nibble stage follows a destructive countdown of the
-        // earlier fields. Keep those consumed counters in the zero-lane mask
-        // so their exchange does not need a temporary cell.
-        let digits = if right {
-            [
-                (AbiField::Scratch1, 1, 0),
-                (AbiField::PcLow, 16, 1 << AbiField::Scratch1.index()),
-                (
-                    AbiField::Scratch2,
-                    256,
-                    (1 << AbiField::Scratch1.index()) | (1 << AbiField::PcLow.index()),
-                ),
-            ]
-        } else {
-            [
-                (
-                    AbiField::PcHigh,
-                    256,
-                    (1 << AbiField::Scratch1.index())
-                        | (1 << AbiField::PcLow.index())
-                        | (1 << AbiField::Scratch2.index()),
-                ),
-                (
-                    AbiField::Condition,
-                    16,
-                    (1 << AbiField::Scratch1.index())
-                        | (1 << AbiField::PcLow.index())
-                        | (1 << AbiField::Scratch2.index())
-                        | (1 << AbiField::PcHigh.index()),
-                ),
-                (
-                    AbiField::Restore,
-                    1,
-                    (1 << AbiField::Scratch1.index())
-                        | (1 << AbiField::PcLow.index())
-                        | (1 << AbiField::Scratch2.index())
-                        | (1 << AbiField::PcHigh.index())
-                        | (1 << AbiField::Condition.index()),
-                ),
-            ]
-        };
-        for (digit, chunks, zero_lanes) in digits {
-            self.jump_portal_by_digit(digit, chunks, right, zero_lanes)?;
-        }
-        Ok(())
-    }
-
-    fn jump_portal_by_digit(
-        &mut self,
-        digit: AbiField,
-        chunks: isize,
-        right: bool,
-        zero_lanes: u16,
-    ) -> Result<(), AbiCodegenError> {
-        self.with_profile_site(
-            "abi",
-            format!(
-                "abi.portal.window.{}.jump.{chunks}",
-                if right { "right" } else { "left" }
-            ),
-            "portal jump",
-            |emitter| {
-                let digit_offset = emitter.current_abi_offset(digit)?;
-                emitter.move_to(digit_offset);
-                let body = emitter.capture_infallible(|emitter| {
-                    emitter.adjust(255);
-                    emitter.move_to(0);
-                    emitter.jump_portal_window(chunks, right, zero_lanes);
-                    emitter.move_to(digit_offset);
-                });
-                emitter.emit_loop(body);
-                emitter.move_to(0);
-                Ok(())
-            },
-        )
-    }
-
-    /// Swap the D=16 portal chunk with a payload chunk at a fixed distance.
-    /// Intermediate payload chunks remain untouched. Applying the same swaps
-    /// in reverse order restores the original aggregate layout exactly.
-    fn jump_portal_window(&mut self, chunks: isize, right: bool, zero_lanes: u16) {
-        debug_assert_eq!(self.config.chunk_cells(), 16);
-        debug_assert!(chunks > 0);
-        let stride = self.config.stride() as isize;
-        let delta = if right { chunks } else { -chunks };
-        let primary_lane = AbiField::Scratch0.index();
-        let primary = self
-            .config
-            .logical_offset_from_head(AbiField::Scratch0.index()) as isize;
-        let secondary = self
-            .config
-            .logical_offset_from_head(AbiField::Scratch3.index()) as isize;
-        let remote_primary = primary + delta * stride;
-        let cell = |chunk: isize, lane: usize| chunk * stride + 1 + lane as isize;
-
-        for lane in 0..self.config.chunk_cells() {
-            self.with_profile_site_infallible(
-                "abi",
-                "abi.portal.window.exchange",
-                "exchange payload and control lane",
-                |emitter| {
-                    let always_zero = lane == AbiField::NextPcLow.index()
-                        || lane == AbiField::NextPcHigh.index()
-                        || lane == AbiField::Scratch0.index()
-                        || lane == AbiField::Scratch3.index()
-                        || (zero_lanes & (1 << lane)) != 0;
-                    let local = cell(0, lane);
-                    let remote = cell(delta, lane);
-                    if always_zero {
-                        emitter.move_value(remote, local);
-                        return;
-                    }
-                    let temporary = if lane < primary_lane {
-                        primary
-                    } else if lane == primary_lane {
-                        secondary
-                    } else {
-                        remote_primary
-                    };
-                    emitter.move_value(remote, temporary);
-                    emitter.move_value(local, remote);
-                    emitter.move_value(temporary, local);
-                },
-            );
-        }
-        self.migrate_context(delta * stride);
-    }
-
-    fn access_payload_with_remainder(
-        &mut self,
-        kind: PortalAccessKind,
-    ) -> Result<(), AbiCodegenError> {
-        for remainder in 0..self.config.chunk_cells() {
-            let index = self.current_abi_offset(AbiField::Index)?;
-            let condition = self.current_abi_offset(AbiField::Scratch1)?;
-            let scratch = self.current_abi_offset(AbiField::Scratch2)?;
-            self.with_profile_site(
-                "abi",
-                "abi.portal.payload.select",
-                "abi.portal.payload.select",
-                |emitter| {
-                    emitter.copy(index, condition, scratch);
-                    emitter
-                        .add_abi_field(AbiField::Scratch1, 0_u8.wrapping_sub(remainder as u8))?;
-                    emitter.set_abi_field(AbiField::Branch, 1)?;
-                    emitter.clear_branch_on_nonzero(AbiField::Scratch1)?;
-
-                    Ok(())
-                },
-            )?;
-            self.with_profile_site(
-                "abi",
-                "abi.portal.payload.transfer",
-                "abi.portal.payload.transfer",
-                |emitter| {
-                    let branch = emitter.current_abi_offset(AbiField::Branch)?;
-                    emitter.move_to(branch);
-                    let body = emitter.capture(|emitter| {
-                        emitter.adjust(255);
-                        emitter.move_to(0);
-                        let payload = emitter
-                            .config
-                            .logical_offset_from_head(PROTOCOL_CELLS + remainder)
-                            as isize;
-                        let value = emitter.current_abi_offset(AbiField::Value)?;
-                        match kind {
-                            PortalAccessKind::Load => {
-                                let scratch = emitter.current_abi_offset(AbiField::Scratch2)?;
-                                emitter.copy(payload, value, scratch);
-                            }
-                            PortalAccessKind::Store => emitter.move_value(value, payload),
-                        }
-                        emitter.move_to(branch);
-                        Ok(())
-                    })?;
-                    emitter.emit_loop(body);
-                    emitter.move_to(0);
-
-                    Ok(())
-                },
-            )?;
-        }
-        Ok(())
     }
 
     fn emit_portal_resume(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {

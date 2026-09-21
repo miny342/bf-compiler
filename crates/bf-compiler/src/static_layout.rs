@@ -13,7 +13,9 @@ use std::error::Error;
 use std::fmt;
 
 use crate::continuation_ir::{GlobalDescriptor, GlobalId, ValueType};
-use crate::frame_layout::{AbiConfig, AbiField, PROTOCOL_CELLS, TAPE_CELLS};
+use crate::frame_layout::{
+    AbiConfig, AbiField, TAPE_CELLS, aggregate_element_physical_offset, aggregate_region_chunks,
+};
 
 /// Absolute tape positions assigned to all file-scope objects.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,14 +86,8 @@ impl StaticLayout {
                 ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
                 ValueType::Cell | ValueType::Void => continue,
             };
-            let chunks = if cells == 0 {
-                0
-            } else {
-                let logical_cells = PROTOCOL_CELLS
-                    .checked_add(cells)
-                    .ok_or(StaticLayoutError::SizeOverflow)?;
-                checked_chunks(logical_cells, config)?
-            };
+            let chunks = aggregate_region_chunks(cells, config)
+                .map_err(|_| StaticLayoutError::SizeOverflow)?;
             let physical_cells = chunks
                 .checked_mul(config.stride())
                 .ok_or(StaticLayoutError::SizeOverflow)?;
@@ -226,13 +222,11 @@ impl StaticLayout {
                 cells,
             });
         }
-        checked_position(
-            base_head,
-            self.config,
-            PROTOCOL_CELLS
-                .checked_add(index)
-                .ok_or(StaticLayoutError::SizeOverflow)?,
-        )
+        let offset = aggregate_element_physical_offset(index, self.config)
+            .map_err(|_| StaticLayoutError::SizeOverflow)?;
+        base_head
+            .checked_add(offset)
+            .ok_or(StaticLayoutError::SizeOverflow)
     }
 
     /// Absolute position of one field in a global aggregate's portal prefix.
@@ -332,6 +326,7 @@ fn array_compat_error(error: StaticLayoutError) -> StaticLayoutError {
     }
 }
 
+#[cfg(test)]
 fn checked_chunks(cells: usize, config: AbiConfig) -> Result<usize, StaticLayoutError> {
     cells
         .checked_add(config.chunk_cells() - 1)
@@ -467,6 +462,7 @@ impl Error for StaticLayoutError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame_layout::PROTOCOL_CELLS;
 
     fn mixed_descriptors() -> Vec<GlobalDescriptor> {
         vec![
@@ -672,12 +668,13 @@ mod tests {
 
             assert_eq!(
                 layout.aggregate_chunk_count(global),
-                Ok((PROTOCOL_CELLS + 299).div_ceil(chunk_cells))
+                Ok(aggregate_region_chunks(299, config).unwrap())
             );
             for index in [0, 255, 256, 298] {
                 assert_eq!(
                     layout.aggregate_element_position(global, index),
-                    checked_position(base, config, PROTOCOL_CELLS + index)
+                    base.checked_add(aggregate_element_physical_offset(index, config).unwrap())
+                        .ok_or(StaticLayoutError::SizeOverflow)
                 );
             }
             assert_eq!(

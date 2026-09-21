@@ -8,7 +8,8 @@ ABI version 0と、その上に定義するセルフホスト拡張version 1の�
 dispatch、call/return、直接・相互再帰、static global、array portal、aggregate argument/returnに加え、
 enum、struct、任意要素型・多次元固定長配列のlogical aggregate layout、16-bit offset portal、
 任意のactivationからの`abort`を使用する。定数offsetはlayoutから直接解決し、動的offsetは
-local/globalに共通のportal accessorを使用する。sourceのmethod call、macro、文字列、`len`はfrontendで
+local/globalに共通のportal accessorを使用する。version 1の大きなaggregateは256-cell pageごとに
+page-local portalを持つ。sourceのmethod call、macro、文字列、`len`はfrontendで
 消費されるためABI機能を追加しない。
 
 ## 目的
@@ -528,21 +529,34 @@ structはfield宣言順、配列はrow-majorでflattenする。`T[N][M]`は長�
 各要素は長さ`M`のinner arrayになる。enumのnominal identityとstruct field型はfrontendで検査し、
 ABIはscalar leaf列と総cell数だけを扱う。
 
-aggregate rootの先頭headを`A`、flatten済みpayload offsetを`o`とする。物理位置はversion 0の
-式を長さ256より大きいpayloadへそのまま拡張する。
+aggregate rootの先頭headを`A`、flatten済みpayload offsetを`o`とする。version 1では、
+長いpayloadのために256 logical cellsごとにpage-local portalを挿入する。page 0のportalは
+aggregate rootのprotocol prefixを再利用し、page 1以降は各pageのpayloadの直前に独立した
+protocol prefixを持つ。page portalのprotocol cellはABI操作の入口で必要なfieldだけ初期化し、
+non-reentrantなaccessが終わった後も0以外の値を残してよい。
 
 ```text
-slot(o)    = R + o
-chunk(o)   = floor(slot(o) / D)
-within(o)  = slot(o) mod D
+page(o)       = floor(o / 256)
+within_page   = o mod 256
+page_chunks   = ceil(256 / D)
+page_span     = page_chunks + P
+portal(A, p)  = A + p * page_span * S
+slot(o)       = P * D + floor(within_page / D) * D + (within_page mod D)
 
-address(A, o) = A + chunk(o) * S + 1 + within(o)
+address(A, o) = portal(A, page(o)) +
+                floor(slot(o) / D) * S + 1 + (slot(o) mod D)
+```
+
+従ってregionが`L > 0` cellを持つときの物理chunk数は次である。
+
+```text
+aggregate_chunks(L) = ceil(L / D) + ceil(L / 256) * P
 ```
 
 protocol prefix、chunk head、paddingはpayload cell数に含めず、aggregate copyでも読み書き
 しない。zero-size aggregateはregionを確保せず、copyも行わない。現行backendはlocal aggregateを
-一律にaligned regionへ置く。regionは1個のrootにつき1個のprotocol prefixを置き、
-nested arrayごとにprefixを重ねない。
+一律にaligned regionへ置く。nested arrayごとにprefixを重ねず、aggregate rootと256-cell page
+だけがportalを持つ。
 
 ### Flat logical offset
 
@@ -580,6 +594,9 @@ version 0の1次元`cell[N]` accessは`OFFSET_HIGH = 0`、`OFFSET_LOW = INDEX`�
 ### Aggregate accessor contract
 
 portalのprimitive operationは、region payload内の1 logical cellを16-bit offsetでload/storeする。
+offsetのhigh byteはpage番号、low byteはpage内offsetとして扱う。low byteが0のときはrootまたは
+選択済みpage portalから直接payload dispatchし、high byteが0でないときはpage resolverが
+隣接するpage portalへrequest fieldを一つずつ移す。payload全体や中間pageの値は交換しない。
 
 ```text
 load_cell(region, o):
@@ -606,6 +623,16 @@ accessorはさらに次を満たす。
 - global `aux`とlocal stack flagを保存する。
 - offset値、`VALUE_PORT`、使用したscratchをresume時に0へ戻す。
 - global/local regionからcurrent frame frontierへversion 0と同じ規則でnormalizeする。
+
+page resolverは次のfieldだけをpage portal間で移動する。
+
+- 往路: `INDEX`、store時の`VALUE_PORT`、`RESTORE`、`OFFSET_HIGH`。
+- 復路: load時の`VALUE_PORT`と`RESTORE`。
+
+`OFFSET_HIGH`を1減らすたびに次のpage portalへ移動し、選択pageでversion 0と同じlow-byte
+countdownを一度だけ実行する。`RESTORE`は移動したpage数を数え、access後に逆方向へ戻る。
+このためpage portalはaccess中に別のuser codeや別regionのaccessorから再利用されないことが
+必要である。範囲外offsetは未定義動作なので、存在しないpageへ進む場合の値は保証しない。
 
 version 0の全要素を列挙するstatic accessorは256要素を前提にしているため、そのまま大きな
 aggregateへ拡張しない。version 1 accessorは16-bit logical offsetを消費するcountdown、moving-index、
