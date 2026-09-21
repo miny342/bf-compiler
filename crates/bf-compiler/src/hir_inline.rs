@@ -14,11 +14,79 @@ struct CallGraph {
     incoming: Vec<Vec<usize>>,
     outgoing: Vec<Vec<usize>>,
     reachable: crate::hir_reachability::ReachableFunctions,
+    global_use: Vec<bool>,
 }
 
 struct FrameOnlyContext<'a> {
     types: &'a TypeTable,
     globals: &'a [HirGlobal],
+}
+
+fn projection_uses_global(projection: &Projection) -> bool {
+    match projection {
+        Projection::Field { .. }
+        | Projection::Index {
+            index: ArrayIndex::Constant(_),
+            ..
+        } => false,
+        Projection::Index {
+            index: ArrayIndex::Dynamic(index),
+            ..
+        } => expression_uses_global(index),
+    }
+}
+
+fn place_uses_global(place: &HirPlace) -> bool {
+    matches!(place.root, VariableRef::Global(_))
+        || place.projections.iter().any(projection_uses_global)
+}
+
+fn expression_uses_global(expression: &HirExpression) -> bool {
+    match &expression.kind {
+        HirExpressionKind::Literal(_)
+        | HirExpressionKind::EnumVariant(_)
+        | HirExpressionKind::StringLiteral(_)
+        | HirExpressionKind::Input => false,
+        HirExpressionKind::Place(place) => place_uses_global(place),
+        HirExpressionKind::Project { base, projections } => {
+            expression_uses_global(base) || projections.iter().any(projection_uses_global)
+        }
+        HirExpressionKind::Call { arguments, .. } => arguments.iter().any(expression_uses_global),
+        HirExpressionKind::Unary { operand, .. } => expression_uses_global(operand),
+        HirExpressionKind::Binary { left, right, .. } => {
+            expression_uses_global(left) || expression_uses_global(right)
+        }
+    }
+}
+
+fn statement_uses_global(statement: &HirStatement) -> bool {
+    match &statement.kind {
+        HirStatementKind::Empty | HirStatementKind::Abort => false,
+        HirStatementKind::Block(statements) => statements.iter().any(statement_uses_global),
+        HirStatementKind::Declaration { initializer, .. } => {
+            initializer.as_ref().is_some_and(expression_uses_global)
+        }
+        HirStatementKind::Assignment { value, target, .. } => {
+            expression_uses_global(value) || place_uses_global(target)
+        }
+        HirStatementKind::Output(expression) | HirStatementKind::Return(Some(expression)) => {
+            expression_uses_global(expression)
+        }
+        HirStatementKind::Return(None) => false,
+        HirStatementKind::Call { arguments, .. } => arguments.iter().any(expression_uses_global),
+        HirStatementKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            expression_uses_global(condition)
+                || statement_uses_global(then_branch)
+                || else_branch.as_deref().is_some_and(statement_uses_global)
+        }
+        HirStatementKind::While { condition, body } => {
+            expression_uses_global(condition) || statement_uses_global(body)
+        }
+    }
 }
 
 impl CallGraph {
@@ -54,11 +122,43 @@ impl CallGraph {
             outgoing[call.caller.index()].push(site_idx);
         }
 
+        let mut global_use = hir
+            .functions
+            .iter()
+            .map(|function| statement_uses_global(&function.body))
+            .collect::<Vec<_>>();
+        if hir.globals.iter().any(|global| {
+            global
+                .initializer
+                .as_ref()
+                .is_some_and(expression_uses_global)
+        }) {
+            global_use[hir.entry.index()] = true;
+        }
+        loop {
+            let mut changed = false;
+            for caller in 0..outgoing.len() {
+                if global_use[caller]
+                    || !outgoing[caller]
+                        .iter()
+                        .any(|&site| global_use[calls[site].callee.index()])
+                {
+                    continue;
+                }
+                global_use[caller] = true;
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+
         CallGraph {
             calls,
             incoming,
             outgoing,
             reachable,
+            global_use,
         }
     }
 
@@ -1046,7 +1146,7 @@ fn inline_cell_function(
             }
         };
         if let Ok(after) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
-            && after <= before
+            && (after <= before || !graph.global_use[caller.index()])
         {
             costs[caller_index] = Some(after);
             changed = true;
@@ -1125,7 +1225,7 @@ fn inline_multiple_use_void_function(
             }
         };
         if let Ok(after) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
-            && after <= before
+            && (after <= before || !graph.global_use[caller.index()])
         {
             costs[caller_index] = Some(after);
             changed = true;
@@ -1138,8 +1238,8 @@ fn inline_multiple_use_void_function(
 
 // A larger caller frame stays allocated even outside the inlined call. In this
 // ABI that makes every later global navigation traverse extra stack chunks.
-// Only accept inlining when slot reuse absorbs the callee without increasing
-// the caller's persistent frame at either supported chunk size.
+// Global-free callers do not pay that navigation cost, so they may grow as long
+// as the resulting frame still fits the ABI layout.
 fn inline_function(
     hir: &mut HirProgram,
     graph: &CallGraph,
@@ -1201,7 +1301,7 @@ fn inline_function(
     }
     caller_function.locals.extend(locals);
     if let Ok(after) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
-        && after <= before
+        && (after <= before || !graph.global_use[caller.index()])
     {
         costs[caller.index()] = Some(after);
         return true;

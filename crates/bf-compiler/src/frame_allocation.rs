@@ -862,10 +862,30 @@ mod tests {
     }
 
     #[test]
-    fn inlining_does_not_make_large_callee_storage_permanent_in_the_caller() {
+    fn global_free_inline_may_grow_caller_storage() {
         let source = r"
             void large() { cell[100] scratch; scratch[0] = 7; output(scratch[0]); }
             void main() { large(); }
+        ";
+        let program = lower(source, true, true);
+        assert_eq!(program.functions().len(), 1);
+        assert!(
+            program
+                .function(program.main())
+                .unwrap()
+                .frame_aggregates()
+                .iter()
+                .any(|aggregate| aggregate.cells() == 100)
+        );
+        check(source, b"", &[7]);
+    }
+
+    #[test]
+    fn global_using_callers_still_reject_frame_growth() {
+        let source = r"
+            cell global;
+            void large() { cell[100] scratch; scratch[0] = 7; output(scratch[0]); }
+            void main() { large(); global = 1; output(global); }
         ";
         let program = lower(source, true, true);
         assert_eq!(program.functions().len(), 2);
@@ -876,7 +896,7 @@ mod tests {
                 .frame_aggregates()
                 .is_empty()
         );
-        check(source, b"", &[7]);
+        check(source, b"", &[7, 1]);
     }
 
     #[test]
