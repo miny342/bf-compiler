@@ -1,4 +1,4 @@
-//! Inline single-use void functions when allocation keeps the caller frame compact.
+//! Inline small functions when allocation keeps the caller frame compact.
 
 use crate::hir::*;
 
@@ -115,12 +115,15 @@ fn take_simple_last_return(body: &mut HirStatement) -> Option<Option<HirExpressi
     take_simple_last_return(last)
 }
 
-fn import_locals(caller: &HirFunction, callee: &HirFunction) -> (Vec<HirLocal>, Vec<LocalId>) {
+fn import_locals(
+    caller_locals: &[HirLocal],
+    callee: &HirFunction,
+) -> (Vec<HirLocal>, Vec<LocalId>) {
     let mut caller_import = vec![];
     let mut map = vec![LocalId::new(0); callee.locals.len()];
 
     for (i, local) in callee.locals.iter().enumerate() {
-        let new_id = LocalId::new(caller.locals.len() + i);
+        let new_id = LocalId::new(caller_locals.len() + i);
 
         let mut new_local = local.clone();
         new_local.id = new_id;
@@ -251,21 +254,20 @@ fn remap_stmt(stmt: &mut HirStatement, map: &[LocalId]) {
     }
 }
 
-fn replace_call_stmt(
+fn replace_call_stmts(
     stmt: &mut HirStatement,
     inline_fn: &HirFunction,
     map: &[LocalId],
     remapped_body: &HirStatement,
-) -> bool {
+) -> usize {
     // Semantic analysis only permits void calls in statement position.
     match &mut stmt.kind {
         HirStatementKind::Block(hir_statements) => {
+            let mut replaced = 0;
             for s in hir_statements.iter_mut() {
-                if replace_call_stmt(s, inline_fn, map, remapped_body) {
-                    return true;
-                }
+                replaced += replace_call_stmts(s, inline_fn, map, remapped_body);
             }
-            false
+            replaced
         }
 
         HirStatementKind::If {
@@ -273,19 +275,15 @@ fn replace_call_stmt(
             then_branch,
             else_branch,
         } => {
-            if replace_call_stmt(then_branch, inline_fn, map, remapped_body) {
-                return true;
+            let mut replaced = replace_call_stmts(then_branch, inline_fn, map, remapped_body);
+            if let Some(else_branch) = else_branch {
+                replaced += replace_call_stmts(else_branch, inline_fn, map, remapped_body);
             }
-            if let Some(else_branch) = else_branch
-                && replace_call_stmt(else_branch, inline_fn, map, remapped_body)
-            {
-                return true;
-            }
-            false
+            replaced
         }
 
         HirStatementKind::While { body, .. } => {
-            replace_call_stmt(body, inline_fn, map, remapped_body)
+            replace_call_stmts(body, inline_fn, map, remapped_body)
         }
 
         HirStatementKind::Call {
@@ -294,7 +292,7 @@ fn replace_call_stmt(
         } => {
             let mut statements = Vec::new();
             if *function != inline_fn.id {
-                return false;
+                return 0;
             }
 
             for (param, arg) in inline_fn.parameters.iter().zip(arguments) {
@@ -314,11 +312,510 @@ fn replace_call_stmt(
             };
 
             *stmt = insert_stmt;
-            true
+            1
         }
 
+        _ => 0,
+    }
+}
+
+fn empty_statement(statement: &HirStatement) -> bool {
+    match &statement.kind {
+        HirStatementKind::Empty => true,
+        HirStatementKind::Block(statements) => statements.iter().all(empty_statement),
         _ => false,
     }
+}
+
+fn simple_void_body(function: &HirFunction) -> Option<HirStatement> {
+    let mut body = function.body.clone();
+    if !matches!(take_simple_last_return(&mut body), Some(None)) {
+        return None;
+    }
+    Some(body)
+}
+
+fn contains_calls(statement: &HirStatement) -> bool {
+    let mut found = false;
+    crate::hir_reachability::visit_statement_calls(statement, &mut |_| found = true);
+    found
+}
+
+fn contains_control_flow(statement: &HirStatement) -> bool {
+    match &statement.kind {
+        HirStatementKind::Block(statements) => statements.iter().any(contains_control_flow),
+        HirStatementKind::If { .. } | HirStatementKind::While { .. } => true,
+        _ => false,
+    }
+}
+
+fn simple_multi_void_body(function: &HirFunction) -> Option<HirStatement> {
+    let body = simple_void_body(function)?;
+    (!contains_calls(&body) && !contains_control_flow(&body)).then_some(body)
+}
+
+fn pure_projection(projection: &Projection) -> bool {
+    match projection {
+        Projection::Field { .. }
+        | Projection::Index {
+            index: ArrayIndex::Constant(_),
+            ..
+        } => true,
+        Projection::Index {
+            index: ArrayIndex::Dynamic(index),
+            ..
+        } => pure_expression(index),
+    }
+}
+
+fn pure_place(place: &HirPlace) -> bool {
+    match place.root {
+        VariableRef::Global(_) => place.projections.iter().all(pure_projection),
+        VariableRef::Local(_) => place.projections.is_empty(),
+    }
+}
+
+fn pure_expression(expression: &HirExpression) -> bool {
+    match &expression.kind {
+        HirExpressionKind::Literal(_)
+        | HirExpressionKind::EnumVariant(_)
+        | HirExpressionKind::StringLiteral(_) => true,
+        HirExpressionKind::Place(place) => pure_place(place),
+        HirExpressionKind::Project { base, projections } => {
+            pure_expression(base) && projections.iter().all(pure_projection)
+        }
+        HirExpressionKind::Input | HirExpressionKind::Call { .. } => false,
+        HirExpressionKind::Unary { operand, .. } => pure_expression(operand),
+        HirExpressionKind::Binary { left, right, .. } => {
+            pure_expression(left) && pure_expression(right)
+        }
+    }
+}
+
+fn substitute_projection(
+    projection: &Projection,
+    parameters: &[HirParameter],
+    arguments: &[HirExpression],
+) -> Option<Projection> {
+    Some(match projection {
+        Projection::Field { cell_offset } => Projection::Field {
+            cell_offset: *cell_offset,
+        },
+        Projection::Index {
+            index,
+            length,
+            element_cells,
+        } => Projection::Index {
+            index: match index {
+                ArrayIndex::Constant(value) => ArrayIndex::Constant(*value),
+                ArrayIndex::Dynamic(index) => ArrayIndex::Dynamic(Box::new(substitute_expression(
+                    index, parameters, arguments,
+                )?)),
+            },
+            length: *length,
+            element_cells: *element_cells,
+        },
+    })
+}
+
+fn substitute_expression(
+    expression: &HirExpression,
+    parameters: &[HirParameter],
+    arguments: &[HirExpression],
+) -> Option<HirExpression> {
+    Some(match &expression.kind {
+        HirExpressionKind::Literal(_)
+        | HirExpressionKind::EnumVariant(_)
+        | HirExpressionKind::StringLiteral(_) => expression.clone(),
+        HirExpressionKind::Place(place) => {
+            if place.projections.is_empty()
+                && let VariableRef::Local(local) = place.root
+                && let Some(parameter) = parameters
+                    .iter()
+                    .position(|parameter| parameter.local == local)
+            {
+                arguments.get(parameter)?.clone()
+            } else {
+                let VariableRef::Global(_) = place.root else {
+                    return None;
+                };
+                HirExpression {
+                    kind: HirExpressionKind::Place(HirPlace {
+                        root: place.root,
+                        projections: place
+                            .projections
+                            .iter()
+                            .map(|projection| {
+                                substitute_projection(projection, parameters, arguments)
+                            })
+                            .collect::<Option<Vec<_>>>()?,
+                        ty: place.ty,
+                    }),
+                    ty: expression.ty,
+                    offset: expression.offset,
+                }
+            }
+        }
+        HirExpressionKind::Project { base, projections } => HirExpression {
+            kind: HirExpressionKind::Project {
+                base: Box::new(substitute_expression(base, parameters, arguments)?),
+                projections: projections
+                    .iter()
+                    .map(|projection| substitute_projection(projection, parameters, arguments))
+                    .collect::<Option<Vec<_>>>()?,
+            },
+            ty: expression.ty,
+            offset: expression.offset,
+        },
+        HirExpressionKind::Input | HirExpressionKind::Call { .. } => return None,
+        HirExpressionKind::Unary { operator, operand } => HirExpression {
+            kind: HirExpressionKind::Unary {
+                operator: *operator,
+                operand: Box::new(substitute_expression(operand, parameters, arguments)?),
+            },
+            ty: expression.ty,
+            offset: expression.offset,
+        },
+        HirExpressionKind::Binary {
+            operator,
+            left,
+            right,
+        } => HirExpression {
+            kind: HirExpressionKind::Binary {
+                operator: *operator,
+                left: Box::new(substitute_expression(left, parameters, arguments)?),
+                right: Box::new(substitute_expression(right, parameters, arguments)?),
+            },
+            ty: expression.ty,
+            offset: expression.offset,
+        },
+    })
+}
+
+fn simple_cell_return(program: &HirProgram, function: &HirFunction) -> Option<HirExpression> {
+    if function.signature.return_type != TypeId::CELL
+        || function
+            .signature
+            .parameter_types
+            .iter()
+            .any(|&ty| !program.types.is_scalar(ty))
+    {
+        return None;
+    }
+    let mut body = function.body.clone();
+    let Some(Some(expression)) = take_simple_last_return(&mut body) else {
+        return None;
+    };
+    if !empty_statement(&body) || !pure_expression(&expression) {
+        return None;
+    }
+    Some(expression)
+}
+
+fn replace_cell_calls_expression(
+    expression: &mut HirExpression,
+    inline_fn: &HirFunction,
+    return_expression: &HirExpression,
+) -> usize {
+    if let HirExpressionKind::Call {
+        function,
+        arguments,
+    } = &expression.kind
+        && *function == inline_fn.id
+        && arguments.len() == inline_fn.parameters.len()
+        && arguments.iter().all(pure_expression)
+        && let Some(replacement) =
+            substitute_expression(return_expression, &inline_fn.parameters, arguments)
+    {
+        *expression = replacement;
+        return 1;
+    }
+
+    match &mut expression.kind {
+        HirExpressionKind::Place(place) => {
+            replace_cell_calls_place(place, inline_fn, return_expression)
+        }
+        HirExpressionKind::Project { base, projections } => {
+            let mut replaced = replace_cell_calls_expression(base, inline_fn, return_expression);
+            for projection in projections {
+                replaced += replace_cell_calls_projection(projection, inline_fn, return_expression);
+            }
+            replaced
+        }
+        HirExpressionKind::Unary { operand, .. } => {
+            replace_cell_calls_expression(operand, inline_fn, return_expression)
+        }
+        HirExpressionKind::Binary { left, right, .. } => {
+            replace_cell_calls_expression(left, inline_fn, return_expression)
+                + replace_cell_calls_expression(right, inline_fn, return_expression)
+        }
+        HirExpressionKind::Call { arguments, .. } => arguments
+            .iter_mut()
+            .map(|argument| replace_cell_calls_expression(argument, inline_fn, return_expression))
+            .sum(),
+        HirExpressionKind::Literal(_)
+        | HirExpressionKind::EnumVariant(_)
+        | HirExpressionKind::StringLiteral(_)
+        | HirExpressionKind::Input => 0,
+    }
+}
+
+fn replace_cell_calls_projection(
+    projection: &mut Projection,
+    inline_fn: &HirFunction,
+    return_expression: &HirExpression,
+) -> usize {
+    match projection {
+        Projection::Field { .. }
+        | Projection::Index {
+            index: ArrayIndex::Constant(_),
+            ..
+        } => 0,
+        Projection::Index {
+            index: ArrayIndex::Dynamic(index),
+            ..
+        } => replace_cell_calls_expression(index, inline_fn, return_expression),
+    }
+}
+
+fn replace_cell_calls_place(
+    place: &mut HirPlace,
+    inline_fn: &HirFunction,
+    return_expression: &HirExpression,
+) -> usize {
+    place
+        .projections
+        .iter_mut()
+        .map(|projection| replace_cell_calls_projection(projection, inline_fn, return_expression))
+        .sum()
+}
+
+fn replace_cell_calls_statement(
+    statement: &mut HirStatement,
+    inline_fn: &HirFunction,
+    return_expression: &HirExpression,
+) -> usize {
+    match &mut statement.kind {
+        HirStatementKind::Empty | HirStatementKind::Abort => 0,
+        HirStatementKind::Block(statements) => statements
+            .iter_mut()
+            .map(|statement| replace_cell_calls_statement(statement, inline_fn, return_expression))
+            .sum(),
+        HirStatementKind::Declaration { initializer, .. } => initializer
+            .as_mut()
+            .map(|initializer| {
+                replace_cell_calls_expression(initializer, inline_fn, return_expression)
+            })
+            .unwrap_or(0),
+        HirStatementKind::Assignment { value, target, .. } => {
+            replace_cell_calls_expression(value, inline_fn, return_expression)
+                + replace_cell_calls_place(target, inline_fn, return_expression)
+        }
+        HirStatementKind::Output(expression) | HirStatementKind::Return(Some(expression)) => {
+            replace_cell_calls_expression(expression, inline_fn, return_expression)
+        }
+        HirStatementKind::Return(None) => 0,
+        HirStatementKind::Call { arguments, .. } => arguments
+            .iter_mut()
+            .map(|argument| replace_cell_calls_expression(argument, inline_fn, return_expression))
+            .sum(),
+        HirStatementKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            replace_cell_calls_expression(condition, inline_fn, return_expression)
+                + replace_cell_calls_statement(then_branch, inline_fn, return_expression)
+                + else_branch
+                    .as_mut()
+                    .map(|branch| {
+                        replace_cell_calls_statement(branch, inline_fn, return_expression)
+                    })
+                    .unwrap_or(0)
+        }
+        HirStatementKind::While { condition, body } => {
+            replace_cell_calls_expression(condition, inline_fn, return_expression)
+                + replace_cell_calls_statement(body, inline_fn, return_expression)
+        }
+    }
+}
+
+fn replace_all_void_calls(
+    statement: &mut HirStatement,
+    inline_fn: &HirFunction,
+    body_template: &HirStatement,
+    caller_locals: &mut Vec<HirLocal>,
+) -> usize {
+    match &mut statement.kind {
+        HirStatementKind::Block(statements) => statements
+            .iter_mut()
+            .map(|statement| {
+                replace_all_void_calls(statement, inline_fn, body_template, caller_locals)
+            })
+            .sum(),
+        HirStatementKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            replace_all_void_calls(then_branch, inline_fn, body_template, caller_locals)
+                + else_branch
+                    .as_mut()
+                    .map(|branch| {
+                        replace_all_void_calls(branch, inline_fn, body_template, caller_locals)
+                    })
+                    .unwrap_or(0)
+        }
+        HirStatementKind::While { body, .. } => {
+            replace_all_void_calls(body, inline_fn, body_template, caller_locals)
+        }
+        HirStatementKind::Call {
+            function,
+            arguments,
+        } if *function == inline_fn.id => {
+            let (locals, mapping) = import_locals(caller_locals, inline_fn);
+            let mut body = body_template.clone();
+            remap_stmt(&mut body, &mapping);
+            let mut statements = Vec::with_capacity(inline_fn.parameters.len() + 1);
+            for (parameter, argument) in inline_fn.parameters.iter().zip(arguments) {
+                statements.push(HirStatement {
+                    kind: HirStatementKind::Declaration {
+                        local: mapping[parameter.local.index()],
+                        initializer: Some(argument.clone()),
+                    },
+                    offset: statement.offset,
+                });
+            }
+            statements.push(body);
+            *statement = HirStatement {
+                kind: HirStatementKind::Block(statements),
+                offset: statement.offset,
+            };
+            caller_locals.extend(locals);
+            1
+        }
+        _ => 0,
+    }
+}
+
+fn inline_cell_function(
+    hir: &mut HirProgram,
+    reachable: &crate::hir_reachability::ReachableFunctions,
+    function: FunctionId,
+    costs: &mut [Option<usize>],
+) -> bool {
+    if function == hir.entry || !reachable.contains(function) {
+        return false;
+    }
+    let inline_fn = hir.functions[function.index()].clone();
+    let Some(return_expression) = simple_cell_return(hir, &inline_fn) else {
+        return false;
+    };
+    let mut changed = false;
+
+    for caller_index in 0..hir.functions.len() {
+        let caller = FunctionId::new(caller_index);
+        if caller == function || !reachable.contains(caller) {
+            continue;
+        }
+        let original = hir.functions[caller_index].clone();
+        let replaced = replace_cell_calls_statement(
+            &mut hir.functions[caller_index].body,
+            &inline_fn,
+            &return_expression,
+        );
+        if replaced == 0 {
+            continue;
+        }
+
+        let before = match costs[caller_index] {
+            Some(cost) => cost,
+            None => {
+                let Ok(cost) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
+                else {
+                    hir.functions[caller_index] = original;
+                    continue;
+                };
+                costs[caller_index] = Some(cost);
+                cost
+            }
+        };
+        if let Ok(after) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
+            && after <= before
+        {
+            costs[caller_index] = Some(after);
+            changed = true;
+        } else {
+            hir.functions[caller_index] = original;
+        }
+    }
+    changed
+}
+
+fn inline_multiple_use_void_function(
+    hir: &mut HirProgram,
+    graph: &CallGraph,
+    function: FunctionId,
+    costs: &mut [Option<usize>],
+) -> bool {
+    if function == hir.entry
+        || !graph.reachable.contains(function)
+        || graph.incoming[function.index()].len() <= 1
+        || graph.check_recursive(function)
+    {
+        return false;
+    }
+    let inline_fn = hir.functions[function.index()].clone();
+    let Some(body_template) = simple_multi_void_body(&inline_fn) else {
+        return false;
+    };
+    let callers = graph.incoming[function.index()]
+        .iter()
+        .map(|&site| graph.calls[site].caller)
+        .collect::<Vec<_>>();
+    let mut changed = false;
+
+    for caller in callers {
+        if caller == function || !graph.reachable.contains(caller) {
+            continue;
+        }
+        let caller_index = caller.index();
+        let original = hir.functions[caller_index].clone();
+        let replaced = {
+            let caller_function = &mut hir.functions[caller_index];
+            replace_all_void_calls(
+                &mut caller_function.body,
+                &inline_fn,
+                &body_template,
+                &mut caller_function.locals,
+            )
+        };
+        if replaced == 0 {
+            continue;
+        }
+
+        let before = match costs[caller_index] {
+            Some(cost) => cost,
+            None => {
+                let Ok(cost) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
+                else {
+                    hir.functions[caller_index] = original;
+                    continue;
+                };
+                costs[caller_index] = Some(cost);
+                cost
+            }
+        };
+        if let Ok(after) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
+            && after <= before
+        {
+            costs[caller_index] = Some(after);
+            changed = true;
+        } else {
+            hir.functions[caller_index] = original;
+        }
+    }
+    changed
 }
 
 // A larger caller frame stays allocated even outside the inlined call. In this
@@ -340,10 +837,9 @@ fn inline_function(
         return false;
     }
     let caller = graph.calls[graph.incoming[function.index()][0]].caller;
-    let mut body = hir.functions[function.index()].body.clone();
-    if !matches!(take_simple_last_return(&mut body), Some(None)) {
+    let Some(mut body) = simple_void_body(&hir.functions[function.index()]) else {
         return false;
-    }
+    };
     let before = match costs[caller.index()] {
         Some(cost) => cost,
         None => {
@@ -359,9 +855,9 @@ fn inline_function(
         .functions
         .get_disjoint_mut([caller.index(), function.index()])
         .expect("distinct valid functions");
-    let (locals, mapping) = import_locals(caller_function, callee_function);
+    let (locals, mapping) = import_locals(&caller_function.locals, callee_function);
     remap_stmt(&mut body, &mapping);
-    if !replace_call_stmt(&mut caller_function.body, callee_function, &mapping, &body) {
+    if replace_call_stmts(&mut caller_function.body, callee_function, &mapping, &body) == 0 {
         return false;
     }
     caller_function.locals.extend(locals);
@@ -384,5 +880,154 @@ pub(crate) fn inline_single_use_functions(hir: &mut HirProgram) {
         if !changed {
             break;
         }
+    }
+
+    // Cell expression inlining is deliberately a separate, single pass. Its
+    // pure-expression restriction makes substitution evaluation-order safe,
+    // and keeping it one-shot avoids recursively expanding newly exposed code.
+    let reachable = crate::hir_reachability::ReachableFunctions::analyze(hir);
+    let mut costs = vec![None; hir.functions.len()];
+    for index in 0..hir.functions.len() {
+        inline_cell_function(hir, &reachable, FunctionId::new(index), &mut costs);
+    }
+
+    // Multi-use void functions are restricted to call-free bodies. Process a
+    // snapshot of the call graph so a cloned body is never recursively
+    // rediscovered as another inline site in this pass.
+    let graph = CallGraph::build(hir);
+    let mut costs = vec![None; hir.functions.len()];
+    for index in 0..hir.functions.len() {
+        inline_multiple_use_void_function(hir, &graph, FunctionId::new(index), &mut costs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{lexer, macro_expansion, parser, semantic};
+
+    fn analyze(source: &str) -> HirProgram {
+        let ast = parser::parse(lexer::lex(source).unwrap()).unwrap();
+        let ast = macro_expansion::expand(ast).unwrap();
+        semantic::analyze(&ast).unwrap()
+    }
+
+    fn count_calls(statement: &HirStatement, function: FunctionId) -> usize {
+        let mut count = 0;
+        crate::hir_reachability::visit_statement_calls(statement, &mut |callee| {
+            if callee == function {
+                count += 1;
+            }
+        });
+        count
+    }
+
+    #[test]
+    fn inlines_multiple_call_sites_of_call_free_void_function() {
+        let mut hir = analyze(
+            "cell total; void add(cell value) { total += value; } void main() { cell value = 3; while (value != 0) { add(value); add(value); value = value - 1; } output(total); }",
+        );
+        let add = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "add")
+            .unwrap()
+            .id;
+        let main = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(count_calls(&main.body, add), 2);
+
+        inline_single_use_functions(&mut hir);
+
+        let main = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(count_calls(&main.body, add), 0);
+    }
+
+    #[test]
+    fn inlines_pure_cell_expression_at_multiple_sites() {
+        let mut hir = analyze(
+            "cell add1(cell value) { return value + 1; } void main() { cell value = 3; output(add1(value)); output(add1(value)); }",
+        );
+        let add1 = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "add1")
+            .unwrap()
+            .id;
+        let main = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(count_calls(&main.body, add1), 2);
+        let add1_function = hir
+            .functions
+            .iter()
+            .find(|function| function.id == add1)
+            .unwrap();
+        assert!(simple_cell_return(&hir, add1_function).is_some());
+
+        inline_single_use_functions(&mut hir);
+
+        let main = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(count_calls(&main.body, add1), 0);
+    }
+
+    #[test]
+    fn does_not_duplicate_side_effecting_cell_arguments() {
+        let mut hir = analyze(
+            "cell add1(cell value) { return value + 1; } void main() { output(add1(input())); }",
+        );
+        let add1 = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "add1")
+            .unwrap()
+            .id;
+
+        inline_single_use_functions(&mut hir);
+
+        let main = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(count_calls(&main.body, add1), 1);
+    }
+
+    #[test]
+    fn executes_inlined_pure_cell_expression_inside_loop() {
+        let source = "cell twice(cell value) { return value + value; } void main() { cell value = input(); while (value != 0) { output(twice(value)); value = value - 1; } }";
+        let mut hir = analyze(source);
+        inline_single_use_functions(&mut hir);
+        let (program, _) = crate::continuation_lowering::lower_hir_with_options(
+            &hir,
+            crate::ContinuationOptimizationOptions::default(),
+        )
+        .unwrap();
+        let mut input = &[3][..];
+        let mut output = Vec::new();
+        let stats = crate::run_continuations_with_io(
+            &program,
+            &mut input,
+            &mut output,
+            crate::ContinuationRunOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(output, [6, 4, 2]);
+        assert_eq!(stats.calls, 0);
+        assert_eq!(stats.returns, 0);
     }
 }

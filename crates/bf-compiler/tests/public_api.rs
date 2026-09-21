@@ -13,7 +13,7 @@ fn continuation_id(value: u16) -> ContinuationId {
 #[test]
 fn profile_artifact_preserves_brainfuck_and_separates_abi_phases() {
     let program = lower_source(
-        "cell[2] values; void helper() {} \
+        "cell[2] values; void helper() { if (input() != 0) { output('x'); } } \
          void main() { helper(); helper(); output('x'); \
          cell index; values[index] = 1; output(values[index]); }",
     )
@@ -105,7 +105,7 @@ fn unused_functions_are_removed_and_live_calls_are_remapped() {
         void main() { emit(global); emit(global); }
         void unused_after() { unused_before(); }
         void emit(cell value) { output(value); output(next(value)); }
-        cell next(cell value) { return value + 1; }
+        cell next(cell value) { cell result = value + 1; return result; }
         ",
     )
     .unwrap();
