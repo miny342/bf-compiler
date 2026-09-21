@@ -6,7 +6,8 @@ void test_parser() {
     symbol_count = 0;
     scope_depth = 0;
 
-    compile_program_stage4();
+    cell position = 0;
+    position = compile_program_stage4(position);
 
     expect_test(token_kind == TokenKind::Eof, 'A');
     expect_test(symbol_count == 0 && scope_depth == 0, 'B');

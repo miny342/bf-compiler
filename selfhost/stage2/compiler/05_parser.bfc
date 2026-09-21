@@ -1,141 +1,149 @@
 // 第1〜4段階の式、宣言、代入、制御構文を解析しながらBFを生成する。
 
-void parse_primary(cell destination) {
+cell parse_primary(cell position, cell destination) {
     check_scratch(destination);
     if (token_kind == TokenKind::Number) {
-        emit_constant(destination, token_value);
+        position = emit_constant(position, destination, token_value);
         next_token();
     } else if (token_kind == TokenKind::Identifier) {
         if (token_is_input()) {
             next_token();
             consume(TokenKind::LeftParen);
             consume(TokenKind::RightParen);
-            emit_input(destination);
+            position = emit_input(position, destination);
         } else {
             cell source = find_symbol();
             next_token();
-            emit_copy(source, destination);
+            position = emit_copy(position, source, destination);
         }
     } else if (token_kind == TokenKind::LeftParen) {
         next_token();
-        parse_expression(destination);
+        position = parse_expression(position, destination);
         consume(TokenKind::RightParen);
     } else {
         fail('B', 'C');
     }
+    return position;
 }
 
-void parse_unary(cell destination) {
+cell parse_unary(cell position, cell destination) {
     check_scratch(destination);
     if (token_kind == TokenKind::Bang) {
         next_token();
-        parse_unary(destination);
-        emit_not(destination);
+        position = parse_unary(position, destination);
+        position = emit_not(position, destination);
     } else if (token_kind == TokenKind::Plus) {
         next_token();
-        parse_unary(destination);
+        position = parse_unary(position, destination);
     } else if (token_kind == TokenKind::Minus) {
         next_token();
-        emit_clear(destination);
-        parse_unary(destination + 1);
-        emit_transfer(destination + 1, destination, 1);
+        position = emit_clear(position, destination);
+        position = parse_unary(position, destination + 1);
+        position = emit_transfer(position, destination + 1, destination, 1);
     } else {
-        parse_primary(destination);
+        position = parse_primary(position, destination);
     }
+    return position;
 }
 
-void parse_additive(cell destination) {
-    parse_unary(destination);
+cell parse_additive(cell position, cell destination) {
+    position = parse_unary(position, destination);
     while (token_kind == TokenKind::Plus || token_kind == TokenKind::Minus) {
         TokenKind operator = token_kind;
         next_token();
-        parse_unary(destination + 1);
-        emit_transfer(
+        position = parse_unary(position, destination + 1);
+        position = emit_transfer(
+            position,
             destination + 1,
             destination,
             operator == TokenKind::Minus
         );
     }
+    return position;
 }
 
-void parse_comparison(cell destination) {
-    parse_additive(destination);
+cell parse_comparison(cell position, cell destination) {
+    position = parse_additive(position, destination);
     while (token_kind == TokenKind::Less
         || token_kind == TokenKind::LessEqual
         || token_kind == TokenKind::Greater
         || token_kind == TokenKind::GreaterEqual) {
         TokenKind operator = token_kind;
         next_token();
-        parse_additive(destination + 1);
+        position = parse_additive(position, destination + 1);
         if (operator == TokenKind::Less || operator == TokenKind::GreaterEqual) {
-            emit_less(destination, destination + 1);
+            position = emit_less(position, destination, destination + 1);
         } else {
-            emit_swap(destination, destination + 1);
-            emit_less(destination, destination + 1);
+            position = emit_swap(position, destination, destination + 1);
+            position = emit_less(position, destination, destination + 1);
         }
         if (operator == TokenKind::LessEqual
             || operator == TokenKind::GreaterEqual) {
-            emit_not(destination);
+            position = emit_not(position, destination);
         }
     }
+    return position;
 }
 
-void parse_equality(cell destination) {
-    parse_comparison(destination);
+cell parse_equality(cell position, cell destination) {
+    position = parse_comparison(position, destination);
     while (token_kind == TokenKind::EqualEqual
         || token_kind == TokenKind::BangEqual) {
         TokenKind operator = token_kind;
         next_token();
-        parse_comparison(destination + 1);
-        emit_transfer(destination + 1, destination, 1);
+        position = parse_comparison(position, destination + 1);
+        position = emit_transfer(position, destination + 1, destination, 1);
         if (operator == TokenKind::EqualEqual) {
-            emit_not(destination);
+            position = emit_not(position, destination);
         } else {
-            emit_booleanize(destination);
+            position = emit_booleanize(position, destination);
         }
     }
+    return position;
 }
 
-void parse_logical_and(cell destination) {
-    parse_equality(destination);
+cell parse_logical_and(cell position, cell destination) {
+    position = parse_equality(position, destination);
     while (token_kind == TokenKind::AmpAmp) {
         next_token();
-        emit_booleanize(destination);
+        position = emit_booleanize(position, destination);
         cell guard = allocate_control_pair();
-        emit_clear(guard);
-        emit_transfer(destination, guard, 0);
-        emit_loop_open(guard);
-        emit_clear(guard);
-        parse_equality(destination);
-        emit_booleanize(destination);
-        emit_loop_close(guard);
+        position = emit_clear(position, guard);
+        position = emit_transfer(position, destination, guard, 0);
+        position = emit_loop_open(position, guard);
+        position = emit_clear(position, guard);
+        position = parse_equality(position, destination);
+        position = emit_booleanize(position, destination);
+        position = emit_loop_close(position, guard);
         release_control_pair();
     }
+    return position;
 }
 
-void parse_expression(cell destination) {
-    parse_logical_and(destination);
+cell parse_expression(cell position, cell destination) {
+    position = parse_logical_and(position, destination);
     while (token_kind == TokenKind::PipePipe) {
         next_token();
-        emit_booleanize(destination);
+        position = emit_booleanize(position, destination);
         cell guard = allocate_control_pair();
         cell otherwise = guard + 1;
-        emit_copy(destination, guard);
-        emit_constant(otherwise, 1);
-        emit_loop_open(guard);
-        emit_clear(guard);
-        emit_clear(otherwise);
-        emit_loop_close(guard);
-        emit_loop_open(otherwise);
-        emit_clear(otherwise);
-        parse_logical_and(destination);
-        emit_booleanize(destination);
-        emit_loop_close(otherwise);
+        position = emit_copy(position, destination, guard);
+        position = emit_constant(position, otherwise, 1);
+        position = emit_loop_open(position, guard);
+        position = emit_clear(position, guard);
+        position = emit_clear(position, otherwise);
+        position = emit_loop_close(position, guard);
+        position = emit_loop_open(position, otherwise);
+        position = emit_clear(position, otherwise);
+        position = parse_logical_and(position, destination);
+        position = emit_booleanize(position, destination);
+        position = emit_loop_close(position, otherwise);
         release_control_pair();
     }
+    return position;
 }
 
-void parse_declaration() {
+cell parse_declaration(cell position) {
     // The current token is "cell".
     next_token();
     if (token_kind != TokenKind::Identifier) {
@@ -146,27 +154,29 @@ void parse_declaration() {
 
     // A declaration executes zero initialization even when its tape cell was
     // previously used by a local from a completed nested block.
-    emit_clear(destination);
+    position = emit_clear(position, destination);
     if (token_kind == TokenKind::Assign) {
         next_token();
-        parse_expression(SCRATCH_BASE);
-        emit_clear(destination);
-        emit_transfer(SCRATCH_BASE, destination, 0);
+        position = parse_expression(position, SCRATCH_BASE);
+        position = emit_clear(position, destination);
+        position = emit_transfer(position, SCRATCH_BASE, destination, 0);
     }
     consume(TokenKind::Semicolon);
+    return position;
 }
 
-void parse_output_statement() {
+cell parse_output_statement(cell position) {
     next_token();
     consume(TokenKind::LeftParen);
-    parse_expression(SCRATCH_BASE);
+    position = parse_expression(position, SCRATCH_BASE);
     consume(TokenKind::RightParen);
     consume(TokenKind::Semicolon);
-    emit_move_to(SCRATCH_BASE);
+    position = emit_move_to(position, SCRATCH_BASE);
     compiler_output!('.');
+    return position;
 }
 
-void parse_assignment() {
+cell parse_assignment(cell position) {
     cell destination = find_symbol();
     next_token();
     TokenKind operator = token_kind;
@@ -176,76 +186,80 @@ void parse_assignment() {
         fail('B', 'E');
     }
     next_token();
-    parse_expression(SCRATCH_BASE);
+    position = parse_expression(position, SCRATCH_BASE);
     consume(TokenKind::Semicolon);
 
     if (operator == TokenKind::Assign) {
-        emit_clear(destination);
-        emit_transfer(SCRATCH_BASE, destination, 0);
+        position = emit_clear(position, destination);
+        position = emit_transfer(position, SCRATCH_BASE, destination, 0);
     } else {
-        emit_transfer(
+        position = emit_transfer(
+            position,
             SCRATCH_BASE,
             destination,
             operator == TokenKind::MinusAssign
         );
     }
+    return position;
 }
 
-void parse_if_statement() {
+cell parse_if_statement(cell position) {
     next_token();
     consume(TokenKind::LeftParen);
-    parse_expression(SCRATCH_BASE);
+    position = parse_expression(position, SCRATCH_BASE);
     consume(TokenKind::RightParen);
 
-    emit_booleanize(SCRATCH_BASE);
+    position = emit_booleanize(position, SCRATCH_BASE);
     cell condition = allocate_control_pair();
     cell otherwise = condition + 1;
-    emit_clear(condition);
-    emit_transfer(SCRATCH_BASE, condition, 0);
-    emit_constant(otherwise, 1);
+    position = emit_clear(position, condition);
+    position = emit_transfer(position, SCRATCH_BASE, condition, 0);
+    position = emit_constant(position, otherwise, 1);
 
-    emit_loop_open(condition);
-    emit_clear(condition);
-    emit_clear(otherwise);
-    parse_statement();
-    emit_loop_close(condition);
+    position = emit_loop_open(position, condition);
+    position = emit_clear(position, condition);
+    position = emit_clear(position, otherwise);
+    position = parse_statement(position);
+    position = emit_loop_close(position, condition);
 
-    emit_loop_open(otherwise);
-    emit_clear(otherwise);
+    position = emit_loop_open(position, otherwise);
+    position = emit_clear(position, otherwise);
     if (token_kind == TokenKind::Identifier && token_is_else()) {
         next_token();
-        parse_statement();
+        position = parse_statement(position);
     }
-    emit_loop_close(otherwise);
+    position = emit_loop_close(position, otherwise);
     release_control_pair();
+    return position;
 }
 
-void parse_while_statement() {
+cell parse_while_statement(cell position) {
     next_token();
     consume(TokenKind::LeftParen);
 
     cell running = allocate_control_pair();
     cell condition = running + 1;
-    emit_constant(running, 1);
-    emit_loop_open(running);
-    emit_clear(running);
+    position = emit_constant(position, running, 1);
+    position = emit_loop_open(position, running);
+    position = emit_clear(position, running);
 
-    parse_expression(SCRATCH_BASE);
+    position = parse_expression(position, SCRATCH_BASE);
     consume(TokenKind::RightParen);
-    emit_booleanize(SCRATCH_BASE);
-    emit_clear(condition);
-    emit_transfer(SCRATCH_BASE, condition, 0);
+    position = emit_booleanize(position, SCRATCH_BASE);
+    position = emit_clear(position, condition);
+    position = emit_transfer(position, SCRATCH_BASE, condition, 0);
 
-    emit_loop_open(condition);
-    emit_clear(condition);
-    emit_constant(running, 1);
-    parse_statement();
-    emit_loop_close(condition);
-    emit_loop_close(running);
+    position = emit_loop_open(position, condition);
+    position = emit_clear(position, condition);
+    position = emit_constant(position, running, 1);
+    position = parse_statement(position);
+    position = emit_loop_close(position, condition);
+    position = emit_loop_close(position, running);
     release_control_pair();
+    return position;
 }
 
-void parse_block() {
+cell parse_block(cell position) {
     consume(TokenKind::LeftBrace);
     if (scope_depth == MAX_SCOPES) {
         fail('B', 'F');
@@ -258,38 +272,40 @@ void parse_block() {
             fail('B', 'G');
         }
         if (token_kind == TokenKind::Identifier && token_is_cell()) {
-            parse_declaration();
+            position = parse_declaration(position);
         } else {
-            parse_statement();
+            position = parse_statement(position);
         }
     }
 
     consume(TokenKind::RightBrace);
     scope_depth -= 1;
     symbol_count = scope_base[scope_depth];
+    return position;
 }
 
-void parse_statement() {
+cell parse_statement(cell position) {
     if (token_kind == TokenKind::Semicolon) {
         next_token();
     } else if (token_kind == TokenKind::LeftBrace) {
-        parse_block();
+        position = parse_block(position);
     } else if (token_kind == TokenKind::Identifier) {
         if (token_is_output()) {
-            parse_output_statement();
+            position = parse_output_statement(position);
         } else if (token_is_if()) {
-            parse_if_statement();
+            position = parse_if_statement(position);
         } else if (token_is_while()) {
-            parse_while_statement();
+            position = parse_while_statement(position);
         } else {
-            parse_assignment();
+            position = parse_assignment(position);
         }
     } else {
         fail('B', 'H');
     }
+    return position;
 }
 
-void compile_program_stage4() {
+cell compile_program_stage4(cell position) {
     control_depth = 0;
     read_character();
     next_token();
@@ -304,9 +320,10 @@ void compile_program_stage4() {
     next_token();
     consume(TokenKind::LeftParen);
     consume(TokenKind::RightParen);
-    parse_block();
+    position = parse_block(position);
 
     if (token_kind != TokenKind::Eof) {
         fail('B', 'K');
     }
+    return position;
 }

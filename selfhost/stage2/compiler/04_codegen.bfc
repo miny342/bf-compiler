@@ -1,58 +1,67 @@
 // target Brainfuckのdata pointer位置を追跡しながらprimitiveを出力する。
 
-cell target_position;
-
-void emit_move_to(cell destination) {
-    cell tmp = target_position;
+cell emit_move_to(cell position, cell destination) {
+    cell tmp = position;
     if (tmp < destination) {
         emit_repeat_character('>', destination - tmp);
     } else if (tmp > destination) {
         emit_repeat_character('<', tmp - destination);
     }
-    target_position = destination;
+    return destination;
 }
 
-void emit_clear(cell destination) {
-    emit_move_to(destination);
+cell emit_clear(cell position, cell destination) {
+    position = emit_move_to(position, destination);
     compiler_output!('[');
     compiler_output!('-');
     compiler_output!(']');
+    return position;
 }
 
-void emit_constant(cell destination, cell value) {
-    emit_clear(destination);
+cell emit_constant(cell position, cell destination, cell value) {
+    position = emit_clear(position, destination);
     if (value <= 128) {
         emit_repeat_character('+', value);
     } else {
         emit_repeat_character('-', 0 - value);
     }
+    return position;
 }
 
-void emit_input(cell destination) {
-    emit_move_to(destination);
+cell emit_input(cell position, cell destination) {
+    position = emit_move_to(position, destination);
     compiler_output!(',');
+    return position;
 }
 
-void emit_transfer(cell source, cell destination, cell subtract) {
-    emit_move_to(source);
+cell emit_transfer(
+    cell position,
+    cell source,
+    cell destination,
+    cell subtract
+) {
+    position = emit_move_to(position, source);
     compiler_output!('[');
     compiler_output!('-');
-    emit_move_to(destination);
+    position = emit_move_to(position, destination);
     if (subtract) {
         compiler_output!('-');
     } else {
         compiler_output!('+');
     }
-    emit_move_to(source);
+    position = emit_move_to(position, source);
     compiler_output!(']');
+    return position;
 }
 
-void emit_loop_open(cell condition) {
-    emit_move_to(condition);
+cell emit_loop_open(cell position, cell condition) {
+    position = emit_move_to(position, condition);
     compiler_output!('[');
+    return position;
 }
 
-void emit_loop_close(cell condition) {
-    emit_move_to(condition);
+cell emit_loop_close(cell position, cell condition) {
+    position = emit_move_to(position, condition);
     compiler_output!(']');
+    return position;
 }

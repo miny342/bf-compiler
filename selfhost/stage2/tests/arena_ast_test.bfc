@@ -161,6 +161,7 @@ void test_ast_parser() {
     expect_test(node_value(node_c(first)) > 1, 'z');
 
     reset_capture();
-    emit_continuation_program();
+    cell position = 0;
+    position = emit_continuation_program(position);
     expect_test(capture_is_brainfuck() && test_capture_overflow, 'A');
 }

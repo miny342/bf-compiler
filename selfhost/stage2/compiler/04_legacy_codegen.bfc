@@ -1,26 +1,27 @@
 // 内部回帰testだけで使う旧第4段階direct codegen helper。
 
-void emit_copy(cell source, cell destination) {
-    emit_clear(destination);
-    emit_clear(RESTORE_CELL);
+cell emit_copy(cell position, cell source, cell destination) {
+    position = emit_clear(position, destination);
+    position = emit_clear(position, RESTORE_CELL);
 
-    emit_move_to(source);
+    position = emit_move_to(position, source);
     compiler_output!('[');
     compiler_output!('-');
-    emit_move_to(destination);
+    position = emit_move_to(position, destination);
     compiler_output!('+');
-    emit_move_to(RESTORE_CELL);
+    position = emit_move_to(position, RESTORE_CELL);
     compiler_output!('+');
-    emit_move_to(source);
+    position = emit_move_to(position, source);
     compiler_output!(']');
 
-    emit_move_to(RESTORE_CELL);
+    position = emit_move_to(position, RESTORE_CELL);
     compiler_output!('[');
     compiler_output!('-');
-    emit_move_to(source);
+    position = emit_move_to(position, source);
     compiler_output!('+');
-    emit_move_to(RESTORE_CELL);
+    position = emit_move_to(position, RESTORE_CELL);
     compiler_output!(']');
+    return position;
 }
 
 void check_scratch(cell destination) {
@@ -42,69 +43,73 @@ void release_control_pair() {
     control_depth -= 1;
 }
 
-void emit_booleanize(cell destination) {
+cell emit_booleanize(cell position, cell destination) {
     cell temporary = destination + 1;
     check_scratch(temporary);
-    emit_clear(temporary);
-    emit_loop_open(destination);
-    emit_clear(destination);
-    emit_move_to(temporary);
+    position = emit_clear(position, temporary);
+    position = emit_loop_open(position, destination);
+    position = emit_clear(position, destination);
+    position = emit_move_to(position, temporary);
     compiler_output!('+');
-    emit_loop_close(destination);
-    emit_transfer(temporary, destination, 0);
+    position = emit_loop_close(position, destination);
+    position = emit_transfer(position, temporary, destination, 0);
+    return position;
 }
 
-void emit_not(cell destination) {
+cell emit_not(cell position, cell destination) {
     cell flag = destination + 1;
     check_scratch(flag);
-    emit_constant(flag, 1);
-    emit_loop_open(destination);
-    emit_clear(destination);
-    emit_clear(flag);
-    emit_loop_close(destination);
-    emit_transfer(flag, destination, 0);
+    position = emit_constant(position, flag, 1);
+    position = emit_loop_open(position, destination);
+    position = emit_clear(position, destination);
+    position = emit_clear(position, flag);
+    position = emit_loop_close(position, destination);
+    position = emit_transfer(position, flag, destination, 0);
+    return position;
 }
 
 // `left < right`をunsigned cell比較として生成する。両operandを消費し、
 // resultをleftへ置く。mod 256の減算結果だけを見る実装では0と255を
 // 正しく比較できないため、rightを数え下げながらleftの枯渇を検出する。
-void emit_less(cell left, cell right) {
+cell emit_less(cell position, cell left, cell right) {
     cell condition = right + 1;
     cell otherwise = right + 2;
     cell result = right + 3;
     check_scratch(result);
-    emit_clear(result);
+    position = emit_clear(position, result);
 
-    emit_loop_open(right);
-    emit_move_to(right);
+    position = emit_loop_open(position, right);
+    position = emit_move_to(position, right);
     compiler_output!('-');
-    emit_copy(left, condition);
-    emit_booleanize(condition);
-    emit_constant(otherwise, 1);
+    position = emit_copy(position, left, condition);
+    position = emit_booleanize(position, condition);
+    position = emit_constant(position, otherwise, 1);
 
-    emit_loop_open(condition);
-    emit_clear(condition);
-    emit_clear(otherwise);
-    emit_move_to(left);
+    position = emit_loop_open(position, condition);
+    position = emit_clear(position, condition);
+    position = emit_clear(position, otherwise);
+    position = emit_move_to(position, left);
     compiler_output!('-');
-    emit_loop_close(condition);
+    position = emit_loop_close(position, condition);
 
-    emit_loop_open(otherwise);
-    emit_clear(otherwise);
-    emit_constant(result, 1);
-    emit_clear(right);
-    emit_loop_close(otherwise);
-    emit_loop_close(right);
+    position = emit_loop_open(position, otherwise);
+    position = emit_clear(position, otherwise);
+    position = emit_constant(position, result, 1);
+    position = emit_clear(position, right);
+    position = emit_loop_close(position, otherwise);
+    position = emit_loop_close(position, right);
 
-    emit_clear(left);
-    emit_transfer(result, left, 0);
+    position = emit_clear(position, left);
+    position = emit_transfer(position, result, left, 0);
+    return position;
 }
 
-void emit_swap(cell left, cell right) {
+cell emit_swap(cell position, cell left, cell right) {
     cell temporary = right + 1;
     check_scratch(temporary);
-    emit_clear(temporary);
-    emit_transfer(left, temporary, 0);
-    emit_transfer(right, left, 0);
-    emit_transfer(temporary, right, 0);
+    position = emit_clear(position, temporary);
+    position = emit_transfer(position, left, temporary, 0);
+    position = emit_transfer(position, right, left, 0);
+    position = emit_transfer(position, temporary, right, 0);
+    return position;
 }

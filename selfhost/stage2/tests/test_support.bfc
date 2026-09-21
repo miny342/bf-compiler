@@ -30,7 +30,6 @@ void reset_capture() {
     test_output_valid = 1;
     test_bracket_depth = 0;
     test_bracket_invalid = 0;
-    target_position = 0;
 }
 
 cell capture_is_brainfuck() {

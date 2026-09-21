@@ -1,12 +1,13 @@
 void test_codegen() {
     reset_capture();
-    emit_constant(0, 0xFF);
+    cell position = 0;
+    position = emit_constant(position, 0, 0xFF);
     expect_test(test_capture_length == 4, 'v');
     expect_test(test_capture[0] == '[' && test_capture[1] == '-'
         && test_capture[2] == ']' && test_capture[3] == '-', 'w');
 
     reset_capture();
-    emit_transfer(1, 0, 0);
+    position = emit_transfer(position, 1, 0, 0);
     expect_test(test_capture_length == 7, 'x');
     expect_test(test_capture[0] == '>' && test_capture[1] == '['
         && test_capture[2] == '-' && test_capture[3] == '<'
