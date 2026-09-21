@@ -1,5 +1,6 @@
 //! Inline small functions when allocation keeps the caller frame compact.
 
+use crate::hir;
 use crate::hir::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +14,11 @@ struct CallGraph {
     incoming: Vec<Vec<usize>>,
     outgoing: Vec<Vec<usize>>,
     reachable: crate::hir_reachability::ReachableFunctions,
+}
+
+struct FrameOnlyContext<'a> {
+    types: &'a TypeTable,
+    globals: &'a [HirGlobal],
 }
 
 impl CallGraph {
@@ -72,6 +78,36 @@ impl CallGraph {
             }
         }
         false
+    }
+
+    /// Return reachable functions in callee-before-caller order.  Inlining a
+    /// caller before its callees would copy calls that a later pass could have
+    /// removed, multiplying both HIR and continuation work.
+    fn bottom_up_order(&self) -> Vec<FunctionId> {
+        fn visit(
+            graph: &CallGraph,
+            function: FunctionId,
+            seen: &mut [bool],
+            order: &mut Vec<FunctionId>,
+        ) {
+            if std::mem::replace(&mut seen[function.index()], true) {
+                return;
+            }
+            for &site in &graph.outgoing[function.index()] {
+                visit(graph, graph.calls[site].callee, seen, order);
+            }
+            order.push(function);
+        }
+
+        let mut seen = vec![false; self.outgoing.len()];
+        let mut order = Vec::with_capacity(self.reachable.len());
+        for index in 0..self.outgoing.len() {
+            let function = FunctionId::new(index);
+            if self.reachable.contains(function) {
+                visit(self, function, &mut seen, &mut order);
+            }
+        }
+        order
     }
 }
 
@@ -255,6 +291,8 @@ fn remap_stmt(stmt: &mut HirStatement, map: &[LocalId]) {
 }
 
 fn replace_call_stmts(
+    context: &FrameOnlyContext<'_>,
+    caller_locals: &[HirLocal],
     stmt: &mut HirStatement,
     inline_fn: &HirFunction,
     map: &[LocalId],
@@ -265,7 +303,8 @@ fn replace_call_stmts(
         HirStatementKind::Block(hir_statements) => {
             let mut replaced = 0;
             for s in hir_statements.iter_mut() {
-                replaced += replace_call_stmts(s, inline_fn, map, remapped_body);
+                replaced +=
+                    replace_call_stmts(context, caller_locals, s, inline_fn, map, remapped_body);
             }
             replaced
         }
@@ -275,15 +314,29 @@ fn replace_call_stmts(
             then_branch,
             else_branch,
         } => {
-            let mut replaced = replace_call_stmts(then_branch, inline_fn, map, remapped_body);
+            let mut replaced = replace_call_stmts(
+                context,
+                caller_locals,
+                then_branch,
+                inline_fn,
+                map,
+                remapped_body,
+            );
             if let Some(else_branch) = else_branch {
-                replaced += replace_call_stmts(else_branch, inline_fn, map, remapped_body);
+                replaced += replace_call_stmts(
+                    context,
+                    caller_locals,
+                    else_branch,
+                    inline_fn,
+                    map,
+                    remapped_body,
+                );
             }
             replaced
         }
 
         HirStatementKind::While { body, .. } => {
-            replace_call_stmts(body, inline_fn, map, remapped_body)
+            replace_call_stmts(context, caller_locals, body, inline_fn, map, remapped_body)
         }
 
         HirStatementKind::Call {
@@ -291,7 +344,11 @@ fn replace_call_stmts(
             arguments,
         } => {
             let mut statements = Vec::new();
-            if *function != inline_fn.id {
+            if *function != inline_fn.id
+                || !arguments
+                    .iter()
+                    .all(|argument| frame_only_expression(context, caller_locals, argument))
+            {
                 return 0;
             }
 
@@ -319,14 +376,6 @@ fn replace_call_stmts(
     }
 }
 
-fn empty_statement(statement: &HirStatement) -> bool {
-    match &statement.kind {
-        HirStatementKind::Empty => true,
-        HirStatementKind::Block(statements) => statements.iter().all(empty_statement),
-        _ => false,
-    }
-}
-
 fn simple_void_body(function: &HirFunction) -> Option<HirStatement> {
     let mut body = function.body.clone();
     if !matches!(take_simple_last_return(&mut body), Some(None)) {
@@ -335,23 +384,153 @@ fn simple_void_body(function: &HirFunction) -> Option<HirStatement> {
     Some(body)
 }
 
-fn contains_calls(statement: &HirStatement) -> bool {
-    let mut found = false;
-    crate::hir_reachability::visit_statement_calls(statement, &mut |_| found = true);
-    found
-}
-
-fn contains_control_flow(statement: &HirStatement) -> bool {
-    match &statement.kind {
-        HirStatementKind::Block(statements) => statements.iter().any(contains_control_flow),
-        HirStatementKind::If { .. } | HirStatementKind::While { .. } => true,
-        _ => false,
+fn variable_type(
+    context: &FrameOnlyContext<'_>,
+    locals: &[HirLocal],
+    variable: VariableRef,
+) -> Option<TypeId> {
+    match variable {
+        VariableRef::Global(global) => context
+            .globals
+            .get(global.index())
+            .filter(|item| item.id == global)
+            .map(|item| item.ty),
+        VariableRef::Local(local) => locals
+            .get(local.index())
+            .filter(|item| item.id == local)
+            .map(|item| item.ty),
     }
 }
 
-fn simple_multi_void_body(function: &HirFunction) -> Option<HirStatement> {
+fn frame_only_projection(
+    context: &FrameOnlyContext<'_>,
+    locals: &[HirLocal],
+    root_type: TypeId,
+    result_type: TypeId,
+    projection: &Projection,
+) -> bool {
+    match projection {
+        Projection::Field { .. }
+        | Projection::Index {
+            index: ArrayIndex::Constant(_),
+            ..
+        } => true,
+        Projection::Index {
+            index: ArrayIndex::Dynamic(index),
+            ..
+        } => {
+            (context.types.cells(root_type) == 0 || context.types.cells(result_type) == 0)
+                && frame_only_expression(context, locals, index)
+        }
+    }
+}
+
+fn frame_only_place(context: &FrameOnlyContext<'_>, locals: &[HirLocal], place: &HirPlace) -> bool {
+    let Some(root_type) = variable_type(context, locals, place.root) else {
+        return false;
+    };
+    place
+        .projections
+        .iter()
+        .all(|projection| frame_only_projection(context, locals, root_type, place.ty, projection))
+}
+
+fn frame_only_expression(
+    context: &FrameOnlyContext<'_>,
+    locals: &[HirLocal],
+    expression: &HirExpression,
+) -> bool {
+    match &expression.kind {
+        HirExpressionKind::Literal(_)
+        | HirExpressionKind::EnumVariant(_)
+        | HirExpressionKind::StringLiteral(_)
+        | HirExpressionKind::Input => true,
+        HirExpressionKind::Place(place) => frame_only_place(context, locals, place),
+        HirExpressionKind::Project { base, projections } => {
+            let root_type = base.ty;
+            frame_only_expression(context, locals, base)
+                && projections.iter().all(|projection| {
+                    frame_only_projection(context, locals, root_type, expression.ty, projection)
+                })
+        }
+        HirExpressionKind::Call { .. } => false,
+        HirExpressionKind::Unary { operand, .. } => frame_only_expression(context, locals, operand),
+        HirExpressionKind::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            if !frame_only_expression(context, locals, left) {
+                return false;
+            }
+            let short = match (operator, hir::constant_cell_value(left)) {
+                (BinaryOperator::LogicalAnd, Some(0)) => true,
+                (BinaryOperator::LogicalOr, Some(value)) if value != 0 => true,
+                _ => false,
+            };
+            short || frame_only_expression(context, locals, right)
+        }
+    }
+}
+
+fn frame_only_statement(
+    context: &FrameOnlyContext<'_>,
+    locals: &[HirLocal],
+    statement: &HirStatement,
+) -> bool {
+    match &statement.kind {
+        HirStatementKind::Empty => true,
+        HirStatementKind::Block(statements) => statements
+            .iter()
+            .all(|statement| frame_only_statement(context, locals, statement)),
+        HirStatementKind::Declaration { initializer, .. } => initializer
+            .as_ref()
+            .is_none_or(|value| frame_only_expression(context, locals, value)),
+        HirStatementKind::Assignment { value, target, .. } => {
+            frame_only_expression(context, locals, value)
+                && frame_only_place(context, locals, target)
+        }
+        HirStatementKind::Output(value) => frame_only_expression(context, locals, value),
+        HirStatementKind::Call { .. } | HirStatementKind::Abort | HirStatementKind::Return(_) => {
+            false
+        }
+        HirStatementKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            if let Some(value) = hir::constant_cell_value(condition) {
+                return if value != 0 {
+                    frame_only_statement(context, locals, then_branch)
+                } else {
+                    else_branch
+                        .as_deref()
+                        .is_none_or(|branch| frame_only_statement(context, locals, branch))
+                };
+            }
+            frame_only_expression(context, locals, condition)
+                && frame_only_statement(context, locals, then_branch)
+                && else_branch
+                    .as_deref()
+                    .is_none_or(|branch| frame_only_statement(context, locals, branch))
+        }
+        HirStatementKind::While { condition, body } => {
+            if hir::constant_cell_value(condition) == Some(0) {
+                true
+            } else {
+                frame_only_expression(context, locals, condition)
+                    && frame_only_statement(context, locals, body)
+            }
+        }
+    }
+}
+
+fn simple_frame_void_body(
+    context: &FrameOnlyContext<'_>,
+    function: &HirFunction,
+) -> Option<HirStatement> {
     let body = simple_void_body(function)?;
-    (!contains_calls(&body) && !contains_control_flow(&body)).then_some(body)
+    frame_only_statement(context, &function.locals, &body).then_some(body)
 }
 
 fn pure_projection(projection: &Projection) -> bool {
@@ -392,10 +571,11 @@ fn pure_expression(expression: &HirExpression) -> bool {
     }
 }
 
-fn substitute_projection(
+fn substitute_projection_with_bindings(
     projection: &Projection,
     parameters: &[HirParameter],
     arguments: &[HirExpression],
+    bindings: &[Option<HirExpression>],
 ) -> Option<Projection> {
     Some(match projection {
         Projection::Field { cell_offset } => Projection::Field {
@@ -408,9 +588,9 @@ fn substitute_projection(
         } => Projection::Index {
             index: match index {
                 ArrayIndex::Constant(value) => ArrayIndex::Constant(*value),
-                ArrayIndex::Dynamic(index) => ArrayIndex::Dynamic(Box::new(substitute_expression(
-                    index, parameters, arguments,
-                )?)),
+                ArrayIndex::Dynamic(index) => ArrayIndex::Dynamic(Box::new(
+                    substitute_expression_with_bindings(index, parameters, arguments, bindings)?,
+                )),
             },
             length: *length,
             element_cells: *element_cells,
@@ -423,6 +603,15 @@ fn substitute_expression(
     parameters: &[HirParameter],
     arguments: &[HirExpression],
 ) -> Option<HirExpression> {
+    substitute_expression_with_bindings(expression, parameters, arguments, &[])
+}
+
+fn substitute_expression_with_bindings(
+    expression: &HirExpression,
+    parameters: &[HirParameter],
+    arguments: &[HirExpression],
+    bindings: &[Option<HirExpression>],
+) -> Option<HirExpression> {
     Some(match &expression.kind {
         HirExpressionKind::Literal(_)
         | HirExpressionKind::EnumVariant(_)
@@ -434,7 +623,15 @@ fn substitute_expression(
                     .iter()
                     .position(|parameter| parameter.local == local)
             {
-                arguments.get(parameter)?.clone()
+                arguments
+                    .get(parameter)
+                    .cloned()
+                    .unwrap_or_else(|| expression.clone())
+            } else if place.projections.is_empty()
+                && let VariableRef::Local(local) = place.root
+                && let Some(Some(binding)) = bindings.get(local.index())
+            {
+                binding.clone()
             } else {
                 let VariableRef::Global(_) = place.root else {
                     return None;
@@ -446,7 +643,9 @@ fn substitute_expression(
                             .projections
                             .iter()
                             .map(|projection| {
-                                substitute_projection(projection, parameters, arguments)
+                                substitute_projection_with_bindings(
+                                    projection, parameters, arguments, bindings,
+                                )
                             })
                             .collect::<Option<Vec<_>>>()?,
                         ty: place.ty,
@@ -458,20 +657,46 @@ fn substitute_expression(
         }
         HirExpressionKind::Project { base, projections } => HirExpression {
             kind: HirExpressionKind::Project {
-                base: Box::new(substitute_expression(base, parameters, arguments)?),
+                base: Box::new(substitute_expression_with_bindings(
+                    base, parameters, arguments, bindings,
+                )?),
                 projections: projections
                     .iter()
-                    .map(|projection| substitute_projection(projection, parameters, arguments))
+                    .map(|projection| {
+                        substitute_projection_with_bindings(
+                            projection, parameters, arguments, bindings,
+                        )
+                    })
                     .collect::<Option<Vec<_>>>()?,
             },
             ty: expression.ty,
             offset: expression.offset,
         },
-        HirExpressionKind::Input | HirExpressionKind::Call { .. } => return None,
+        HirExpressionKind::Input => expression.clone(),
+        HirExpressionKind::Call {
+            function,
+            arguments: call_arguments,
+        } => HirExpression {
+            kind: HirExpressionKind::Call {
+                function: *function,
+                arguments: call_arguments
+                    .iter()
+                    .map(|argument| {
+                        substitute_expression_with_bindings(
+                            argument, parameters, arguments, bindings,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            },
+            ty: expression.ty,
+            offset: expression.offset,
+        },
         HirExpressionKind::Unary { operator, operand } => HirExpression {
             kind: HirExpressionKind::Unary {
                 operator: *operator,
-                operand: Box::new(substitute_expression(operand, parameters, arguments)?),
+                operand: Box::new(substitute_expression_with_bindings(
+                    operand, parameters, arguments, bindings,
+                )?),
             },
             ty: expression.ty,
             offset: expression.offset,
@@ -483,8 +708,12 @@ fn substitute_expression(
         } => HirExpression {
             kind: HirExpressionKind::Binary {
                 operator: *operator,
-                left: Box::new(substitute_expression(left, parameters, arguments)?),
-                right: Box::new(substitute_expression(right, parameters, arguments)?),
+                left: Box::new(substitute_expression_with_bindings(
+                    left, parameters, arguments, bindings,
+                )?),
+                right: Box::new(substitute_expression_with_bindings(
+                    right, parameters, arguments, bindings,
+                )?),
             },
             ty: expression.ty,
             offset: expression.offset,
@@ -492,24 +721,60 @@ fn substitute_expression(
     })
 }
 
-fn simple_cell_return(program: &HirProgram, function: &HirFunction) -> Option<HirExpression> {
+fn simple_cell_return(
+    context: &FrameOnlyContext<'_>,
+    function: &HirFunction,
+) -> Option<HirExpression> {
     if function.signature.return_type != TypeId::CELL
         || function
             .signature
             .parameter_types
             .iter()
-            .any(|&ty| !program.types.is_scalar(ty))
+            .any(|&ty| !context.types.is_scalar(ty))
     {
         return None;
     }
-    let mut body = function.body.clone();
-    let Some(Some(expression)) = take_simple_last_return(&mut body) else {
-        return None;
+    let (statements, final_expression) = match &function.body.kind {
+        HirStatementKind::Return(Some(expression)) => (&[][..], expression),
+        HirStatementKind::Block(statements) => {
+            let (last, prefix) = statements.split_last()?;
+            let HirStatementKind::Return(Some(expression)) = &last.kind else {
+                return None;
+            };
+            (prefix, expression)
+        }
+        _ => return None,
     };
-    if !empty_statement(&body) || !pure_expression(&expression) {
-        return None;
+
+    let mut bindings = vec![None; function.locals.len()];
+    for statement in statements {
+        let HirStatementKind::Declaration {
+            local,
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            return None;
+        };
+        let Some(local_info) = function.locals.get(local.index()) else {
+            return None;
+        };
+        if !context.types.is_scalar(local_info.ty) || !pure_expression(initializer) {
+            return None;
+        }
+        bindings[local.index()] = Some(substitute_expression_with_bindings(
+            initializer,
+            &function.parameters,
+            &[],
+            &bindings,
+        )?);
     }
-    Some(expression)
+    let result = substitute_expression_with_bindings(
+        final_expression,
+        &function.parameters,
+        &[],
+        &bindings,
+    )?;
+    frame_only_expression(context, &function.locals, &result).then_some(result)
 }
 
 fn replace_cell_calls_expression(
@@ -641,6 +906,8 @@ fn replace_cell_calls_statement(
 }
 
 fn replace_all_void_calls(
+    context: &FrameOnlyContext<'_>,
+    context_locals: &[HirLocal],
     statement: &mut HirStatement,
     inline_fn: &HirFunction,
     body_template: &HirStatement,
@@ -650,7 +917,14 @@ fn replace_all_void_calls(
         HirStatementKind::Block(statements) => statements
             .iter_mut()
             .map(|statement| {
-                replace_all_void_calls(statement, inline_fn, body_template, caller_locals)
+                replace_all_void_calls(
+                    context,
+                    context_locals,
+                    statement,
+                    inline_fn,
+                    body_template,
+                    caller_locals,
+                )
             })
             .sum(),
         HirStatementKind::If {
@@ -658,21 +932,43 @@ fn replace_all_void_calls(
             else_branch,
             ..
         } => {
-            replace_all_void_calls(then_branch, inline_fn, body_template, caller_locals)
-                + else_branch
-                    .as_mut()
-                    .map(|branch| {
-                        replace_all_void_calls(branch, inline_fn, body_template, caller_locals)
-                    })
-                    .unwrap_or(0)
+            replace_all_void_calls(
+                context,
+                context_locals,
+                then_branch,
+                inline_fn,
+                body_template,
+                caller_locals,
+            ) + else_branch
+                .as_mut()
+                .map(|branch| {
+                    replace_all_void_calls(
+                        context,
+                        context_locals,
+                        branch,
+                        inline_fn,
+                        body_template,
+                        caller_locals,
+                    )
+                })
+                .unwrap_or(0)
         }
-        HirStatementKind::While { body, .. } => {
-            replace_all_void_calls(body, inline_fn, body_template, caller_locals)
-        }
+        HirStatementKind::While { body, .. } => replace_all_void_calls(
+            context,
+            context_locals,
+            body,
+            inline_fn,
+            body_template,
+            caller_locals,
+        ),
         HirStatementKind::Call {
             function,
             arguments,
-        } if *function == inline_fn.id => {
+        } if *function == inline_fn.id
+            && arguments
+                .iter()
+                .all(|argument| frame_only_expression(context, context_locals, argument)) =>
+        {
             let (locals, mapping) = import_locals(caller_locals, inline_fn);
             let mut body = body_template.clone();
             remap_stmt(&mut body, &mapping);
@@ -700,22 +996,31 @@ fn replace_all_void_calls(
 
 fn inline_cell_function(
     hir: &mut HirProgram,
-    reachable: &crate::hir_reachability::ReachableFunctions,
+    graph: &CallGraph,
     function: FunctionId,
     costs: &mut [Option<usize>],
 ) -> bool {
-    if function == hir.entry || !reachable.contains(function) {
+    if function == hir.entry
+        || !graph.reachable.contains(function)
+        || graph.check_recursive(function)
+    {
         return false;
     }
     let inline_fn = hir.functions[function.index()].clone();
-    let Some(return_expression) = simple_cell_return(hir, &inline_fn) else {
+    let Some(return_expression) = ({
+        let context = FrameOnlyContext {
+            types: &hir.types,
+            globals: &hir.globals,
+        };
+        simple_cell_return(&context, &inline_fn)
+    }) else {
         return false;
     };
     let mut changed = false;
 
     for caller_index in 0..hir.functions.len() {
         let caller = FunctionId::new(caller_index);
-        if caller == function || !reachable.contains(caller) {
+        if caller == function || !graph.reachable.contains(caller) {
             continue;
         }
         let original = hir.functions[caller_index].clone();
@@ -766,7 +1071,13 @@ fn inline_multiple_use_void_function(
         return false;
     }
     let inline_fn = hir.functions[function.index()].clone();
-    let Some(body_template) = simple_multi_void_body(&inline_fn) else {
+    let Some(body_template) = ({
+        let context = FrameOnlyContext {
+            types: &hir.types,
+            globals: &hir.globals,
+        };
+        simple_frame_void_body(&context, &inline_fn)
+    }) else {
         return false;
     };
     let callers = graph.incoming[function.index()]
@@ -782,8 +1093,15 @@ fn inline_multiple_use_void_function(
         let caller_index = caller.index();
         let original = hir.functions[caller_index].clone();
         let replaced = {
+            let context = FrameOnlyContext {
+                types: &hir.types,
+                globals: &hir.globals,
+            };
             let caller_function = &mut hir.functions[caller_index];
+            let context_locals = caller_function.locals.clone();
             replace_all_void_calls(
+                &context,
+                &context_locals,
                 &mut caller_function.body,
                 &inline_fn,
                 &body_template,
@@ -837,7 +1155,13 @@ fn inline_function(
         return false;
     }
     let caller = graph.calls[graph.incoming[function.index()][0]].caller;
-    let Some(mut body) = simple_void_body(&hir.functions[function.index()]) else {
+    let Some(mut body) = ({
+        let context = FrameOnlyContext {
+            types: &hir.types,
+            globals: &hir.globals,
+        };
+        simple_frame_void_body(&context, &hir.functions[function.index()])
+    }) else {
         return false;
     };
     let before = match costs[caller.index()] {
@@ -855,9 +1179,24 @@ fn inline_function(
         .functions
         .get_disjoint_mut([caller.index(), function.index()])
         .expect("distinct valid functions");
+    let context_locals = caller_function.locals.clone();
     let (locals, mapping) = import_locals(&caller_function.locals, callee_function);
     remap_stmt(&mut body, &mapping);
-    if replace_call_stmts(&mut caller_function.body, callee_function, &mapping, &body) == 0 {
+    let replaced = {
+        let context = FrameOnlyContext {
+            types: &hir.types,
+            globals: &hir.globals,
+        };
+        replace_call_stmts(
+            &context,
+            &context_locals,
+            &mut caller_function.body,
+            callee_function,
+            &mapping,
+            &body,
+        )
+    };
+    if replaced == 0 {
         return false;
     }
     caller_function.locals.extend(locals);
@@ -872,32 +1211,18 @@ fn inline_function(
 }
 
 pub(crate) fn inline_single_use_functions(hir: &mut HirProgram) {
-    let mut costs = vec![None; hir.functions.len()];
-    loop {
-        let graph = CallGraph::build(hir);
-        let changed = (0..hir.functions.len())
-            .any(|index| inline_function(hir, &graph, FunctionId::new(index), &mut costs));
-        if !changed {
-            break;
-        }
-    }
-
-    // Cell expression inlining is deliberately a separate, single pass. Its
-    // pure-expression restriction makes substitution evaluation-order safe,
-    // and keeping it one-shot avoids recursively expanding newly exposed code.
-    let reachable = crate::hir_reachability::ReachableFunctions::analyze(hir);
-    let mut costs = vec![None; hir.functions.len()];
-    for index in 0..hir.functions.len() {
-        inline_cell_function(hir, &reachable, FunctionId::new(index), &mut costs);
-    }
-
-    // Multi-use void functions are restricted to call-free bodies. Process a
-    // snapshot of the call graph so a cloned body is never recursively
-    // rediscovered as another inline site in this pass.
+    // Visit callees before callers so a frame-only caller can become inlineable
+    // after its nested calls disappear. The graph is intentionally kept as a
+    // snapshot: each callee is handled once, after all of its dependencies.
     let graph = CallGraph::build(hir);
-    let mut costs = vec![None; hir.functions.len()];
-    for index in 0..hir.functions.len() {
-        inline_multiple_use_void_function(hir, &graph, FunctionId::new(index), &mut costs);
+    let order = graph.bottom_up_order();
+    let mut cell_costs = vec![None; hir.functions.len()];
+    let mut single_use_costs = vec![None; hir.functions.len()];
+    let mut multiple_use_costs = vec![None; hir.functions.len()];
+    for function in order {
+        inline_cell_function(hir, &graph, function, &mut cell_costs);
+        inline_function(hir, &graph, function, &mut single_use_costs);
+        inline_multiple_use_void_function(hir, &graph, function, &mut multiple_use_costs);
     }
 }
 
@@ -925,7 +1250,7 @@ mod tests {
     #[test]
     fn inlines_multiple_call_sites_of_call_free_void_function() {
         let mut hir = analyze(
-            "cell total; void add(cell value) { total += value; } void main() { cell value = 3; while (value != 0) { add(value); add(value); value = value - 1; } output(total); }",
+            "cell total; void add(cell value) { if (value != 0) { total += value; } } void main() { cell value = 3; while (value != 0) { add(value); add(value); value = value - 1; } output(total); }",
         );
         let add = hir
             .functions
@@ -951,9 +1276,87 @@ mod tests {
     }
 
     #[test]
+    fn inlines_multiple_use_void_functions_with_nested_side_effects() {
+        let mut hir = analyze(
+            "cell total; void bump(cell value) { total += value; } void wrapper(cell value) { bump(value); } void main() { wrapper(1); wrapper(2); output(total); }",
+        );
+        let wrapper = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "wrapper")
+            .unwrap()
+            .id;
+
+        inline_single_use_functions(&mut hir);
+
+        let main = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(count_calls(&main.body, wrapper), 0);
+        let (program, _) = crate::continuation_lowering::lower_hir_with_options(
+            &hir,
+            crate::ContinuationOptimizationOptions::default(),
+        )
+        .unwrap();
+        let mut input = &[][..];
+        let mut output = Vec::new();
+        let stats = crate::run_continuations_with_io(
+            &program,
+            &mut input,
+            &mut output,
+            crate::ContinuationRunOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(output, [3]);
+        assert_eq!(stats.calls, 0);
+    }
+
+    #[test]
+    fn inlines_deep_frame_only_calls_before_outer_control_flow() {
+        let mut hir = analyze(
+            "cell total; void bump(cell value) { total += value; } void wrapper(cell value) { if (value != 0) { bump(value); } } void main() { wrapper(1); wrapper(2); output(total); }",
+        );
+        let wrapper = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "wrapper")
+            .unwrap()
+            .id;
+
+        inline_single_use_functions(&mut hir);
+
+        let main = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(count_calls(&main.body, wrapper), 0);
+        let (program, _) = crate::continuation_lowering::lower_hir_with_options(
+            &hir,
+            crate::ContinuationOptimizationOptions::default(),
+        )
+        .unwrap();
+        let mut input = &[][..];
+        let mut output = Vec::new();
+        let stats = crate::run_continuations_with_io(
+            &program,
+            &mut input,
+            &mut output,
+            crate::ContinuationRunOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(output, [3]);
+        assert_eq!(stats.calls, 0);
+    }
+
+    #[test]
     fn inlines_pure_cell_expression_at_multiple_sites() {
         let mut hir = analyze(
-            "cell add1(cell value) { return value + 1; } void main() { cell value = 3; output(add1(value)); output(add1(value)); }",
+            "cell add1(cell value) { cell result = value + 1; return result; } void main() { cell value = 3; output(add1(value)); output(add1(value)); }",
         );
         let add1 = hir
             .functions
@@ -972,7 +1375,11 @@ mod tests {
             .iter()
             .find(|function| function.id == add1)
             .unwrap();
-        assert!(simple_cell_return(&hir, add1_function).is_some());
+        let context = FrameOnlyContext {
+            types: &hir.types,
+            globals: &hir.globals,
+        };
+        assert!(simple_cell_return(&context, add1_function).is_some());
 
         inline_single_use_functions(&mut hir);
 
@@ -1007,8 +1414,47 @@ mod tests {
     }
 
     #[test]
+    fn preserves_side_effects_in_an_inlined_cell_return_expression() {
+        let mut hir = analyze(
+            "cell add_input(cell value) { return value + input(); } void main() { output(add_input(3)); }",
+        );
+        let add_input = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "add_input")
+            .unwrap()
+            .id;
+
+        inline_single_use_functions(&mut hir);
+
+        let main = hir
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(count_calls(&main.body, add_input), 0);
+        let (program, _) = crate::continuation_lowering::lower_hir_with_options(
+            &hir,
+            crate::ContinuationOptimizationOptions::default(),
+        )
+        .unwrap();
+        let mut input = &[4][..];
+        let mut output = Vec::new();
+        let stats = crate::run_continuations_with_io(
+            &program,
+            &mut input,
+            &mut output,
+            crate::ContinuationRunOptions::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(output, [7]);
+        assert_eq!(stats.input_operations, 1);
+    }
+
+    #[test]
     fn executes_inlined_pure_cell_expression_inside_loop() {
-        let source = "cell twice(cell value) { return value + value; } void main() { cell value = input(); while (value != 0) { output(twice(value)); value = value - 1; } }";
+        let source = "cell twice(cell value) { cell result = value + value; return result; } void main() { cell value = input(); while (value != 0) { output(twice(value)); value = value - 1; } }";
         let mut hir = analyze(source);
         inline_single_use_functions(&mut hir);
         let (program, _) = crate::continuation_lowering::lower_hir_with_options(

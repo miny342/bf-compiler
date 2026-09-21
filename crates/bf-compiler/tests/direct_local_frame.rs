@@ -9,7 +9,7 @@ fn has_minimal_output_loop(instructions: &[BfInstruction]) -> bool {
 }
 
 #[test]
-fn repeat_256_has_two_slots_and_a_minimal_bf_loop_without_inlining() {
+fn repeat_256_frame_only_bodies_can_be_inlined() {
     let source = "void emit_repeat_256(cell character) {
         cell count; output(character); count=1;
         while(count != 0) { output(character); count+=1; }
@@ -24,10 +24,11 @@ fn repeat_256_has_two_slots_and_a_minimal_bf_loop_without_inlining() {
             },
         )
         .unwrap();
+        assert_eq!(program.functions().len(), 1);
         let function = program
             .functions()
             .iter()
-            .find(|f| f.name() == Some("emit_repeat_256"))
+            .find(|f| f.name() == Some("main"))
             .unwrap();
         assert_eq!(
             function.frame_slots(),
@@ -40,10 +41,7 @@ fn repeat_256_has_two_slots_and_a_minimal_bf_loop_without_inlining() {
             .filter(|c| c.function() == function.id())
             .collect();
         assert_eq!(nodes.len(), 1);
-        assert!(matches!(
-            nodes[0].terminator(),
-            Terminator::Return { value: None }
-        ));
+        assert!(matches!(nodes[0].terminator(), Terminator::Halt));
         let loops: Vec<_> = nodes[0]
             .body()
             .iter()
@@ -55,11 +53,12 @@ fn repeat_256_has_two_slots_and_a_minimal_bf_loop_without_inlining() {
                 }
             })
             .collect();
-        assert_eq!(loops.len(), 1);
-        let (condition, body) = loops[0];
-        assert!(
-            matches!(body.as_slice(), [FrameInstruction::Output { src }, FrameInstruction::AddConst { dst, value: 1 }] if dst == condition && src != dst)
-        );
+        assert_eq!(loops.len(), 2);
+        for (condition, body) in loops {
+            assert!(
+                matches!(body.as_slice(), [FrameInstruction::Output { src }, FrameInstruction::AddConst { dst, value: 1 }] if dst == condition && src != dst)
+            );
+        }
         assert!(!nodes[0].body().iter().any(|i| matches!(
             i,
             FrameInstruction::Branch { .. } | FrameInstruction::Copy { .. }

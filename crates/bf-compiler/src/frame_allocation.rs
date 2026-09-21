@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn inlining_preserves_argument_order_shadowing_and_repeated_initialization() {
+    fn non_frame_arguments_keep_void_calls_out_of_inline() {
         let source = r"
             cell counter;
             cell next() { counter += 1; return counter; }
@@ -857,7 +857,7 @@ mod tests {
             }
         ";
         assert_eq!(lower(source, false, true).functions().len(), 3);
-        assert_eq!(lower(source, true, true).functions().len(), 2);
+        assert_eq!(lower(source, true, true).functions().len(), 3);
         check(source, b"", &[0, 1, 2, 0, 0, 3, 4, 0, 0]);
     }
 

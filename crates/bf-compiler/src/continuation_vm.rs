@@ -1645,7 +1645,7 @@ mod tests {
 
     #[test]
     fn executes_cells_calls_and_control_flow() {
-        let source = "cell twice(cell value) { cell result = value + value; return result; } void main() { cell value = input(); while (value != 0) { output(twice(value)); value = value - 1; } }";
+        let source = "cell marker; cell twice(cell value) { cell result = value + value; marker += 1; return result; } void main() { cell value = input(); while (value != 0) { output(twice(value)); value = value - 1; } }";
         let (output, stats) = execute(source, &[3]);
         assert_eq!(output, [6, 4, 2]);
         assert_eq!(stats.calls, 3);
@@ -1684,7 +1684,7 @@ mod tests {
     fn optionally_collects_hot_continuation_transitions() {
         // A scalar call keeps dispatcher edges even with structured HIR loops.
         let (program, _) = crate::lower_source_with_options(
-            "cell decrement(cell value) { cell result = value - 1; return result; } void main() { cell value = input(); while (value != 0) { output(value); value = decrement(value); } }",
+            "cell marker; cell decrement(cell value) { cell result = value - 1; marker += 1; return result; } void main() { cell value = input(); while (value != 0) { output(value); value = decrement(value); } }",
             crate::ContinuationOptimizationOptions {
                 structure_local_control_flow: false,
                 ..Default::default()
@@ -1711,7 +1711,7 @@ mod tests {
 
     #[test]
     fn transition_collection_does_not_change_execution_counters() {
-        let source = "cell decrement(cell value) { cell result = value - 1; return result; } void main() { cell value = input(); while (value != 0) { output(value); value = decrement(value); } }";
+        let source = "cell marker; cell decrement(cell value) { cell result = value - 1; marker += 1; return result; } void main() { cell value = input(); while (value != 0) { output(value); value = decrement(value); } }";
         let (program, _) = crate::lower_source_with_options(
             source,
             crate::ContinuationOptimizationOptions {
