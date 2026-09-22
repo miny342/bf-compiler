@@ -89,9 +89,8 @@ pub(crate) fn lower_hir_with_options(
     program: &HirProgram,
     options: ContinuationOptimizationOptions,
 ) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationLoweringError> {
-    let lowered = lower_hir_with_slot_reuse(program, true)?;
-    crate::continuation_optimizer::optimize_continuations_with_options(&lowered, options)
-        .map_err(Into::into)
+    let lowered = lower_hir_unallocated(program)?;
+    crate::continuation_pipeline::finish(&lowered, options).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -101,9 +100,19 @@ pub(crate) fn lower_hir_without_slot_reuse(
     lower_hir_with_slot_reuse(program, false)
 }
 
+#[cfg(test)]
 fn lower_hir_with_slot_reuse(
     program: &HirProgram,
     reuse_slots: bool,
+) -> Result<ContinuationProgram, ContinuationLoweringError> {
+    let lowered = lower_hir_unallocated(program)?;
+    crate::continuation_pipeline::allocate(&lowered, reuse_slots).map_err(Into::into)
+}
+
+/// Lower all reachable functions before any frame fusion or allocation. Each
+/// function's slots and aggregates still have their independent virtual IDs.
+pub(crate) fn lower_hir_unallocated(
+    program: &HirProgram,
 ) -> Result<ContinuationProgram, ContinuationLoweringError> {
     validate_program_shape(program)?;
 
@@ -155,15 +164,8 @@ fn lower_hir_with_slot_reuse(
         let descriptor = lowerer
             .descriptor(lowered.entry)?
             .with_name(function.name.clone());
-        let (descriptor, fused) =
-            crate::frame_fusion::fuse_function(descriptor, lowerer.continuations);
-        let (descriptor, allocated) = if reuse_slots {
-            crate::frame_allocation::allocate(descriptor, fused)
-        } else {
-            (descriptor, fused)
-        };
         functions.push(descriptor);
-        continuations.extend(allocated);
+        continuations.extend(lowerer.continuations);
     }
     let entry = function_map[program.entry.index()].expect("main must be reachable");
     let source_files = program

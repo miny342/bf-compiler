@@ -196,7 +196,7 @@ ID 65,535、255／256 terminal、soft SCC、展開上限を含む。加えて32�
 各3通りの入力で実行し、self edge・nested backedge・複数入口の cycle を検証する。
 terminal のない閉じた SCC も BF 出力可能であることを確認する。
 
-CIR inline、virtual inbox／outbox、allocation の pipeline 移動、展開上限を超える graph の
+CIR inline、virtual inbox／outbox、展開上限を超える graph の
 直接実行は後続作業。
 公開機能として有効化する前に、frame cost と追加 scratch を減らす方式の評価が必要になる。
 
@@ -205,3 +205,12 @@ format／diff check、`cargo clippy --workspace --all-targets -- -D warnings`、
 CIR viewer の production build は成功。
 既存の5警告も修正した。aggregate clear の重複した長さ引数を除去し、
 profile site lookup と lowering の分岐、HIR inline の Option／cost 走査を整理している。
+
+## Allocation 前の program pipeline
+
+2026-09-23。`lower_hir_unallocated` で全 reachable 関数を virtual storage のまま生成し、
+`continuation_pipeline::finish` で CFG cleanup／local reconstruction → 関数ごとの frame fusion
+→ frame allocation → 保守的な empty Goto cleanup の順に処理するよう変更した。
+公開 CIR optimization API は allocated CIR に対しても従来どおり使用できる。
+本段階で上記 fixture の dispatcher 訪問・frame・raw／RLE 命令数はすべて維持した。
+全329テストと Clippy を確認済み。CIR inline と virtual result の実装はこの pipeline 上で続ける。

@@ -22,7 +22,10 @@ source/CLIの本線:
     → AST
     → macro expansion
     → typed HIR / frame-aware single-use inlining
-    → Continuation IR / liveness-based frame allocation
+    → 全 reachable function の unallocated Continuation IR
+    → CFG cleanup / local reconstruction
+    → function ごとの frame fusion / liveness-based frame allocation
+    → allocation 後の conservative CFG cleanup
     → ABI layout / portal planning / BF template selection
     → BF IR（内部ではprovenance付きvariantも使用）
     → BF peephole optimization
@@ -237,7 +240,9 @@ HIRからのloweringは、sourceの`if`、`while`、短絡論理演算、call、
 
 source frontendでは、HIRの単一呼び出しvoid関数を、再帰・途中return・caller frameの増加がない場合に
 inline化する。mainとglobal initializerから到達しない関数はloweringで除去する。
-各関数をContinuationへloweringした後に`frame_allocation`を実行し、再利用後のdescriptorと命令列を
+全 reachable 関数を virtual slot の Continuation に lowering し、`continuation_pipeline` が
+CFG cleanup／local reconstruction の後で関数ごとに `frame_fusion` と `frame_allocation` を実行する。
+最後は空の Goto の threading だけを行い、再利用後の descriptor と命令列を
 `ContinuationProgram` constructorで検証する。これはsource frontend内のpassであり、公開APIで手動構築した
 Continuation IRや`--cir-input`のalias-preserving flat frameには自動適用しない。
 詳細と計測結果は[FRAME_ALLOCATION.md](FRAME_ALLOCATION.md)に記録する。

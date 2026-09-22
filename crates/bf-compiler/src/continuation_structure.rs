@@ -1,4 +1,4 @@
-//! Region reduction on allocated source/CIR continuations.
+//! Region reduction on source/CIR continuations with virtual or allocated slots.
 //!
 //! Only single-entry regions are consumed. Calls, portal requests and terminal
 //! exits remain explicit; no operation crosses one of those boundaries.
@@ -22,8 +22,9 @@ pub struct LocalStructureStats {
     pub scratch_slots: usize,
 }
 
-/// Reduce local regions after allocation. The final cleanup does not run 2c
-/// again or duplicate branch bodies.
+/// Reduce local regions. Source compilation runs this before allocation, while
+/// callers of the public CIR API may also pass allocated storage. The final
+/// cleanup does not duplicate branch bodies.
 pub fn structure_local_control_flow(
     program: &ContinuationProgram,
 ) -> Result<(ContinuationProgram, LocalStructureStats), ContinuationIrError> {
