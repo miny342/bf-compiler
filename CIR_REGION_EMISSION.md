@@ -154,6 +154,29 @@ nested optional Call loop が18→21訪問になる。B1 はこれらの soft ed
 訪問数が増えない。B1 の既定有効化は別途行い、この移行では dispatcher 削減能力を優先する。
 上の soft cycle 表は通常 CFG 化後の値へ更新済み。
 
+## RLE 実行命令数
+
+2026-09-23、通常 CFG 化済みの `d654320` を基準に RLE の測定も追加した。
+以後の `region_probe` は raw BF／RLE の両カウンタと selector の内訳を出力する。
+RLE は隣接する同一の `+`／`-`／`<`／`>` を1命令にまとめた場合の動的実行数であり、
+ファイルの圧縮 byte 数や interpreter の native optimization 実行数ではない。
+profile 有無で raw／RLE の総数が一致することも検証する。
+
+| Fixture | 全 program RLE B0→B1 | B1 selector RLE |
+|---|---:|---:|
+| 2-call loop | 4,548→3,975 | 172 |
+| both-arm if | 1,876→1,505 | 69 |
+| global/frame growth | 51,850→60,033 | 23 |
+| optional Call | 4,485→3,211 | 126 |
+| nested optional Call | 5,503→3,253 | 126 |
+| aggregate portal | 12,046→9,799 | 80 |
+| single-call loop | 2,821→2,398 | 126 |
+| local arm | 732→453 | 23 |
+| Call arm | 1,227→991 | 68 |
+| inverted loop | 1,665→1,368 | 80 |
+| nested prefix／suffix | 2,870→2,447 | 126 |
+| aggregate local arm | 922→644 | 23 |
+
 ## 検証方法と制限
 
 region emission の16テストでは、未融合 CIR VM を意味の基準にして、B0／B1 の生成 BF の出力、入力消費、

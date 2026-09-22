@@ -8,7 +8,9 @@ struct Measurement {
     hidden_visits: u64,
     bytes: usize,
     instructions: u64,
+    rle_instructions: u64,
     selector_instructions: u64,
+    selector_rle_instructions: u64,
     semantic: crate::ContinuationRunStats,
 }
 
@@ -55,9 +57,23 @@ fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool) -> Measur
         artifact.source, plain,
         "profiling must not change generated BF"
     );
+    let unprofiled = bf_interpreter::run_with_options(
+        plain.as_bytes(),
+        input,
+        RunOptions {
+            collect_stats: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(unprofiled.output, expected);
     assert_eq!(
-        bf_interpreter::run(plain.as_bytes(), input).unwrap(),
-        expected
+        unprofiled.stats.executed_instructions,
+        result.stats.executed_instructions
+    );
+    assert_eq!(
+        unprofiled.stats.executed_rle_instructions,
+        result.stats.executed_rle_instructions
     );
 
     let plan = enabled.then(|| RegionPlan::new(program));
@@ -66,6 +82,7 @@ fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool) -> Measur
     let mut hidden_visits = 0;
     let mut inputs = 0;
     let mut selector_instructions = 0;
+    let mut selector_rle_instructions = 0;
     for site in &result.profile.as_ref().unwrap().sites {
         let key = &artifact
             .map
@@ -77,6 +94,7 @@ fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool) -> Measur
         inputs += site.counters.input_operations;
         if key == "abi.region.select" || key.starts_with("abi.region.enter.") {
             selector_instructions += site.counters.raw_bf_instructions;
+            selector_rle_instructions += site.counters.rle_instructions;
         }
         if let Some(id) = key.strip_prefix("abi.dispatch.enter.") {
             let id = ContinuationId::new(id.parse().unwrap()).unwrap();
@@ -111,7 +129,9 @@ fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool) -> Measur
         hidden_visits,
         bytes: plain.len(),
         instructions: result.stats.executed_instructions,
+        rle_instructions: result.stats.executed_rle_instructions,
         selector_instructions,
+        selector_rle_instructions,
         semantic,
     }
 }
@@ -264,7 +284,7 @@ fn report(
     let layout = build_layouts_with_regions(program, AbiConfig::default(), Some(&plan)).unwrap();
     let f = program.function(function).unwrap();
     eprintln!(
-        "{label}: blocks={} entries={}->{} visits={}->{} slots={} aggregates={} outbox={} scratch={}->{} chunks={}->{} BF bytes={}->{} BF instructions={}->{} selector={} hidden={}->{}",
+        "{label}: blocks={} entries={}->{} visits={}->{} slots={} aggregates={} outbox={} scratch={}->{} chunks={}->{} BF bytes={}->{} BF instructions={}->{} RLE instructions={}->{} selector={} selector RLE={} hidden={}->{}",
         program
             .continuations()
             .iter()
@@ -285,7 +305,10 @@ fn report(
         after.bytes,
         before.instructions,
         after.instructions,
+        before.rle_instructions,
+        after.rle_instructions,
         after.selector_instructions,
+        after.selector_rle_instructions,
         before.hidden_visits,
         after.hidden_visits
     );
