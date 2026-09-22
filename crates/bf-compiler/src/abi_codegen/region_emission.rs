@@ -1,4 +1,4 @@
-//! Acyclic local execution followed by one context-changing terminal.
+//! Local execution (including soft cycles) followed by one hard terminal.
 use super::*;
 
 impl AbiEmitter<'_> {
@@ -13,6 +13,13 @@ impl AbiEmitter<'_> {
             Location::Relative(layout.frame.frame_offset(layout.region_selector.unwrap()));
         self.emit_region_node(&region.root, selector)?;
         debug_assert_eq!(self.branch_temporary_depth, 0);
+        debug_assert!(self.region_loops.is_empty());
+
+        // A closed soft SCC never reaches a terminal. Its generated native
+        // loop cannot finish, so no selector or hard gate is needed after it.
+        if region.terminals.is_empty() {
+            return Ok(());
+        }
 
         self.with_profile_site(
             "abi",
@@ -36,6 +43,53 @@ impl AbiEmitter<'_> {
         node: &RegionNode,
         selector: Location,
     ) -> Result<(), AbiCodegenError> {
+        if matches!(node.flow, RegionFlow::Continue) {
+            let (_, gate) = *self
+                .region_loops
+                .iter()
+                .rev()
+                .find(|(id, _)| *id == node.id)
+                .expect("backedge targets an active ancestor loop");
+            return self.with_profile_site(
+                "abi",
+                "abi.region.continue",
+                "soft loop backedge",
+                |emitter| {
+                    emitter.set_location(gate, 1);
+                    Ok(())
+                },
+            );
+        }
+        if !node.loop_header {
+            return self.emit_region_node_body(node, selector);
+        }
+        let function = self.program.continuation(node.id).unwrap().function();
+        let gate = Location::Relative(self.acquire_branch_temporary(function)?);
+        self.region_loops.push((node.id, gate));
+        self.set_location(gate, 1);
+        self.move_context_to_location(gate);
+        let body = self.capture(|emitter| {
+            emitter.clear_current();
+            emitter.move_location_to_context(gate);
+            emitter.emit_region_node_body(node, selector)?;
+            // Only a backedge to this header sets this flag. Terminal paths
+            // leave every loop flag zero; a backedge to an outer header leaves
+            // intervening loops zero and unwinds them before restarting it.
+            emitter.move_context_to_location(gate);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_location_to_context(gate);
+        self.region_loops.pop();
+        self.branch_temporary_depth -= 1;
+        Ok(())
+    }
+
+    fn emit_region_node_body(
+        &mut self,
+        node: &RegionNode,
+        selector: Location,
+    ) -> Result<(), AbiCodegenError> {
         let continuation = self
             .program
             .continuation(node.id)
@@ -48,6 +102,7 @@ impl AbiEmitter<'_> {
             )?;
             emitter.with_source_span(continuation.terminator_source(), |emitter| {
                 match &node.flow {
+                    RegionFlow::Continue => unreachable!("backedges have no local body"),
                     RegionFlow::Terminal(index) => emitter.with_profile_site(
                         "abi",
                         "abi.region.select",

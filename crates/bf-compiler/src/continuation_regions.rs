@@ -1,8 +1,9 @@
 //! Private output plans over semantic CIR. Resume edges are never expanded.
 //!
-//! This prototype duplicates acyclic soft paths. Nodes in (or reaching) a soft
-//! cycle keep ordinary dispatch; the existing CFG optimizer can reconstruct
-//! local loops before this pass. No semantic IDs or public wire formats change.
+//! Expand soft paths until a hard boundary or an ancestor block is reached.
+//! Backedges restart a native loop around that ancestor; nested loops can exit
+//! to an outer ancestor by setting only its restart flag. This is bounded CFG
+//! unfolding, not a dispatcher per soft block. Public wire formats stay intact.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,10 +21,13 @@ const MAX_DEPTH: usize = 128;
 pub(crate) struct RegionNode {
     pub id: ContinuationId,
     pub flow: RegionFlow,
+    pub loop_header: bool,
 }
 
 #[derive(Debug)]
 pub(crate) enum RegionFlow {
+    /// No body is emitted here. Restart the ancestor named by RegionNode::id.
+    Continue,
     Terminal(u8),
     Goto(Box<RegionNode>),
     Branch(Box<RegionNode>, Box<RegionNode>),
@@ -41,7 +45,6 @@ pub(crate) struct RegionPlan {
     pub entries: HashSet<ContinuationId>,
     pub regions: HashMap<ContinuationId, Region>,
     pub branch_temporaries: HashMap<FunctionId, usize>,
-    pub cyclic_fallbacks: usize,
     pub bounded_fallbacks: usize,
 }
 
@@ -52,38 +55,6 @@ impl RegionPlan {
             .iter()
             .map(|c| (c.id(), c))
             .collect::<HashMap<_, _>>();
-        // Reverse topological elimination leaves cycles and their predecessors.
-        // Falling back for that entire set also handles irreducible soft SCCs.
-        let mut degree = HashMap::new();
-        let mut predecessors: HashMap<_, Vec<_>> = HashMap::new();
-        let mut ready = Vec::new();
-        for c in program.continuations() {
-            let targets = c
-                .terminator()
-                .edges()
-                .filter(|(_, kind)| *kind == EdgeKind::Normal);
-            let mut count = 0;
-            for (target, _) in targets {
-                predecessors.entry(target).or_default().push(c.id());
-                count += 1;
-            }
-            degree.insert(c.id(), count);
-            if count == 0 {
-                ready.push(c.id());
-            }
-        }
-        let mut acyclic = HashSet::new();
-        while let Some(id) = ready.pop() {
-            acyclic.insert(id);
-            for predecessor in predecessors.get(&id).into_iter().flatten() {
-                let remaining = degree.get_mut(predecessor).unwrap();
-                *remaining -= 1;
-                if *remaining == 0 {
-                    ready.push(*predecessor);
-                }
-            }
-        }
-
         let mut pending = program
             .functions()
             .iter()
@@ -103,24 +74,21 @@ impl RegionPlan {
             if c.terminator().boundary() != BoundaryKind::Soft {
                 continue;
             }
-            let region = if acyclic.contains(&id) {
-                let mut builder = Builder {
-                    nodes: &nodes,
-                    remaining: MAX_EXPANDED_BLOCKS,
-                    terminals: Vec::new(),
-                };
-                if let Some((root, branch_temporaries)) = builder.expand(id, 0) {
-                    Some(Region {
-                        root,
-                        branch_temporaries,
-                        terminals: builder.terminals,
-                    })
-                } else {
-                    plan.bounded_fallbacks += 1;
-                    None
-                }
+            let mut builder = Builder {
+                nodes: &nodes,
+                remaining: MAX_EXPANDED_BLOCKS,
+                terminals: Vec::new(),
+                active: HashSet::new(),
+                loop_headers: HashSet::new(),
+            };
+            let region = if let Some((root, branch_temporaries)) = builder.expand(id, 0) {
+                Some(Region {
+                    root,
+                    branch_temporaries,
+                    terminals: builder.terminals,
+                })
             } else {
-                plan.cyclic_fallbacks += 1;
+                plan.bounded_fallbacks += 1;
                 None
             };
             if let Some(region) = region {
@@ -140,14 +108,31 @@ struct Builder<'a> {
     nodes: &'a HashMap<ContinuationId, &'a Continuation>,
     remaining: usize,
     terminals: Vec<ContinuationId>,
+    active: HashSet<ContinuationId>,
+    loop_headers: HashSet<ContinuationId>,
 }
 
 impl Builder<'_> {
     fn expand(&mut self, id: ContinuationId, depth: usize) -> Option<(RegionNode, usize)> {
-        if depth == MAX_DEPTH || self.remaining == 0 {
+        if self.remaining == 0 {
             return None;
         }
         self.remaining -= 1;
+        if self.active.contains(&id) {
+            self.loop_headers.insert(id);
+            return Some((
+                RegionNode {
+                    id,
+                    flow: RegionFlow::Continue,
+                    loop_header: false,
+                },
+                0,
+            ));
+        }
+        if depth == MAX_DEPTH {
+            return None;
+        }
+        self.active.insert(id);
         let c = self.nodes[&id];
         let mut temporaries = maximum_branch_depth(c.body());
         let flow = match c.terminator() {
@@ -191,6 +176,18 @@ impl Builder<'_> {
                 RegionFlow::Terminal((index + 1) as u8)
             }
         };
-        Some((RegionNode { id, flow }, temporaries))
+        self.active.remove(&id);
+        let loop_header = self.loop_headers.remove(&id);
+        // A restart flag is live across every path inside this loop. The
+        // selected hard terminal runs only after all these flags are zero.
+        temporaries += usize::from(loop_header);
+        Some((
+            RegionNode {
+                id,
+                flow,
+                loop_header,
+            },
+            temporaries,
+        ))
     }
 }

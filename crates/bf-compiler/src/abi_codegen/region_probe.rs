@@ -215,9 +215,12 @@ fn report(
     );
     let mut copies = HashMap::<ContinuationId, usize>::new();
     fn visit(node: &RegionNode, copies: &mut HashMap<ContinuationId, usize>) {
+        if matches!(node.flow, RegionFlow::Continue) {
+            return;
+        }
         *copies.entry(node.id).or_default() += 1;
         match &node.flow {
-            RegionFlow::Terminal(_) => {}
+            RegionFlow::Terminal(_) | RegionFlow::Continue => {}
             RegionFlow::Goto(child) => visit(child, copies),
             RegionFlow::Branch(left, right) => {
                 visit(left, copies);
@@ -520,7 +523,7 @@ fn condition_slot_reuse_shared_resume_and_sparse_ids_keep_values_and_sources() {
 }
 
 #[test]
-fn unsupported_soft_cycle_uses_dispatch_without_unrolling() {
+fn soft_cycle_executes_in_one_dispatcher_visit() {
     let main = FunctionId::new(0);
     let program = ContinuationProgram::new(
         main,
@@ -568,12 +571,13 @@ fn unsupported_soft_cycle_uses_dispatch_without_unrolling() {
     )
     .unwrap();
     let plan = RegionPlan::new(&program);
-    assert_eq!(plan.cyclic_fallbacks, 3);
-    assert!(plan.regions.is_empty());
-    for n in [0, 1, 3] {
+    assert_eq!(plan.entries, HashSet::from([id(1)]));
+    assert_eq!(plan.bounded_fallbacks, 0);
+    for n in [0, 1, 3, 255] {
         let before = measure(&program, &[n], false);
         let after = measure(&program, &[n], true);
-        assert_eq!(before.visits, after.visits);
+        assert_eq!(before.visits.values().sum::<u64>(), 3 + 2 * u64::from(n));
+        assert_eq!(after.visits.values().sum::<u64>(), 1);
     }
 }
 
@@ -696,7 +700,7 @@ fn deep_paths_and_exponentially_shared_tails_have_bounded_expansion() {
         assert!(!plan.regions.contains_key(&id(1)));
         fn size(node: &RegionNode) -> usize {
             1 + match &node.flow {
-                RegionFlow::Terminal(_) => 0,
+                RegionFlow::Terminal(_) | RegionFlow::Continue => 0,
                 RegionFlow::Goto(next) => size(next),
                 RegionFlow::Branch(left, right) => size(left) + size(right),
             }
@@ -870,4 +874,231 @@ fn frame_growth_and_global_navigation_cost_are_measured_separately() {
     assert_eq!(function_visits(&program, &before, worker), 2);
     assert_eq!(function_visits(&program, &after, worker), 1);
     report("global/frame-growth", &program, worker, &before, &after);
+}
+
+fn loop_count(node: &RegionNode) -> usize {
+    usize::from(node.loop_header)
+        + match &node.flow {
+            RegionFlow::Continue | RegionFlow::Terminal(_) => 0,
+            RegionFlow::Goto(next) => loop_count(next),
+            RegionFlow::Branch(left, right) => loop_count(left) + loop_count(right),
+        }
+}
+
+#[test]
+fn optional_calls_in_soft_loops_visit_only_entry_and_hard_resumes() {
+    let fixtures = [
+        (
+            "optional-call",
+            format!(
+                "{MARK} void worker(cell n) {{ while(n) {{ if(input()) {{ mark(n); }} else {{ output(76); }} output(67); n-=1; }} }} void main() {{ worker(input()); }}"
+            ),
+            vec![
+                vec![0],
+                vec![4, 0, 0, 0, 0],
+                vec![4, 1, 0, 1, 0],
+                vec![4, 1, 1, 1, 1],
+            ],
+        ),
+        (
+            "nested-optional-call",
+            format!(
+                "{MARK} void worker(cell n) {{ while(n) {{ cell j=input(); while(j) {{ if(input()) {{ mark(j); }} else {{ output(76); }} j-=1; }} output(79); n-=1; }} }} void main() {{ worker(input()); }}"
+            ),
+            vec![
+                vec![0],
+                vec![2, 0, 0],
+                vec![2, 3, 0, 1, 0, 2, 1, 0],
+                vec![1, 2, 1, 1],
+            ],
+        ),
+    ];
+    for (label, source, cases) in fixtures {
+        let program = crate::lower_source(&source).unwrap();
+        let worker = program
+            .functions()
+            .iter()
+            .find(|f| f.name() == Some("worker"))
+            .unwrap()
+            .id();
+        let plan = RegionPlan::new(&program);
+        assert!(plan.regions.values().any(|r| loop_count(&r.root) > 0));
+        assert_eq!(plan.bounded_fallbacks, 0);
+        for (index, input) in cases.iter().enumerate() {
+            let before = measure(&program, input, false);
+            let after = measure(&program, input, true);
+            let calls = before.semantic.calls - 1; // Exclude main -> worker.
+            assert_eq!(function_visits(&program, &after, worker), 1 + calls);
+            if index == 2 {
+                report(label, &program, worker, &before, &after);
+            }
+        }
+    }
+}
+
+#[test]
+fn aggregate_portal_exits_and_reenters_a_soft_cycle_after_full_cleanup() {
+    let program = crate::lower_source("struct Pair { cell a; cell b; } Pair[2] g; void worker(cell n) { cell i=input(); Pair p; while(n) { if(input()) { p.a=n; p.b=n+1; g[i]=p; } else { output(76); } output(n); n-=1; } output(g[i].a); output(g[i].b); } void main() { worker(input()); }").unwrap();
+    let worker = program
+        .functions()
+        .iter()
+        .find(|f| f.name() == Some("worker"))
+        .unwrap()
+        .id();
+    let plan = RegionPlan::new(&program);
+    assert!(plan.regions.values().any(|r| loop_count(&r.root) > 0));
+    assert_eq!(plan.bounded_fallbacks, 0);
+    for input in [
+        &[0, 0][..],
+        &[3, 1, 0, 0, 0],
+        &[3, 1, 1, 0, 1],
+        &[3, 0, 1, 1, 1],
+    ] {
+        let before = measure(&program, input, false);
+        let after = measure(&program, input, true);
+        let portals = before.semantic.aggregate_loads + before.semantic.aggregate_stores;
+        assert_eq!(function_visits(&program, &after, worker), 1 + portals);
+        assert_eq!(before.hidden_visits, after.hidden_visits);
+        if input == [3, 1, 1, 0, 1] {
+            report("soft-loop-portal", &program, worker, &before, &after);
+        }
+    }
+}
+
+#[test]
+fn nested_and_multiple_entry_cycles_match_the_vm_for_bounded_walks() {
+    // Every check consumes one unit of a shared budget, so every walk stops.
+    // Independent branch edges cover self edges, nested/outer backedges and
+    // multiple-entry SCCs. The input steers both arms through those graphs.
+    let main = FunctionId::new(0);
+    let mut seed = 1_u32;
+    for case in 0..32 {
+        let mut nodes = vec![Continuation::new(
+            id(1),
+            main,
+            vec![FrameInstruction::Set {
+                dst: slot(0),
+                value: 6,
+            }],
+            Terminator::Goto { target: id(2) },
+        )];
+        for node in 0..3_u16 {
+            let check = id(2 + 2 * node);
+            let choose = id(3 + 2 * node);
+            nodes.push(Continuation::new(
+                check,
+                main,
+                vec![
+                    FrameInstruction::Set {
+                        dst: slot(1),
+                        value: node as u8,
+                    },
+                    FrameInstruction::Output { src: slot(1) },
+                    FrameInstruction::AddConst {
+                        dst: slot(0),
+                        value: 255,
+                    },
+                    FrameInstruction::Copy {
+                        src: slot(0),
+                        dst: slot(1),
+                    },
+                ],
+                Terminator::Branch {
+                    condition: slot(1),
+                    then_target: choose,
+                    else_target: id(8),
+                },
+            ));
+            let targets = if case == 0 {
+                // Two independent entries from node 0 into the {1, 2} SCC.
+                [[id(4), id(6)], [id(6), id(4)], [id(4), id(6)]][usize::from(node)]
+            } else {
+                [0, 1].map(|_| {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    id(2 + 2 * ((seed >> 16) % 3) as u16)
+                })
+            };
+            nodes.push(Continuation::new(
+                choose,
+                main,
+                vec![FrameInstruction::Input { dst: slot(1) }],
+                Terminator::Branch {
+                    condition: slot(1),
+                    then_target: targets[0],
+                    else_target: targets[1],
+                },
+            ));
+        }
+        nodes.push(Continuation::new(
+            id(8),
+            main,
+            vec![FrameInstruction::Output { src: slot(0) }],
+            Terminator::Halt,
+        ));
+        let program = ContinuationProgram::new(
+            main,
+            vec![FunctionDescriptor::new(
+                main,
+                vec![],
+                2,
+                ValueType::Void,
+                id(1),
+            )],
+            nodes,
+        )
+        .unwrap();
+        let plan = RegionPlan::new(&program);
+        assert_eq!(plan.bounded_fallbacks, 0);
+        for input in [[0; 5], [1; 5], [0, 1, 0, 1, 0]] {
+            measure(&program, &input, false);
+            let after = measure(&program, &input, true);
+            assert_eq!(after.visits.values().sum::<u64>(), 1);
+        }
+    }
+}
+
+#[test]
+fn closed_soft_cycle_needs_no_terminal_selector_dispatch() {
+    let main = FunctionId::new(0);
+    let program = ContinuationProgram::new(
+        main,
+        vec![FunctionDescriptor::new(
+            main,
+            vec![],
+            1,
+            ValueType::Void,
+            id(1),
+        )],
+        vec![Continuation::new(
+            id(1),
+            main,
+            vec![FrameInstruction::Output { src: slot(0) }],
+            Terminator::Goto { target: id(1) },
+        )],
+    )
+    .unwrap();
+    let plan = RegionPlan::new(&program);
+    assert!(plan.regions[&id(1)].terminals.is_empty());
+    let artifact = lower_continuations_annotated_with_options(
+        &program,
+        AbiConfig::default(),
+        true,
+        ProfileGranularity::Source,
+        false,
+        true,
+    )
+    .unwrap()
+    .profile_artifact(false);
+    assert!(
+        !artifact
+            .map
+            .sites
+            .iter()
+            .any(|s| s.stable_key.starts_with("abi.region.enter.")
+                || s.stable_key == "abi.region.select")
+    );
+    artifact
+        .map
+        .validate_for_source(artifact.source.as_bytes())
+        .unwrap();
 }

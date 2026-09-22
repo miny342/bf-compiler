@@ -826,6 +826,8 @@ struct AbiEmitter<'a> {
     /// Physical during initialization; context-base-relative in dispatcher.
     position: isize,
     branch_temporary_depth: usize,
+    /// Active native soft loops; all close before a terminal changes context.
+    region_loops: Vec<(ContinuationId, Location)>,
     nibble_transfer: bool,
     current_source: Option<SourceSpan>,
 }
@@ -868,6 +870,7 @@ impl<'a> AbiEmitter<'a> {
             granularity,
             position: 0,
             branch_temporary_depth: 0,
+            region_loops: Vec::new(),
             nibble_transfer: false,
             current_source: None,
         }
