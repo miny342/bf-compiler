@@ -229,25 +229,7 @@ pub fn structure_local_control_flow(
 }
 
 fn successors(terminator: &Terminator) -> Vec<ContinuationId> {
-    match *terminator {
-        Terminator::Goto { target } => vec![target],
-        Terminator::Branch {
-            then_target,
-            else_target,
-            ..
-        } => vec![then_target, else_target],
-        Terminator::BranchWithBodies {
-            then_target,
-            else_target,
-            ..
-        } => vec![then_target, else_target],
-        Terminator::Call { return_to, .. } => vec![return_to],
-        Terminator::ArrayLoad { return_to, .. }
-        | Terminator::ArrayStore { return_to, .. }
-        | Terminator::AggregateLoad { return_to, .. }
-        | Terminator::AggregateStore { return_to, .. } => vec![return_to],
-        Terminator::Return { .. } | Terminator::Halt | Terminator::Abort => Vec::new(),
-    }
+    terminator.edges().map(|(target, _)| target).collect()
 }
 
 #[cfg(test)]

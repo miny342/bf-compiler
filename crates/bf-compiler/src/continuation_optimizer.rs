@@ -365,38 +365,13 @@ fn map_successor_references(
     remap: &HashMap<ContinuationId, ContinuationId>,
     changed: &mut usize,
 ) {
-    let map = |target: &mut ContinuationId, changed: &mut usize| {
+    terminator.map_successors(|target| {
         let original = *target;
         *target = remap[&original];
         if *target != original {
             *changed += 1;
         }
-    };
-    match terminator {
-        Terminator::Goto { target } => map(target, changed),
-        Terminator::Branch {
-            then_target,
-            else_target,
-            ..
-        } => {
-            map(then_target, changed);
-            map(else_target, changed);
-        }
-        Terminator::BranchWithBodies {
-            then_target,
-            else_target,
-            ..
-        } => {
-            map(then_target, changed);
-            map(else_target, changed);
-        }
-        Terminator::Call { return_to, .. }
-        | Terminator::ArrayLoad { return_to, .. }
-        | Terminator::ArrayStore { return_to, .. }
-        | Terminator::AggregateLoad { return_to, .. }
-        | Terminator::AggregateStore { return_to, .. } => map(return_to, changed),
-        Terminator::Return { .. } | Terminator::Abort | Terminator::Halt => {}
-    }
+    });
 }
 
 fn reachable_continuations(
@@ -414,29 +389,9 @@ fn reachable_continuations(
             continue;
         }
         let continuation = continuations[&id];
-        match continuation.terminator() {
-            Terminator::Goto { target } => pending.push(*target),
-            Terminator::Branch {
-                then_target,
-                else_target,
-                ..
-            } => pending.extend([*then_target, *else_target]),
-            Terminator::BranchWithBodies {
-                then_target,
-                else_target,
-                ..
-            } => pending.extend([*then_target, *else_target]),
-            Terminator::Call {
-                callee, return_to, ..
-            } => {
-                pending.push(*return_to);
-                pending.push(function_entries[callee]);
-            }
-            Terminator::ArrayLoad { return_to, .. }
-            | Terminator::ArrayStore { return_to, .. }
-            | Terminator::AggregateLoad { return_to, .. }
-            | Terminator::AggregateStore { return_to, .. } => pending.push(*return_to),
-            Terminator::Return { .. } | Terminator::Abort | Terminator::Halt => {}
+        pending.extend(continuation.terminator().edges().map(|(target, _)| target));
+        if let Some(callee) = continuation.terminator().callee() {
+            pending.push(function_entries[&callee]);
         }
     }
     reachable

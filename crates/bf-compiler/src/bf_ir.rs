@@ -151,12 +151,12 @@ impl ProfileSiteTable {
             if profile_site_matches(&self.sites, site, parent, &kind, &stable_key) {
                 return site;
             }
-            if let Some(collisions) = self.interned_collisions.get(&hash) {
-                if let Some(&site) = collisions.iter().find(|&&site| {
+            if let Some(collisions) = self.interned_collisions.get(&hash)
+                && let Some(&site) = collisions.iter().find(|&&site| {
                     profile_site_matches(&self.sites, site, parent, &kind, &stable_key)
-                }) {
-                    return site;
-                }
+                })
+            {
+                return site;
             }
         }
         let id = ProfileSiteId(self.sites.len() as u32);

@@ -586,6 +586,99 @@ pub enum Terminator {
     Halt,
 }
 
+/// Execution-context boundaries, independent of the particular hard operation.
+/// Frame instructions (including I/O and structured control) are always local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundaryKind {
+    Soft,
+    Hard,
+    FunctionExit,
+    ProgramExit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeKind {
+    Normal,
+    /// Entered only after a call/portal has completed its entire protocol.
+    Resume,
+}
+
+impl Terminator {
+    pub(crate) fn boundary(&self) -> BoundaryKind {
+        match self {
+            Self::Goto { .. } | Self::Branch { .. } | Self::BranchWithBodies { .. } => {
+                BoundaryKind::Soft
+            }
+            Self::Call { .. }
+            | Self::ArrayLoad { .. }
+            | Self::ArrayStore { .. }
+            | Self::AggregateLoad { .. }
+            | Self::AggregateStore { .. } => BoundaryKind::Hard,
+            Self::Return { .. } => BoundaryKind::FunctionExit,
+            Self::Abort | Self::Halt => BoundaryKind::ProgramExit,
+        }
+    }
+
+    /// Same-function edges; a callee entry is a separate function reference.
+    pub(crate) fn edges(&self) -> impl Iterator<Item = (ContinuationId, EdgeKind)> {
+        let targets = match *self {
+            Self::Goto { target } => [Some((target, EdgeKind::Normal)), None],
+            Self::Branch {
+                then_target,
+                else_target,
+                ..
+            }
+            | Self::BranchWithBodies {
+                then_target,
+                else_target,
+                ..
+            } => [
+                Some((then_target, EdgeKind::Normal)),
+                Some((else_target, EdgeKind::Normal)),
+            ],
+            Self::Call { return_to, .. }
+            | Self::ArrayLoad { return_to, .. }
+            | Self::ArrayStore { return_to, .. }
+            | Self::AggregateLoad { return_to, .. }
+            | Self::AggregateStore { return_to, .. } => [Some((return_to, EdgeKind::Resume)), None],
+            Self::Return { .. } | Self::Abort | Self::Halt => [None, None],
+        };
+        targets.into_iter().flatten()
+    }
+
+    pub(crate) fn map_successors(&mut self, mut map: impl FnMut(&mut ContinuationId)) {
+        match self {
+            Self::Goto { target } => map(target),
+            Self::Branch {
+                then_target,
+                else_target,
+                ..
+            }
+            | Self::BranchWithBodies {
+                then_target,
+                else_target,
+                ..
+            } => {
+                map(then_target);
+                map(else_target);
+            }
+            Self::Call { return_to, .. }
+            | Self::ArrayLoad { return_to, .. }
+            | Self::ArrayStore { return_to, .. }
+            | Self::AggregateLoad { return_to, .. }
+            | Self::AggregateStore { return_to, .. } => map(return_to),
+            Self::Return { .. } | Self::Abort | Self::Halt => {}
+        }
+    }
+
+    pub(crate) fn callee(&self) -> Option<FunctionId> {
+        match self {
+            Self::Call { callee, .. } => Some(*callee),
+            _ => None,
+        }
+    }
+}
+
 /// A straight-line instruction body and its single control-flow terminator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Continuation {

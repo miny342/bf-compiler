@@ -13,6 +13,7 @@ mod continuation_adapter;
 mod continuation_ir;
 mod continuation_lowering;
 mod continuation_optimizer;
+mod continuation_regions;
 mod continuation_structure;
 mod continuation_vm;
 mod frame_allocation;

@@ -845,7 +845,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
         });
         if then_frame_only
             && !structured_frame::statement_stops(then_branch)
-            && else_branch.is_some()
+            && let Some(else_branch) = else_branch
             && !else_frame_only
         {
             let then_body =
@@ -866,7 +866,7 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                     else_target,
                 });
                 self.start(other_id);
-                self.lower_statement(else_branch.expect("checked above"))?;
+                self.lower_statement(else_branch)?;
                 if self.current.is_some() {
                     self.finish(Terminator::Goto { target: join_id });
                 }

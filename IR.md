@@ -6,6 +6,9 @@
 以下では、実装に存在するものを「現行」、まだ存在しないpassやIRを「提案」と明記する。
 型名と公開範囲は現在のRust実装を基準とする。設計候補を、実装済みであるかのようには記述しない。
 
+既定無効の CFG region emission prototype と実 BF dispatcher 訪問数の比較は
+[CIR_REGION_EMISSION.md](CIR_REGION_EMISSION.md) を参照。semantic CIR の形式は維持している。
+
 ## 全体構成
 
 コンパイラは、構文木から直接Brainfuck文字列を生成しない。source frontendと低水準APIは、

@@ -8,6 +8,7 @@ use crate::continuation_ir::{
     FrameInstruction, FrameSlot, FrameTransferTarget, FunctionDescriptor, FunctionId, GlobalId,
     LogicalOffset, ParameterLocation, SourceSpan, Terminator, ValueOperand, ValueType,
 };
+use crate::continuation_regions::{Region, RegionFlow, RegionNode, RegionPlan};
 use crate::frame_layout::{
     AbiConfig, AbiField, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,
     aggregate_element_physical_offset, aggregate_page_portal_offset,
@@ -16,6 +17,8 @@ use crate::static_layout::{StaticLayout, StaticLayoutError};
 use crate::{
     AnnotatedBfInstruction, AnnotatedBfOperation, AnnotatedBfProgram, BfProgram, ProfileSiteTable,
 };
+
+mod region_emission;
 
 /// Selects how much compiler provenance is emitted into a profile map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +70,7 @@ pub fn lower_continuations_with_profile_and_codegen_options(
         !options.unlimited_tape,
         granularity,
         options.nibble_transfer,
+        false,
     )
 }
 
@@ -131,6 +135,7 @@ pub fn lower_continuations_with_profile(
         true,
         granularity,
         false,
+        false,
     )
 }
 
@@ -145,6 +150,7 @@ pub fn lower_continuations_unbounded_with_profile(
         AbiConfig::default(),
         false,
         granularity,
+        false,
         false,
     )
 }
@@ -175,6 +181,7 @@ fn lower_continuations_with_options(
         check_capacity,
         ProfileGranularity::Abi,
         false,
+        false,
     )?
     .into_plain())
 }
@@ -185,8 +192,12 @@ fn lower_continuations_annotated_with_options(
     check_capacity: bool,
     granularity: ProfileGranularity,
     nibble_transfer: bool,
+    region_emission: bool,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
-    let layouts = build_layouts(program, config)?;
+    // B1 is a private experiment exercised by region_probe. Public entry
+    // points deliberately keep region_emission=false during this prototype.
+    let regions = region_emission.then(|| RegionPlan::new(program));
+    let layouts = build_layouts_with_regions(program, config, regions.as_ref())?;
     let static_layout = if check_capacity {
         StaticLayout::new(config, program.globals())?
     } else {
@@ -202,6 +213,10 @@ fn lower_continuations_annotated_with_options(
         granularity,
     );
     emitter.nibble_transfer = nibble_transfer;
+    emitter.regions = regions.as_ref();
+    if let Some(regions) = &regions {
+        emitter.dispatch_encoding = DispatchEncoding::with_regions(program, &portal, Some(regions));
+    }
     emitter.with_profile_site(
         "abi",
         "abi.initialization",
@@ -263,6 +278,7 @@ impl From<StaticLayoutError> for AbiCodegenError {
 struct FunctionLayout {
     frame: FrameLayout,
     branch_temporary_start: usize,
+    region_selector: Option<FrameSlot>,
     portal_temporary_start: usize,
     portal_temporary_cells: usize,
 }
@@ -285,9 +301,18 @@ enum Location {
     Global(usize),
 }
 
+#[cfg(test)]
 fn build_layouts(
     program: &ContinuationProgram,
     config: AbiConfig,
+) -> Result<HashMap<FunctionId, FunctionLayout>, AbiCodegenError> {
+    build_layouts_with_regions(program, config, None)
+}
+
+fn build_layouts_with_regions(
+    program: &ContinuationProgram,
+    config: AbiConfig,
+    regions: Option<&RegionPlan>,
 ) -> Result<HashMap<FunctionId, FunctionLayout>, AbiCodegenError> {
     let has_global_portal = program.continuations().iter().any(|continuation| {
         matches!(
@@ -324,28 +349,32 @@ fn build_layouts(
             })
             .max()
             .unwrap_or(0);
-        let value_cells = function
-            .frame_slots()
-            .checked_add(branch_temporaries)
-            .and_then(|cells| {
-                let portal_temporaries = program
-                    .continuations()
-                    .iter()
-                    .filter(|continuation| continuation.function() == function.id())
-                    .filter_map(|continuation| match continuation.terminator() {
-                        Terminator::AggregateLoad { cells, .. }
-                        | Terminator::AggregateStore { cells, .. } => Some(*cells),
-                        _ => None,
-                    })
-                    .max()
-                    .unwrap_or(0);
-                cells.checked_add(portal_temporaries)
-            })
-            .ok_or(FrameLayoutError::SizeOverflow)?;
-        let portal_temporary_start = function
+        let region_depth = regions.and_then(|plan| plan.branch_temporaries.get(&function.id()));
+        let branch_temporaries = branch_temporaries.max(region_depth.copied().unwrap_or(0));
+        let selector_cells = usize::from(region_depth.is_some());
+        let selector_start = function
             .frame_slots()
             .checked_add(branch_temporaries)
             .ok_or(FrameLayoutError::SizeOverflow)?;
+        let region_selector = region_depth.map(|_| FrameSlot::new(selector_start));
+        let portal_temporary_start = selector_start
+            .checked_add(selector_cells)
+            .ok_or(FrameLayoutError::SizeOverflow)?;
+        let value_cells = {
+            let portal_temporaries = program
+                .continuations()
+                .iter()
+                .filter(|continuation| continuation.function() == function.id())
+                .filter_map(|continuation| match continuation.terminator() {
+                    Terminator::AggregateLoad { cells, .. }
+                    | Terminator::AggregateStore { cells, .. } => Some(*cells),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            portal_temporary_start.checked_add(portal_temporaries)
+        }
+        .ok_or(FrameLayoutError::SizeOverflow)?;
         let portal_temporary_cells = value_cells - portal_temporary_start;
         let frame = FrameLayout::with_aggregates_and_route(
             config,
@@ -359,6 +388,7 @@ fn build_layouts(
             FunctionLayout {
                 frame,
                 branch_temporary_start: function.frame_slots(),
+                region_selector,
                 portal_temporary_start,
                 portal_temporary_cells,
             },
@@ -454,9 +484,18 @@ struct DispatchEncoding {
 
 impl DispatchEncoding {
     fn new(program: &ContinuationProgram, portal: &PortalPlan) -> Self {
+        Self::with_regions(program, portal, None)
+    }
+
+    fn with_regions(
+        program: &ContinuationProgram,
+        portal: &PortalPlan,
+        regions: Option<&RegionPlan>,
+    ) -> Self {
         let mut entries = program
             .continuations()
             .iter()
+            .filter(|c| regions.is_none_or(|plan| plan.entries.contains(&c.id())))
             .map(|c| (c.id(), false))
             .chain(portal.accessors.iter().map(|a| (a.id, true)))
             .chain(portal.ordered_sites.iter().map(|s| (s.resume, true)))
@@ -469,8 +508,10 @@ impl DispatchEncoding {
         // bounds both linear countdown levels by approximately sqrt(n).
         // Include the unused zero code when choosing the width so that both
         // encoded bytes fit, even for a program with all 65,535 IDs occupied.
-        let dense = count == usize::from(maximum) && count > 256;
-        let page_width = if dense {
+        // Region emission removes soft-only entries without rewriting semantic
+        // IDs. Compact those remaining entries in the private PC encoding too.
+        let dense = regions.is_some() || (count == usize::from(maximum) && count > 256);
+        let page_width = if dense && count > 256 {
             (1_u16..=256)
                 .find(|&width| usize::from(width).pow(2) > count)
                 .unwrap_or(256)
@@ -483,7 +524,7 @@ impl DispatchEncoding {
             // byte values small to reduce navigation while transferring them,
             // as well as the countdown needed to dispatch them.
             entries.sort_unstable_by_key(|&(id, hidden)| (!hidden, id.get()));
-            dense_ranks.resize(count + 1, 0);
+            dense_ranks.resize(usize::from(maximum) + 1, 0);
             for (index, &(id, _)) in entries.iter().enumerate() {
                 dense_ranks[usize::from(id.get())] = (index + 1) as u16;
             }
@@ -768,6 +809,7 @@ struct AbiEmitter<'a> {
     layouts: &'a HashMap<FunctionId, FunctionLayout>,
     static_layout: &'a StaticLayout,
     portal: &'a PortalPlan,
+    regions: Option<&'a RegionPlan>,
     dispatch_encoding: DispatchEncoding,
     config: AbiConfig,
     output: Vec<AnnotatedBfInstruction>,
@@ -816,6 +858,7 @@ impl<'a> AbiEmitter<'a> {
             layouts,
             static_layout,
             portal,
+            regions: None,
             dispatch_encoding,
             config,
             output: Vec::new(),
@@ -976,6 +1019,12 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(0);
             let mut pages = BTreeMap::<u8, Vec<DispatchEntry<'_>>>::new();
             for continuation in emitter.program.continuations() {
+                if emitter
+                    .regions
+                    .is_some_and(|plan| !plan.entries.contains(&continuation.id()))
+                {
+                    continue;
+                }
                 let encoded = emitter.dispatch_encoding.encode(continuation.id());
                 pages
                     .entry((encoded >> 8) as u8)
@@ -1256,7 +1305,7 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(branch);
             Ok(())
         })?;
-        self.emit_loop(body);
+        self.emit_dispatch_entry_gate(entry.id(), body)?;
         self.move_to(0);
         Ok(())
     }
@@ -1314,9 +1363,31 @@ impl<'a> AbiEmitter<'a> {
             emitter.move_to(branch);
             Ok(())
         })?;
-        self.emit_loop(body);
+        if let Some(entry) = entry {
+            self.emit_dispatch_entry_gate(entry.id(), body)?;
+        } else {
+            self.emit_loop(body);
+        }
         self.move_to(0);
         Ok(())
+    }
+
+    /// Attribute only the one-shot gate brackets, so loop iterations measure
+    /// actual BF dispatcher visits independently of the emitted body shape.
+    fn emit_dispatch_entry_gate(
+        &mut self,
+        id: ContinuationId,
+        body: Vec<AnnotatedBfInstruction>,
+    ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site(
+            "abi",
+            format!("abi.dispatch.enter.{}", id.get()),
+            "dispatcher entry",
+            |emitter| {
+                emitter.emit_loop(body);
+                Ok(())
+            },
+        )
     }
 
     fn emit_dispatch_entry_body(
@@ -1324,7 +1395,16 @@ impl<'a> AbiEmitter<'a> {
         entry: DispatchEntry<'a>,
     ) -> Result<(), AbiCodegenError> {
         match entry {
-            DispatchEntry::Continuation(continuation) => self.emit_continuation_body(continuation),
+            DispatchEntry::Continuation(continuation) => {
+                if let Some(region) = self
+                    .regions
+                    .and_then(|plan| plan.regions.get(&continuation.id()))
+                {
+                    self.emit_region(region, continuation.function())
+                } else {
+                    self.emit_continuation_body(continuation)
+                }
+            }
             DispatchEntry::PortalAccessor(accessor) => {
                 self.emit_aggregate_accessor(accessor)?;
                 self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
@@ -1340,8 +1420,18 @@ impl<'a> AbiEmitter<'a> {
         &mut self,
         continuation: &Continuation,
     ) -> Result<(), AbiCodegenError> {
+        self.with_continuation_site(continuation, |emitter| {
+            emitter.emit_continuation_body_inner(continuation)
+        })
+    }
+
+    fn with_continuation_site(
+        &mut self,
+        continuation: &Continuation,
+        emit: impl FnOnce(&mut Self) -> Result<(), AbiCodegenError>,
+    ) -> Result<(), AbiCodegenError> {
         if matches!(self.granularity, ProfileGranularity::Abi) {
-            self.emit_continuation_body_inner(continuation)
+            emit(self)
         } else {
             let function = continuation.function().index();
             let continuation_id = continuation.id().get();
@@ -1355,7 +1445,7 @@ impl<'a> AbiEmitter<'a> {
                             "continuation",
                             format!("function.{function}.continuation.{continuation_id}"),
                             format!("continuation {continuation_id}"),
-                            |emitter| emitter.emit_continuation_body_inner(continuation),
+                            emit,
                         )
                     },
                 )
@@ -1441,7 +1531,6 @@ impl<'a> AbiEmitter<'a> {
                 self.emit_aggregate_clear_range(
                     array,
                     first,
-                    end - index,
                     function,
                     &instructions[index..end],
                     index,
@@ -1470,7 +1559,6 @@ impl<'a> AbiEmitter<'a> {
         &mut self,
         region: AggregateRegion,
         first: usize,
-        cells: usize,
         function: FunctionId,
         instructions: &[FrameInstruction],
         instruction_start: usize,
@@ -1478,7 +1566,8 @@ impl<'a> AbiEmitter<'a> {
     ) -> Result<(), AbiCodegenError> {
         let base = self.portal_base_location(region, function)?;
         self.move_context_to_location(base);
-        for (instruction_offset, index) in (first..first + cells).enumerate() {
+        for (instruction_offset, instruction) in instructions.iter().enumerate() {
+            let index = first + instruction_offset;
             let mut offset = aggregate_element_physical_offset(index, self.config)? as isize;
             // Global navigation rebases emitter bookkeeping at the aggregate
             // head. A frame-relative move retains the caller-context origin,
@@ -1495,21 +1584,17 @@ impl<'a> AbiEmitter<'a> {
                 emitter.with_instruction_path(
                     (instruction_start + instruction_offset).to_string(),
                     |emitter| {
-                        emitter.emit_instruction_site(
-                            &instructions[instruction_offset],
-                            function,
-                            |emitter| {
-                                emitter.with_profile_site(
-                                    "abi",
-                                    "abi.frame.set",
-                                    "frame set",
-                                    |emitter| {
-                                        emitter.clear(offset);
-                                        Ok(())
-                                    },
-                                )
-                            },
-                        )
+                        emitter.emit_instruction_site(instruction, function, |emitter| {
+                            emitter.with_profile_site(
+                                "abi",
+                                "abi.frame.set",
+                                "frame set",
+                                |emitter| {
+                                    emitter.clear(offset);
+                                    Ok(())
+                                },
+                            )
+                        })
                     },
                 )
             })?;
@@ -5914,3 +5999,6 @@ mod tests {
 
 #[cfg(test)]
 mod portal_probe;
+
+#[cfg(test)]
+mod region_probe;

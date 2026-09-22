@@ -855,9 +855,7 @@ fn simple_cell_return(
         else {
             return None;
         };
-        let Some(local_info) = function.locals.get(local.index()) else {
-            return None;
-        };
+        let local_info = function.locals.get(local.index())?;
         if !context.types.is_scalar(local_info.ty) || !pure_expression(initializer) {
             return None;
         }
@@ -1118,7 +1116,7 @@ fn inline_cell_function(
     };
     let mut changed = false;
 
-    for caller_index in 0..hir.functions.len() {
+    for (caller_index, caller_cost) in costs.iter_mut().enumerate().take(hir.functions.len()) {
         let caller = FunctionId::new(caller_index);
         if caller == function || !graph.reachable.contains(caller) {
             continue;
@@ -1133,7 +1131,7 @@ fn inline_cell_function(
             continue;
         }
 
-        let before = match costs[caller_index] {
+        let before = match *caller_cost {
             Some(cost) => cost,
             None => {
                 let Ok(cost) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
@@ -1141,14 +1139,14 @@ fn inline_cell_function(
                     hir.functions[caller_index] = original;
                     continue;
                 };
-                costs[caller_index] = Some(cost);
+                *caller_cost = Some(cost);
                 cost
             }
         };
         if let Ok(after) = crate::continuation_lowering::allocated_frame_chunks(hir, caller)
             && (after <= before || !graph.global_use[caller.index()])
         {
-            costs[caller_index] = Some(after);
+            *caller_cost = Some(after);
             changed = true;
         } else {
             hir.functions[caller_index] = original;
