@@ -128,18 +128,11 @@ impl AbiEmitter<'_> {
         else_node: &RegionNode,
         selector: Location,
     ) -> Result<(), AbiCodegenError> {
-        let (condition, then_body, else_body, clear_after_arm) = match continuation.terminator() {
-            Terminator::Branch { condition, .. } => (*condition, &[][..], &[][..], false),
-            Terminator::BranchWithBodies {
-                condition,
-                then_body,
-                else_body,
-                ..
-            } => (*condition, then_body.as_slice(), else_body.as_slice(), true),
-            _ => unreachable!("region branch"),
+        let Terminator::Branch { condition, .. } = continuation.terminator() else {
+            unreachable!("region branch");
         };
         let function = continuation.function();
-        let condition = self.address_location(condition, function)?;
+        let condition = self.address_location(*condition, function)?;
         let then_gate = Location::Relative(self.acquire_branch_temporary(function)?);
         let else_gate = Location::Relative(self.acquire_branch_temporary(function)?);
         self.move_location(condition, then_gate);
@@ -150,12 +143,6 @@ impl AbiEmitter<'_> {
             emitter.clear_current();
             emitter.move_location_to_context(then_gate);
             emitter.clear_location(else_gate);
-            emitter.with_instruction_path("then", |emitter| {
-                emitter.emit_all(then_body, function, None)
-            })?;
-            if clear_after_arm {
-                emitter.clear_location(condition);
-            }
             emitter.emit_region_node(then_node, selector)?;
             // Never clear the original condition here: the successor can
             // reuse that allocated slot, including as a terminal operand.
@@ -169,12 +156,6 @@ impl AbiEmitter<'_> {
         let body = self.capture(|emitter| {
             emitter.clear_current();
             emitter.move_location_to_context(else_gate);
-            emitter.with_instruction_path("else", |emitter| {
-                emitter.emit_all(else_body, function, None)
-            })?;
-            if clear_after_arm {
-                emitter.clear_location(condition);
-            }
             emitter.emit_region_node(else_node, selector)?;
             emitter.move_context_to_location(else_gate);
             Ok(())

@@ -1,13 +1,17 @@
 # CIR soft boundary の region emission prototype
 
-2026-09-22。案 B の prototype と soft cycle 対応を実装した。B0 は既存の CFG optimizer と
+2026-09-22。案 B の prototype、soft cycle 対応、yielding control の通常 CFG 化を実装した。
+B0 は既存の CFG optimizer と
 continuation ごとの ABI emission、B1 は同じ semantic CIR を参照して soft edge を
 直接実行する非公開の backend 出力計画である。
 
 公開 API と CLI の既定動作は B0。B1 は
 `abi_codegen::lower_continuations_annotated_with_options` の内部引数
 `region_emission` で有効化し、`abi_codegen/region_probe.rs` から比較する。
-公開 `AbiCodegenOptions`、CIR JSON、selfhost wire format、ABI field layout は変更していない。
+公開 `AbiCodegenOptions`、selfhost wire format、ABI field layout は変更していない。
+通常 CFG 化に伴い、公開 `Terminator::BranchWithBodies` と VM の対応する統計種別、
+viewer の読み取り処理は削除した。旧 variant を使う Rust API 利用側は arm を通常 block へ
+移し、旧 variant を含む CIR JSON は再生成する。互換 variant は残さない。
 
 ## 実装範囲
 
@@ -47,7 +51,7 @@ backedge marker を除く path depth 128 block。
 local region は frame instruction と terminal selector の書き込みだけを行う。
 分岐には専用の2個の frame temporary を使う。元の condition は分岐時に消費し、
 successor 実行後に再度 clear しない。これにより allocated slot を successor の値や
-Call 引数として再利用できる。`BranchWithBodies` の既存 arm cleanup は successor の前に終える。
+Call 引数として再利用できる。
 
 すべての frame-relative な分岐を閉じた後、専用 frame selector を ABI `PcLow` へ移す。
 一度限りの countdown gate が terminal を選び、`PcLow` と `Branch` を消費してから
@@ -73,6 +77,8 @@ compact にする。semantic continuation ID と portal resume protocol はそ�
 cargo test -p bf-compiler region_probe -- --nocapture
 cargo test --workspace
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+(cd tools/cir-viewer && npm run build)
 ```
 
 測定 fixture は `region_probe.rs` に固定した。最初の2ケースは source frontend の
@@ -105,15 +111,15 @@ B1 はこの理由で候補を棄却しない。現段階では既定有効化�
 
 | Fixture | semantic blocks／CIR 実行数 | 対象 BF 訪問 B0→B1 | 全 program emitted entries B0→B1 | BF bytes B0→B1 | BF 実行命令 B0→B1 |
 |---|---:|---:|---:|---:|---:|
-| 4反復のうち2回だけ Call | 5／12 | **12→3** | 10→5 | 4,379→6,087 | 14,310→10,678 |
-| nested loop の内側で2回 Call | 7／18 | **18→3** | 12→5 | 5,066→10,357 | 16,598→13,431 |
-| 3反復のうち2回 aggregate store、後続で2回 load | 7／12 | **12→5** | 9→6 | 1,099,590→1,105,460 | 84,497→78,104 |
+| 4反復のうち2回だけ Call | 6／14 | **14→3** | 11→5 | 4,439→6,044 | 15,250→10,620 |
+| nested loop の内側で2回 Call | 8／21 | **21→3** | 13→5 | 5,127→7,884 | 17,889→10,473 |
+| 3反復のうち2回 aggregate store、後続で2回 load | 8／13 | **13→5** | 10→6 | 1,099,731→1,105,446 | 85,304→78,105 |
 
 | Fixture | slots／aggregate regions／outbox cells | backend scratch B0→B1 | frame chunks B0→B1 | 全 BF 訪問 B0→B1 | 複製 block／instruction | B1 selector 命令 |
 |---|---:|---:|---:|---:|---:|---:|
-| optional Call | 3／0／0 | 1→8 | 2→2 | 18→7 | 5／8 | 683 |
-| nested optional Call | 4／0／0 | 1→13 | 2→3 | 24→7 | 11／21 | 857 |
-| aggregate portal | 6／2／0 | 3→10 | 7→7 | 32→25 | 5／27 | 450 |
+| optional Call | 2／0／0 | 0→8 | 2→2 | 20→7 | 6／8 | 697 |
+| nested optional Call | 3／0／0 | 0→13 | 2→2 | 27→7 | 13／21 | 613 |
+| aggregate portal | 5／2／0 | 2→10 | 7→7 | 33→25 | 6／27 | 464 |
 
 Call／Return 回数は前2ケースが3／3、portal ケースが1／1で、両方式で一致する。
 portal ケースの accessor／resume／router の実 BF 訪問は **18→18**。
@@ -122,9 +128,35 @@ native loop の制御命令は selector cost には含めず、全 BF 命令数�
 frame とコードサイズの増加は引き続き計測し、削減能力を保った上で後続の cost model で扱う。
 現時点では、frame chunks／BF bytes の増加だけを理由に region を取り消す判定は追加していない。
 
+## Yielding control の通常 CFG 化
+
+`yielding_call_split`、Call 1個の loop 専用 lowering、片 arm を terminator 内に埋める
+lowering を撤去した。yield する if／while は通常の `Branch`／`Goto`／hard terminal に
+lowering し、frame-only な if／while の `FrameInstruction` 化は維持する。
+`BranchWithBodies` の validator、allocator、VM、backend、region planner、viewer の
+専用処理も削除した。allocator は arm 内を一括して保守的に live と扱う必要がなくなる。
+
+次表は同一 fixture の **通常 CFG 化前（`3e22f9e`）→後** の B1 測定であり、B0→B1 ではない。
+専用 lowering 撤去後も、entry＋hard resume だけの訪問数を維持することをテストで固定した。
+
+| Fixture | 対象 B1 訪問 | scalar slots | B1 frame chunks | 全 program B1 bytes | 全 program B1 実行命令 |
+|---|---:|---:|---:|---:|---:|
+| single-call loop、n=2 | 3→3 | 3→2 | 2→2 | 5,556→5,560 | 7,694→7,723 |
+| if の local arm | 1→1 | 2→2 | 2→2 | 4,417→4,405 | 1,862→1,859 |
+| if の Call arm | 2→2 | 2→2 | 2→2 | 4,417→4,405 | 3,302→3,297 |
+| 反転条件の loop | 2→2 | 3→2 | 2→2 | 5,553→5,563 | 4,324→4,348 |
+| nested prefix／suffix | 3→3 | 6→3 | 2→2 | 5,883→5,805 | 7,819→7,776 |
+| aggregate local arm | 1→1 | 2→2 | 4→4 | 7,408→7,408 | 3,925→3,925 |
+| nested optional Call | 3→3 | 4→3 | **3→2** | 10,357→7,884 | 13,431→10,473 |
+
+B0 では、片 arm が local な if の local 経路が2→3訪問、optional Call loop が12→14訪問、
+nested optional Call loop が18→21訪問になる。B1 はこれらの soft edge を直接実行するため
+訪問数が増えない。B1 の既定有効化は別途行い、この移行では dispatcher 削減能力を優先する。
+上の soft cycle 表は通常 CFG 化後の値へ更新済み。
+
 ## 検証方法と制限
 
-追加15テストでは、未融合 CIR VM を意味の基準にして、B0／B1 の生成 BF の出力、入力消費、
+region emission の16テストでは、未融合 CIR VM を意味の基準にして、B0／B1 の生成 BF の出力、入力消費、
 各 Call／Return／portal／Halt／Abort の実行回数を照合する。profile あり／なしで最適化済み
 BF 自体も一致することを検証している。
 
@@ -141,11 +173,12 @@ ID 65,535、255／256 terminal、soft SCC、展開上限を含む。加えて32�
 各3通りの入力で実行し、self edge・nested backedge・複数入口の cycle を検証する。
 terminal のない閉じた SCC も BF 出力可能であることを確認する。
 
-CIR inline、virtual inbox／outbox、allocation の pipeline 移動、展開上限を超える graph の直接実行、
-`BranchWithBodies` の削除、専用 lowering の撤去は後続作業。
+CIR inline、virtual inbox／outbox、allocation の pipeline 移動、展開上限を超える graph の
+直接実行は後続作業。
 公開機能として有効化する前に、frame cost と追加 scratch を減らす方式の評価が必要になる。
 
-検証時の `cargo test --workspace`、format／diff check、
-`cargo clippy --workspace --all-targets -- -D warnings` は成功。
+検証時の `cargo test --workspace`（329成功、1件は benchmark export 用のため ignored）、
+format／diff check、`cargo clippy --workspace --all-targets -- -D warnings`、
+CIR viewer の production build は成功。
 既存の5警告も修正した。aggregate clear の重複した長さ引数を除去し、
 profile site lookup と lowering の分岐、HIR inline の Option／cost 走査を整理している。

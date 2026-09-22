@@ -526,17 +526,6 @@ pub enum Terminator {
         then_target: ContinuationId,
         else_target: ContinuationId,
     },
-    /// Select a successor while executing frame-only instructions in either
-    /// arm before entering it.  Keeping the arm body on the terminator avoids
-    /// allocating a dispatcher continuation for a branch that only yields on
-    /// the other side.
-    BranchWithBodies {
-        condition: Address,
-        then_body: Vec<FrameInstruction>,
-        then_target: ContinuationId,
-        else_body: Vec<FrameInstruction>,
-        else_target: ContinuationId,
-    },
     /// Call `callee` with already evaluated scalar and aggregate arguments.
     ///
     /// Arguments retain source evaluation order. A scalar result is returned
@@ -606,9 +595,7 @@ pub(crate) enum EdgeKind {
 impl Terminator {
     pub(crate) fn boundary(&self) -> BoundaryKind {
         match self {
-            Self::Goto { .. } | Self::Branch { .. } | Self::BranchWithBodies { .. } => {
-                BoundaryKind::Soft
-            }
+            Self::Goto { .. } | Self::Branch { .. } => BoundaryKind::Soft,
             Self::Call { .. }
             | Self::ArrayLoad { .. }
             | Self::ArrayStore { .. }
@@ -624,11 +611,6 @@ impl Terminator {
         let targets = match *self {
             Self::Goto { target } => [Some((target, EdgeKind::Normal)), None],
             Self::Branch {
-                then_target,
-                else_target,
-                ..
-            }
-            | Self::BranchWithBodies {
                 then_target,
                 else_target,
                 ..
@@ -650,11 +632,6 @@ impl Terminator {
         match self {
             Self::Goto { target } => map(target),
             Self::Branch {
-                then_target,
-                else_target,
-                ..
-            }
-            | Self::BranchWithBodies {
                 then_target,
                 else_target,
                 ..
@@ -1690,19 +1667,6 @@ fn validate_terminator(
             else_target,
         } => {
             validate_address(*condition, continuation.id, function, globals)?;
-            validate_successor(continuation, *then_target, continuations)?;
-            validate_successor(continuation, *else_target, continuations)
-        }
-        Terminator::BranchWithBodies {
-            condition,
-            then_body,
-            then_target,
-            else_body,
-            else_target,
-        } => {
-            validate_address(*condition, continuation.id, function, globals)?;
-            validate_instructions(then_body, continuation.id, function, globals)?;
-            validate_instructions(else_body, continuation.id, function, globals)?;
             validate_successor(continuation, *then_target, continuations)?;
             validate_successor(continuation, *else_target, continuations)
         }

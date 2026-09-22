@@ -59,7 +59,6 @@ pub struct ContinuationPhaseConfig {
 pub enum ContinuationTerminatorKind {
     Goto,
     Branch,
-    BranchWithBodies,
     Call,
     Return,
     ArrayLoad,
@@ -75,7 +74,6 @@ impl ContinuationTerminatorKind {
         match self {
             Self::Goto => "goto",
             Self::Branch => "branch",
-            Self::BranchWithBodies => "branch_with_bodies",
             Self::Call => "call",
             Self::Return => "return",
             Self::ArrayLoad => "array_load",
@@ -91,7 +89,6 @@ impl ContinuationTerminatorKind {
         match terminator {
             Terminator::Goto { .. } => Self::Goto,
             Terminator::Branch { .. } => Self::Branch,
-            Terminator::BranchWithBodies { .. } => Self::BranchWithBodies,
             Terminator::Call { .. } => Self::Call,
             Terminator::Return { .. } => Self::Return,
             Terminator::ArrayLoad { .. } => Self::ArrayLoad,
@@ -913,7 +910,7 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
             for instruction in continuation.body() {
                 self.execute_instruction(instruction, progress)?;
             }
-            if !self.execute_terminator(continuation.terminator(), progress)? {
+            if !self.execute_terminator(continuation.terminator())? {
                 return Ok(());
             }
         }
@@ -1026,14 +1023,7 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
     }
 
     /// Return true to continue dispatching.
-    fn execute_terminator<F>(
-        &mut self,
-        terminator: &Terminator,
-        progress: &mut F,
-    ) -> Result<bool, ContinuationVmError>
-    where
-        F: FnMut(ContinuationRunProgress),
-    {
+    fn execute_terminator(&mut self, terminator: &Terminator) -> Result<bool, ContinuationVmError> {
         let from = self.current;
         let phase = self.current_phase();
         match terminator {
@@ -1050,25 +1040,6 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
                 } else {
                     *else_target
                 };
-            }
-            Terminator::BranchWithBodies {
-                condition,
-                then_body,
-                then_target,
-                else_body,
-                else_target,
-            } => {
-                let condition_value = self.read_address(*condition)?;
-                self.write_address(*condition, 0)?;
-                let (body, target) = if condition_value != 0 {
-                    (then_body, then_target)
-                } else {
-                    (else_body, else_target)
-                };
-                for instruction in body {
-                    self.execute_instruction(instruction, progress)?;
-                }
-                self.current = *target;
             }
             Terminator::Call {
                 callee,

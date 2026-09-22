@@ -3,6 +3,7 @@ use super::*;
 use bf_interpreter::{ProfileMode, ProfileOptions, RunOptions};
 
 struct Measurement {
+    output: Vec<u8>,
     visits: HashMap<ContinuationId, u64>,
     hidden_visits: u64,
     bytes: usize,
@@ -105,6 +106,7 @@ fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool) -> Measur
         }
     }
     Measurement {
+        output: result.output,
         visits,
         hidden_visits,
         bytes: plain.len(),
@@ -173,6 +175,80 @@ fn both_yielding_arms_reach_two_real_dispatcher_visits() {
         if n == 1 {
             report("both-arm", &program, worker.id(), &before, &after);
         }
+    }
+}
+
+#[test]
+fn source_yield_lowering_preserves_dispatch_minimum() {
+    let cases: [(&str, &str, &[u8], &[u8]); 6] = [
+        (
+            "single-call-loop",
+            "while(n) { output(65); mark(n); output(66); n-=1; }",
+            &[2],
+            b"AxBAxB",
+        ),
+        (
+            "one-arm-local",
+            "if(n) { n+=1; } else { mark(n); } output(n);",
+            &[1],
+            &[2],
+        ),
+        (
+            "one-arm-call",
+            "if(n) { n+=1; } else { mark(n); } output(n);",
+            &[0],
+            b"y\0",
+        ),
+        (
+            "inverted-loop",
+            "while(n==0) { output(65); n+=1; mark(n); output(66); }",
+            &[0],
+            b"AxB",
+        ),
+        (
+            "nested-prefix",
+            "while(n) { if(input()) { output(65); } else { output(66); } mark(n); cell j=input(); while(j) { output(67); j-=1; } n-=1; }",
+            &[2, 1, 2, 0, 0],
+            b"AxCCBx",
+        ),
+        (
+            "aggregate-local",
+            "cell[2] p; p[0]=n; if(n) { p[1]=p[0]; } else { mark(n); } output(p[0]); output(p[1]);",
+            &[1],
+            &[1, 1],
+        ),
+    ];
+    for (label, body, input, expected) in cases {
+        let source =
+            format!("{MARK} void worker(cell n) {{ {body} }} void main() {{ worker(input()); }}");
+        let program = crate::lower_source(&source).unwrap();
+        let worker = program
+            .functions()
+            .iter()
+            .find(|f| f.name() == Some("worker"))
+            .unwrap()
+            .id();
+        let plan = RegionPlan::new(&program);
+        assert_eq!(plan.bounded_fallbacks, 0);
+        let before = measure(&program, input, false);
+        let after = measure(&program, input, true);
+        assert_eq!(before.output, expected, "{label}: source semantics");
+        assert_eq!(after.output, expected, "{label}: source semantics");
+        let yields = program
+            .continuations()
+            .iter()
+            .filter(|c| {
+                c.function() == worker
+                    && c.terminator().boundary() == crate::continuation_ir::BoundaryKind::Hard
+            })
+            .map(|c| before.semantic.continuation_count(c.id()))
+            .sum::<u64>();
+        assert_eq!(
+            function_visits(&program, &after, worker),
+            1 + yields,
+            "{label}"
+        );
+        report(label, &program, worker, &before, &after);
     }
 }
 
@@ -255,15 +331,7 @@ fn report(
         .iter()
         .map(|(id, count)| {
             let c = program.continuation(*id).unwrap();
-            let arms = match c.terminator() {
-                Terminator::BranchWithBodies {
-                    then_body,
-                    else_body,
-                    ..
-                } => instructions(then_body) + instructions(else_body),
-                _ => 0,
-            };
-            (count - 1) * (instructions(c.body()) + arms)
+            (count - 1) * instructions(c.body())
         })
         .sum::<usize>();
     let semantic_visits = program
@@ -394,132 +462,120 @@ fn slot(n: usize) -> Address {
 fn condition_slot_reuse_shared_resume_and_sparse_ids_keep_values_and_sources() {
     let main = FunctionId::new(0);
     let callee = FunctionId::new(1);
-    for with_bodies in [false, true] {
-        let branch = if with_bodies {
-            Terminator::BranchWithBodies {
-                condition: slot(0),
-                then_body: vec![FrameInstruction::Output { src: slot(0) }],
-                then_target: id(3),
-                else_body: vec![FrameInstruction::Output { src: slot(0) }],
-                else_target: id(4),
-            }
-        } else {
-            Terminator::Branch {
-                condition: slot(0),
-                then_target: id(3),
-                else_target: id(4),
-            }
-        };
-        let span = SourceSpan {
-            file_id: 0,
-            start_byte: 10,
-            end_byte: 20,
-        };
-        let program = ContinuationProgram::new(
-            main,
-            vec![
-                FunctionDescriptor::new(main, vec![], 1, ValueType::Void, id(1)),
-                FunctionDescriptor::new(
+    let branch = Terminator::Branch {
+        condition: slot(0),
+        then_target: id(3),
+        else_target: id(4),
+    };
+    let span = SourceSpan {
+        file_id: 0,
+        start_byte: 10,
+        end_byte: 20,
+    };
+    let program = ContinuationProgram::new(
+        main,
+        vec![
+            FunctionDescriptor::new(main, vec![], 1, ValueType::Void, id(1)),
+            FunctionDescriptor::new(
+                callee,
+                vec![FrameSlot::new(0)],
+                1,
+                ValueType::Cell,
+                id(65535),
+            ),
+        ],
+        vec![
+            Continuation::new(
+                id(1),
+                main,
+                vec![FrameInstruction::Input { dst: slot(0) }],
+                branch,
+            ),
+            Continuation::new(
+                id(3),
+                main,
+                vec![FrameInstruction::Set {
+                    dst: slot(0),
+                    value: 42,
+                }],
+                Terminator::Call {
                     callee,
-                    vec![FrameSlot::new(0)],
-                    1,
-                    ValueType::Cell,
-                    id(65535),
-                ),
-            ],
-            vec![
-                Continuation::new(
-                    id(1),
-                    main,
-                    vec![FrameInstruction::Input { dst: slot(0) }],
-                    branch,
-                ),
-                Continuation::new(
-                    id(3),
-                    main,
-                    vec![FrameInstruction::Set {
-                        dst: slot(0),
-                        value: 42,
-                    }],
-                    Terminator::Call {
-                        callee,
-                        arguments: vec![ValueOperand::Cell(slot(0))],
-                        return_to: id(5),
-                    },
-                )
-                .with_source_spans(vec![Some(span)], Some(span)),
-                Continuation::new(
-                    id(4),
-                    main,
-                    vec![FrameInstruction::Set {
-                        dst: slot(0),
-                        value: 43,
-                    }],
-                    Terminator::Call {
-                        callee,
-                        arguments: vec![ValueOperand::Cell(slot(0))],
-                        return_to: id(5),
-                    },
-                ),
-                Continuation::new(
-                    id(5),
-                    main,
-                    vec![
-                        FrameInstruction::Output {
-                            src: Address::AbiValue,
-                        },
-                        FrameInstruction::Output { src: slot(0) },
-                    ],
-                    Terminator::Halt,
-                ),
-                Continuation::new(
-                    id(65535),
+                    arguments: vec![ValueOperand::Cell(slot(0))],
+                    return_to: id(5),
+                },
+            )
+            .with_source_spans(vec![Some(span)], Some(span)),
+            Continuation::new(
+                id(4),
+                main,
+                vec![FrameInstruction::Set {
+                    dst: slot(0),
+                    value: 43,
+                }],
+                Terminator::Call {
                     callee,
-                    vec![],
-                    Terminator::Return {
-                        value: Some(ValueOperand::Cell(slot(0))),
+                    arguments: vec![ValueOperand::Cell(slot(0))],
+                    return_to: id(5),
+                },
+            ),
+            Continuation::new(
+                id(5),
+                main,
+                vec![
+                    FrameInstruction::Output {
+                        src: Address::AbiValue,
                     },
-                ),
-            ],
-        )
-        .unwrap()
-        .with_source_files(vec![crate::SourceFileDescriptor {
-            id: 0,
-            path: "fixture.bfc".into(),
-        }]);
-        let plan = RegionPlan::new(&program);
-        assert_eq!(plan.entries, HashSet::from([id(1), id(5), id(65535)]));
-        for n in [0, 1, 255] {
-            measure(&program, &[n], false);
-            let after = measure(&program, &[n], true);
-            assert_eq!(function_visits(&program, &after, main), 2);
-        }
-        let annotated = lower_continuations_annotated_with_options(
-            &program,
-            AbiConfig::default(),
-            true,
-            ProfileGranularity::Source,
-            false,
-            true,
-        )
-        .unwrap();
-        let artifact = optimize_annotated_bf(&annotated).profile_artifact(false);
-        let copies = artifact
-            .map
-            .sites
-            .iter()
-            .filter(|s| s.stable_key == "function.0.continuation.3")
-            .collect::<Vec<_>>();
-        assert!(
-            copies.len() >= 2,
-            "local body and deferred terminal keep provenance"
-        );
-        assert!(copies.iter().all(|s| {
-            s.source
-                .as_ref()
-                .is_some_and(|s| s.start_byte == 10 && s.end_byte == 20)
-        }));
+                    FrameInstruction::Output { src: slot(0) },
+                ],
+                Terminator::Halt,
+            ),
+            Continuation::new(
+                id(65535),
+                callee,
+                vec![],
+                Terminator::Return {
+                    value: Some(ValueOperand::Cell(slot(0))),
+                },
+            ),
+        ],
+    )
+    .unwrap()
+    .with_source_files(vec![crate::SourceFileDescriptor {
+        id: 0,
+        path: "fixture.bfc".into(),
+    }]);
+    let plan = RegionPlan::new(&program);
+    assert_eq!(plan.entries, HashSet::from([id(1), id(5), id(65535)]));
+    for n in [0, 1, 255] {
+        measure(&program, &[n], false);
+        let after = measure(&program, &[n], true);
+        assert_eq!(function_visits(&program, &after, main), 2);
     }
+    let annotated = lower_continuations_annotated_with_options(
+        &program,
+        AbiConfig::default(),
+        true,
+        ProfileGranularity::Source,
+        false,
+        true,
+    )
+    .unwrap();
+    let artifact = optimize_annotated_bf(&annotated).profile_artifact(false);
+    let copies = artifact
+        .map
+        .sites
+        .iter()
+        .filter(|s| s.stable_key == "function.0.continuation.3")
+        .collect::<Vec<_>>();
+    assert!(
+        copies.len() >= 2,
+        "local body and deferred terminal keep provenance"
+    );
+    assert!(copies.iter().all(|s| {
+        s.source
+            .as_ref()
+            .is_some_and(|s| s.start_byte == 10 && s.end_byte == 20)
+    }));
 }
 
 #[test]

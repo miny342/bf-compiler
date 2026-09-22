@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::abi_codegen::{maximum_branch_depth, maximum_terminator_branch_depth};
+use crate::abi_codegen::maximum_branch_depth;
 use crate::continuation_ir::{
     BoundaryKind, Continuation, ContinuationId, ContinuationProgram, EdgeKind, FunctionId,
     Terminator,
@@ -145,21 +145,12 @@ impl Builder<'_> {
                 then_target,
                 else_target,
                 ..
-            }
-            | Terminator::BranchWithBodies {
-                then_target,
-                else_target,
-                ..
             } => {
                 let (then_node, then_depth) = self.expand(*then_target, depth + 1)?;
                 let (else_node, else_depth) = self.expand(*else_target, depth + 1)?;
                 // Two private gates protect a consumed condition whose allocated
                 // slot may be reused immediately by either successor.
-                temporaries = temporaries.max(
-                    2 + then_depth
-                        .max(else_depth)
-                        .max(maximum_terminator_branch_depth(c.terminator())),
-                );
+                temporaries = temporaries.max(2 + then_depth.max(else_depth));
                 RegionFlow::Branch(Box::new(then_node), Box::new(else_node))
             }
             terminal => {

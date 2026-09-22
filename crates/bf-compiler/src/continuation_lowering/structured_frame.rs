@@ -139,49 +139,6 @@ impl FunctionLowerer<'_, '_> {
         assert_eq!(current.id, id);
         Ok(std::mem::replace(&mut current.body, prefix))
     }
-
-    /// Find a block with one direct call and frame-only regions around it.
-    /// Such a block can be represented as a branch arm followed by a call
-    /// terminator, instead of dispatching once for the prefix first.
-    pub(super) fn yielding_call_split<'b>(
-        &self,
-        body: &'b HirStatement,
-    ) -> Option<(&'b [HirStatement], &'b HirStatement, &'b [HirStatement])> {
-        let HirStatementKind::Block(statements) = &body.kind else {
-            return None;
-        };
-        let call_indices = statements
-            .iter()
-            .enumerate()
-            .filter_map(|(index, statement)| {
-                matches!(&statement.kind, HirStatementKind::Call { .. }).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let [call_index] = call_indices.as_slice() else {
-            return None;
-        };
-        let HirStatementKind::Call { arguments, .. } = &statements[*call_index].kind else {
-            unreachable!("call index was classified above");
-        };
-        if !arguments
-            .iter()
-            .all(|argument| self.expression_is_frame_only(argument))
-        {
-            return None;
-        }
-        let prefix = &statements[..*call_index];
-        let suffix = &statements[*call_index + 1..];
-        if prefix
-            .iter()
-            .any(|statement| !self.statement_is_frame_only(statement) || statement_stops(statement))
-            || suffix.iter().any(|statement| {
-                !self.statement_is_frame_only(statement) || statement_stops(statement)
-            })
-        {
-            return None;
-        }
-        Some((prefix, &statements[*call_index], suffix))
-    }
 }
 
 /// Source paths that cannot reach the next statement. In particular, a

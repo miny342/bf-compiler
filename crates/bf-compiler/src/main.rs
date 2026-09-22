@@ -1115,11 +1115,6 @@ fn terminator_successors(terminator: &bf_compiler::Terminator) -> Vec<bf_compile
             else_target,
             ..
         } => vec![*then_target, *else_target],
-        bf_compiler::Terminator::BranchWithBodies {
-            then_target,
-            else_target,
-            ..
-        } => vec![*then_target, *else_target],
         bf_compiler::Terminator::Call { return_to, .. }
         | bf_compiler::Terminator::ArrayLoad { return_to, .. }
         | bf_compiler::Terminator::ArrayStore { return_to, .. }

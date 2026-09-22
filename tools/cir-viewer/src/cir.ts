@@ -362,18 +362,6 @@ function rustTerminator(value: unknown): Terminator {
       text: `if (${condition} != 0) goto c${thenTarget} else goto c${elseTarget}`,
     };
   }
-  if (tag === "BranchWithBodies") {
-    const branch = asObject(payload);
-    const thenTarget = requiredNumber(branch.then_target, "branch then target");
-    const elseTarget = requiredNumber(branch.else_target, "branch else target");
-    return {
-      kind: "branch",
-      condition: 0,
-      thenTarget,
-      elseTarget,
-      text: `if (${addressText(branch.condition)} != 0) { ${bodyText(branch.then_body)} } -> c${thenTarget} else { ${bodyText(branch.else_body)} } -> c${elseTarget}`,
-    };
-  }
   if (tag === "Call") {
     const call = asObject(payload);
     const callee = requiredNumber(call.callee, "call callee");

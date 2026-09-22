@@ -343,10 +343,7 @@ fn build_layouts_with_regions(
             .continuations()
             .iter()
             .filter(|continuation| continuation.function() == function.id())
-            .map(|continuation| {
-                maximum_branch_depth(continuation.body())
-                    .max(maximum_terminator_branch_depth(continuation.terminator()))
-            })
+            .map(|continuation| maximum_branch_depth(continuation.body()))
             .max()
             .unwrap_or(0);
         let region_depth = regions.and_then(|plan| plan.branch_temporaries.get(&function.id()));
@@ -754,24 +751,6 @@ pub(crate) fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
         .unwrap_or(0)
 }
 
-pub(crate) fn maximum_terminator_branch_depth(terminator: &Terminator) -> usize {
-    match terminator {
-        Terminator::BranchWithBodies {
-            then_body,
-            else_body,
-            ..
-        } => {
-            let nested = maximum_branch_depth(then_body).max(maximum_branch_depth(else_body));
-            if else_body.is_empty() {
-                nested
-            } else {
-                nested + 1
-            }
-        }
-        _ => 0,
-    }
-}
-
 fn instruction_kind(instruction: &FrameInstruction) -> &'static str {
     match instruction {
         FrameInstruction::SubWithBorrow { .. } => "sub_with_borrow",
@@ -792,7 +771,6 @@ fn terminator_kind(terminator: &Terminator) -> &'static str {
     match terminator {
         Terminator::Goto { .. } => "goto",
         Terminator::Branch { .. } => "branch",
-        Terminator::BranchWithBodies { .. } => "branch_with_bodies",
         Terminator::Call { .. } => "call",
         Terminator::Return { .. } => "return",
         Terminator::ArrayLoad { .. } => "array_load",
@@ -1951,114 +1929,6 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    /// Emit a terminal branch whose arms contain only frame instructions.
-    /// The selected arm can therefore run before the next-PC write without a
-    /// context migration.  This is the backend counterpart of
-    /// `Terminator::BranchWithBodies`.
-    fn emit_branch_with_bodies(
-        &mut self,
-        condition: Address,
-        then_body: &[FrameInstruction],
-        then_target: ContinuationId,
-        else_body: &[FrameInstruction],
-        else_target: ContinuationId,
-        function: FunctionId,
-    ) -> Result<(), AbiCodegenError> {
-        let condition = self.address_location(condition, function)?;
-        if else_body.is_empty() {
-            self.set_next_pc(else_target)?;
-            self.move_context_to_location(condition);
-            let body = self.capture(|emitter| {
-                emitter.clear_current();
-                emitter.move_location_to_context(condition);
-                emitter.with_instruction_path("then", |emitter| {
-                    emitter.emit_all(then_body, function, None)
-                })?;
-                emitter.clear_location(condition);
-                emitter.set_next_pc(then_target)?;
-                emitter.move_context_to_location(condition);
-                Ok(())
-            })?;
-            self.emit_loop(body);
-            self.move_location_to_context(condition);
-            return Ok(());
-        }
-
-        self.set_next_pc(then_target)?;
-        if then_body.is_empty() {
-            let flag = Location::Relative(self.acquire_branch_temporary(function)?);
-            self.set_location(flag, 1);
-
-            // A nonzero condition suppresses the else arm.
-            self.move_context_to_location(condition);
-            let condition_gate = self.capture(|emitter| {
-                emitter.clear_current();
-                emitter.move_location_to_context(condition);
-                emitter.clear_location(flag);
-                emitter.clear_location(condition);
-                emitter.move_context_to_location(condition);
-                Ok(())
-            })?;
-            self.emit_loop(condition_gate);
-            self.move_location_to_context(condition);
-
-            self.move_context_to_location(flag);
-            let else_loop = self.capture(|emitter| {
-                emitter.clear_current();
-                emitter.move_location_to_context(flag);
-                emitter.with_instruction_path("else", |emitter| {
-                    emitter.emit_all(else_body, function, None)
-                })?;
-                emitter.clear_location(condition);
-                emitter.clear_location(flag);
-                emitter.set_next_pc(else_target)?;
-                emitter.move_context_to_location(flag);
-                Ok(())
-            })?;
-            self.emit_loop(else_loop);
-            self.move_location_to_context(flag);
-            self.branch_temporary_depth -= 1;
-            return Ok(());
-        }
-
-        let flag = Location::Relative(self.acquire_branch_temporary(function)?);
-        self.set_location(flag, 1);
-
-        self.move_context_to_location(condition);
-        let then_loop = self.capture(|emitter| {
-            emitter.clear_current();
-            emitter.move_location_to_context(condition);
-            emitter.with_instruction_path("then", |emitter| {
-                emitter.emit_all(then_body, function, None)
-            })?;
-            emitter.clear_location(condition);
-            emitter.clear_location(flag);
-            emitter.set_next_pc(then_target)?;
-            emitter.move_context_to_location(condition);
-            Ok(())
-        })?;
-        self.emit_loop(then_loop);
-        self.move_location_to_context(condition);
-
-        self.move_context_to_location(flag);
-        let else_loop = self.capture(|emitter| {
-            emitter.clear_current();
-            emitter.move_location_to_context(flag);
-            emitter.with_instruction_path("else", |emitter| {
-                emitter.emit_all(else_body, function, None)
-            })?;
-            emitter.clear_location(condition);
-            emitter.clear_location(flag);
-            emitter.set_next_pc(else_target)?;
-            emitter.move_context_to_location(flag);
-            Ok(())
-        })?;
-        self.emit_loop(else_loop);
-        self.move_location_to_context(flag);
-        self.branch_temporary_depth -= 1;
-        Ok(())
-    }
-
     fn emit_terminator(&mut self, continuation: &Continuation) -> Result<(), AbiCodegenError> {
         if matches!(
             self.granularity,
@@ -2103,20 +1973,6 @@ impl<'a> AbiEmitter<'a> {
                 self.emit_loop(body);
                 self.move_location_to_context(condition);
             }
-            Terminator::BranchWithBodies {
-                condition,
-                then_body,
-                then_target,
-                else_body,
-                else_target,
-            } => self.emit_branch_with_bodies(
-                *condition,
-                then_body,
-                *then_target,
-                else_body,
-                *else_target,
-                continuation.function(),
-            )?,
             Terminator::Call {
                 callee,
                 arguments,

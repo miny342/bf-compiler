@@ -7,7 +7,8 @@
 型名と公開範囲は現在のRust実装を基準とする。設計候補を、実装済みであるかのようには記述しない。
 
 既定無効の CFG region emission prototype と実 BF dispatcher 訪問数の比較は
-[CIR_REGION_EMISSION.md](CIR_REGION_EMISSION.md) を参照。semantic CIR の形式は維持している。
+[CIR_REGION_EMISSION.md](CIR_REGION_EMISSION.md) を参照。yielding control は通常 CFG に統一し、
+旧 `BranchWithBodies` は削除した。
 
 ## 全体構成
 

@@ -184,10 +184,6 @@ pub fn structure_local_control_flow(
                         stats.branches += 1;
                     }
                 }
-                // The arm bodies already live on the terminator.  Do not
-                // consume this node as a diamond until a later pass knows how
-                // to preserve those bodies.
-                Terminator::BranchWithBodies { .. } => continue,
                 _ => continue,
             }
             replacement = Some((

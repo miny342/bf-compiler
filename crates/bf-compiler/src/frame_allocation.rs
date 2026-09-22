@@ -372,21 +372,6 @@ fn terminator_node(
             node.successors
                 .extend([entries[then_target], entries[else_target]]);
         }
-        Terminator::BranchWithBodies {
-            condition,
-            then_body,
-            then_target,
-            else_body,
-            else_target,
-        } => {
-            node.read(*condition);
-            node.write(*condition);
-            for instruction in then_body.iter().chain(else_body) {
-                record_frame_effects(&mut node, instruction);
-            }
-            node.successors
-                .extend([entries[then_target], entries[else_target]]);
-        }
         Terminator::Call {
             arguments,
             return_to,
@@ -455,72 +440,6 @@ fn terminator_node(
         Terminator::Abort | Terminator::Halt => {}
     }
     node
-}
-
-/// Record the addresses touched by a structured arm on the terminal CFG node.
-/// The arm is conditional: the other successor does not execute its writes.
-/// Therefore all touched values are kept live across both successors and no
-/// arm write is treated as an unconditional kill. This is conservative, but
-/// it prevents a value needed by the untouched arm from being reused for a
-/// destination written by the selected arm.
-fn record_frame_effects(node: &mut Node, instruction: &FrameInstruction) {
-    match instruction {
-        FrameInstruction::SubWithBorrow {
-            left,
-            right,
-            difference,
-            borrow,
-            ..
-        } => {
-            node.read(*left);
-            node.read(*right);
-            for address in [left, right, difference, borrow] {
-                node.read(*address);
-            }
-        }
-        FrameInstruction::Compare {
-            left, right, dst, ..
-        } => {
-            node.read(*left);
-            node.read(*right);
-            node.read(*dst);
-        }
-        FrameInstruction::Set { dst, .. } | FrameInstruction::Input { dst } => node.read(*dst),
-        FrameInstruction::AddConst { dst, .. } => {
-            node.read(*dst);
-        }
-        FrameInstruction::Copy { src, dst } => {
-            node.read(*src);
-            node.read(*dst);
-        }
-        FrameInstruction::Transfer { src, targets } => {
-            node.read(*src);
-            for target in targets {
-                node.read(target.dst);
-            }
-        }
-        FrameInstruction::AggregateCopy { src, dst, .. } => {
-            node.read_region(*src);
-            node.read_region(*dst);
-        }
-        FrameInstruction::Output { src } => node.read(*src),
-        FrameInstruction::Loop { condition, body } => {
-            node.read(*condition);
-            for instruction in body {
-                record_frame_effects(node, instruction);
-            }
-        }
-        FrameInstruction::Branch {
-            condition,
-            then_body,
-            else_body,
-        } => {
-            node.read(*condition);
-            for instruction in then_body.iter().chain(else_body) {
-                record_frame_effects(node, instruction);
-            }
-        }
-    }
 }
 
 fn liveness(nodes: &[Node]) -> Vec<Slots> {
@@ -674,16 +593,6 @@ fn map_body(body: &mut [FrameInstruction], map: &mut impl FnMut(&mut Address)) {
 fn map_terminator(terminator: &mut Terminator, map: &mut impl FnMut(&mut Address)) {
     match terminator {
         Terminator::Branch { condition, .. } => map(condition),
-        Terminator::BranchWithBodies {
-            condition,
-            then_body,
-            else_body,
-            ..
-        } => {
-            map(condition);
-            map_body(then_body, map);
-            map_body(else_body, map);
-        }
         Terminator::Call { arguments, .. } => {
             for argument in arguments {
                 map_operand(argument, map);
