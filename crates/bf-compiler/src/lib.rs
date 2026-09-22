@@ -10,8 +10,10 @@ mod bf_optimizer;
 mod codegen;
 #[cfg(test)]
 mod continuation_adapter;
+mod continuation_inline;
 mod continuation_ir;
 mod continuation_lowering;
+mod continuation_operands;
 mod continuation_optimizer;
 mod continuation_pipeline;
 mod continuation_regions;

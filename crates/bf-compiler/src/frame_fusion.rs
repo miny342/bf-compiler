@@ -97,28 +97,41 @@ pub(crate) fn fuse_function(
     let continuations = continuations
         .into_iter()
         .map(|c| {
-            let body = fuse_body(c.body(), base, &mut extra);
-            let body_len = body.len();
-            let source = c.primary_source();
+            let fused = fuse_body(c.body(), base, &mut extra);
+            let sources = fused
+                .iter()
+                .map(|(_, origin)| c.body_sources()[*origin])
+                .collect();
+            let body = fused
+                .into_iter()
+                .map(|(instruction, _)| instruction)
+                .collect();
             Continuation::new(c.id(), c.function(), body, c.terminator().clone())
-                .with_source_spans(vec![source; body_len], c.terminator_source())
+                .with_source_spans(sources, c.terminator_source())
         })
         .collect();
     (descriptor.with_frame_slots(base + extra), continuations)
 }
 
-fn fuse_body(body: &[I], base: usize, extra: &mut usize) -> Vec<I> {
+fn fuse_body(body: &[I], base: usize, extra: &mut usize) -> Vec<(I, usize)> {
     let mut output = Vec::new();
     let mut start = 0;
     for (index, instruction) in body.iter().enumerate() {
         if accesses(instruction).is_some() {
             continue;
         }
-        output.extend(fuse_region(&body[start..index], base, extra));
-        output.push(match instruction {
+        output.extend(
+            fuse_region(&body[start..index], base, extra)
+                .into_iter()
+                .map(|(i, origin)| (i, start + origin)),
+        );
+        let instruction = match instruction {
             I::Loop { condition, body } => I::Loop {
                 condition: *condition,
-                body: fuse_body(body, base, extra),
+                body: fuse_body(body, base, extra)
+                    .into_iter()
+                    .map(|(i, _)| i)
+                    .collect(),
             },
             I::Branch {
                 condition,
@@ -126,18 +139,29 @@ fn fuse_body(body: &[I], base: usize, extra: &mut usize) -> Vec<I> {
                 else_body,
             } => I::Branch {
                 condition: *condition,
-                then_body: fuse_body(then_body, base, extra),
-                else_body: fuse_body(else_body, base, extra),
+                then_body: fuse_body(then_body, base, extra)
+                    .into_iter()
+                    .map(|(i, _)| i)
+                    .collect(),
+                else_body: fuse_body(else_body, base, extra)
+                    .into_iter()
+                    .map(|(i, _)| i)
+                    .collect(),
             },
             _ => instruction.clone(),
-        });
+        };
+        output.push((instruction, index));
         start = index + 1;
     }
-    output.extend(fuse_region(&body[start..], base, extra));
+    output.extend(
+        fuse_region(&body[start..], base, extra)
+            .into_iter()
+            .map(|(i, origin)| (i, start + origin)),
+    );
     output
 }
 
-fn fuse_region(body: &[I], base: usize, extra: &mut usize) -> Vec<I> {
+fn fuse_region(body: &[I], base: usize, extra: &mut usize) -> Vec<(I, usize)> {
     let mut values = Values::default();
     let mut compares = HashMap::new();
     let mut replacements = HashMap::new();
@@ -267,7 +291,12 @@ fn fuse_region(body: &[I], base: usize, extra: &mut usize) -> Vec<I> {
         }
     }
     if replacements.is_empty() {
-        return body.to_vec();
+        return body
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, i)| (i, index))
+            .collect();
     }
     *extra = (*extra).max(scratch_ends.len());
     let result = body
@@ -277,6 +306,8 @@ fn fuse_region(body: &[I], base: usize, extra: &mut usize) -> Vec<I> {
             replacements
                 .remove(&index)
                 .unwrap_or_else(|| vec![instruction.clone()])
+                .into_iter()
+                .map(move |i| (i, index))
         })
         .collect::<Vec<_>>();
     remove_overwritten_copies(result)
@@ -284,16 +315,16 @@ fn fuse_region(body: &[I], base: usize, extra: &mut usize) -> Vec<I> {
 
 // Only remove writes whose value is overwritten before any read. Treat every
 // cell as live at region exit; no assumptions about successor blocks are needed.
-fn remove_overwritten_copies(body: Vec<I>) -> Vec<I> {
+fn remove_overwritten_copies(body: Vec<(I, usize)>) -> Vec<(I, usize)> {
     let mut live: HashSet<_> = body
         .iter()
-        .flat_map(|i| {
+        .flat_map(|(i, _)| {
             let (reads, writes) = accesses(i).unwrap();
             reads.into_iter().chain(writes)
         })
         .collect();
     let mut result = Vec::new();
-    for instruction in body.into_iter().rev() {
+    for (instruction, origin) in body.into_iter().rev() {
         if matches!(&instruction, I::Set { dst, .. } | I::Copy { dst, .. } if !live.contains(dst)) {
             continue;
         }
@@ -302,7 +333,7 @@ fn remove_overwritten_copies(body: Vec<I>) -> Vec<I> {
             live.remove(&address);
         }
         live.extend(reads);
-        result.push(instruction);
+        result.push((instruction, origin));
     }
     result.reverse();
     result

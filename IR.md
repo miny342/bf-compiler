@@ -9,6 +9,7 @@
 既定無効の CFG region emission prototype と実 BF dispatcher 訪問数の比較は
 [CIR_REGION_EMISSION.md](CIR_REGION_EMISSION.md) を参照。yielding control は通常 CFG に統一し、
 旧 `BranchWithBodies` は削除した。
+allocation 前の CIR inline と virtual result の実装・比較は [CIR_INLINE.md](CIR_INLINE.md) を参照。
 
 ## 全体構成
 

@@ -2,19 +2,19 @@
 use super::*;
 use bf_interpreter::{ProfileMode, ProfileOptions, RunOptions};
 
-struct Measurement {
-    output: Vec<u8>,
-    visits: HashMap<ContinuationId, u64>,
+pub(super) struct Measurement {
+    pub(super) output: Vec<u8>,
+    pub(super) visits: HashMap<ContinuationId, u64>,
     hidden_visits: u64,
-    bytes: usize,
-    instructions: u64,
-    rle_instructions: u64,
+    pub(super) bytes: usize,
+    pub(super) instructions: u64,
+    pub(super) rle_instructions: u64,
     selector_instructions: u64,
     selector_rle_instructions: u64,
-    semantic: crate::ContinuationRunStats,
+    pub(super) semantic: crate::ContinuationRunStats,
 }
 
-fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool) -> Measurement {
+pub(super) fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool) -> Measurement {
     let mut expected = Vec::new();
     let semantic = crate::run_continuations_with_io(
         program,

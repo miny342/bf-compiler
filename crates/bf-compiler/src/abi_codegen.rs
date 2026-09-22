@@ -293,7 +293,7 @@ const ROUTE_RESUME_LOW: usize = 5;
 const ROUTE_RESUME_HIGH: usize = 6;
 const ROUTE_SCRATCH_START: usize = 7;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Location {
     /// Offset from the current function's dispatch-context base.
     Relative(isize),
@@ -2053,6 +2053,9 @@ impl<'a> AbiEmitter<'a> {
         if !arguments.is_empty() {
             self.clear_location(restore);
         }
+        // An aggregate parameter can overlap a later scalar parameter (or
+        // vice versa). Only the first write is guaranteed to see a zero cell.
+        let mut written_parameters = HashSet::new();
         for (&argument, &(parameter, parameter_cells)) in arguments.iter().zip(&parameters) {
             match (argument, parameter) {
                 (ValueOperand::Cell(argument), ParameterLocation::Cell(parameter)) => {
@@ -2060,6 +2063,9 @@ impl<'a> AbiEmitter<'a> {
                     let dst = Location::Relative(
                         callee_context_delta + callee_frame.frame_offset(parameter),
                     );
+                    if !written_parameters.insert(dst) {
+                        self.clear_location(dst);
+                    }
                     self.copy_locations_to_zeroed_destination(src, dst, restore);
                 }
                 (
@@ -2071,6 +2077,9 @@ impl<'a> AbiEmitter<'a> {
                         callee_context_delta
                             + callee_frame.aggregate_element_offset(aggregate, index)?,
                     );
+                    if !written_parameters.insert(dst) {
+                        self.clear_location(dst);
+                    }
                     self.copy_locations_to_zeroed_destination(src, dst, restore);
                 }
                 (
@@ -2084,6 +2093,9 @@ impl<'a> AbiEmitter<'a> {
                             callee_context_delta
                                 + callee_frame.aggregate_element_offset(parameter, index)?,
                         );
+                        if !written_parameters.insert(dst) {
+                            self.clear_location(dst);
+                        }
                         self.copy_locations_to_zeroed_destination(src, dst, restore);
                     }
                 }
@@ -5859,5 +5871,7 @@ mod tests {
 #[cfg(test)]
 mod portal_probe;
 
+#[cfg(test)]
+mod inline_probe;
 #[cfg(test)]
 mod region_probe;

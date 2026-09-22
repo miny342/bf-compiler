@@ -90,6 +90,9 @@ pub(crate) fn lower_hir_with_options(
     options: ContinuationOptimizationOptions,
 ) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationLoweringError> {
     let lowered = lower_hir_unallocated(program)?;
+    // Explicit targets are used while validating CIR inline against the HIR pass.
+    let (lowered, _) = crate::continuation_inline::inline_selected(&lowered, &[])
+        .map_err(|detail| invalid_hir(None, detail))?;
     crate::continuation_pipeline::finish(&lowered, options).map_err(Into::into)
 }
 
