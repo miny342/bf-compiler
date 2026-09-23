@@ -1043,3 +1043,51 @@ nibble jumpの効果が大きい。
 このfixtureの詳細は`tmp/full31-array-patterns-exact/report.md`と同directoryのprofileに残す。
 次の確認ではfull selfhostを再実行し、`abi.portal.page`のRLE/transfer counterが同じ方向へ
 動くかを見る。現段階ではこの変更をfull測定結果なしにcommitしない。
+
+### 2026-09-24: 小さいglobal aggregateをanchor近傍へ配置
+
+Rust backendのstatic layoutはscalarを既にanchor近傍へ置く一方、3セルの`NodeId`や
+`WideValue`を巨大arena配列と同じ宣言逆順に並べていた。full38の`stage7_static_cells`は
+anchorからbaseまで1,184,659セル離れ、小さなstructの操作にも百万文字級の移動列を生成していた。
+
+16セル以下（D=16のpayload 1 chunk以下）のaggregateを、大きいaggregateの後、scalarの
+前へ配置した。各群の宣言逆順、logical GlobalId、initializer評価順序、portal prefixと総容量を
+維持する。`stage7_static_cells`のbase距離は847セルとなり、`arena_cells_0`は74,100から75,086へ
+少し遠くなる。変更はこの配置だけで、portal不要structのpackingや共有helperは含まない。
+
+baselineは`b74ad43`のfull38（`logs/full-selfhost-20260923-234353`）。同一sourceを変更後の
+compilerで再生成し、そのBF compilerで同じsource全体をコンパイルした。両方とも
+CIR inline/B1有効、unlimited tape、source granularity、`--disable-compare --profile-mode sample`。
+
+| 指標 | full38 | 小aggregate近接配置 | 変化 |
+|---|---:|---:|---:|
+| 展開BF bytes | 9,169,772,770 | 780,510,141 | -91.488% |
+| 圧縮BF bytes | 10,215,115 | 10,202,565 | -0.123% |
+| global navigation bytes | 8,629,158,251 | 347,162,579 | -95.977% |
+| 実行raw命令 | 4,197,169,239,663,160 | 2,033,728,709,155,792 | -51.545% |
+| 実行RLE命令 | 22,963,600,253,188 | 22,963,600,253,188 | 同一 |
+| native operations | 209,490,830,562 | 209,490,830,562 | 同一 |
+| scan steps | 141,458,150,278 | 141,458,150,278 | 同一 |
+| 最大pointer | 1,331,470 | 1,331,470 | 同一 |
+| execute 秒 | 1,093.783 | 1,074.307 | -1.781% |
+| parse 秒 | 27.329 | 28.792 | +5.353% |
+
+全optimization counterが一致し、profile site 125,345個とrangeのsite帰属列も一致した。
+静的dispatcher case数は2,474で同じ。長い定数moveをまとめる現在のinterpreterでは
+実行速度の改善とは扱わず、BFサイズ・raw命令数の削減として評価する。時間は別日時の単回測定。
+
+生成結果277,640,590 bytesのSHA-256は両者とも
+`97cad5f6291ac1882db71a4425dc82687c06163648afb04480893f7b635c4918`。
+入力195,591 bytesのSHA-256も一致した。結果と実行コマンドは
+`tmp/full38-small-global-layout/{run.json,comparison.md,comparison.json}`、従来形式の集計は
+`tmp/full38-small-global-layout-profile-summary.txt`に保存。
+
+16/17セルの境界、両aggregate群内の順序、zero-sized aggregateと総容量をunit testで固定した。
+initializerの出力順、16/17セル配列の動的portal、3セルstruct、再帰中のglobal更新・復元を
+統合regressionで確認した。この小fixtureの新旧BFをcounters modeでも比較し、出力`ijADA`、
+実dispatcher訪問27回、RLE 103,185、native 4,037が一致、raw命令は1,277,308から1,152,188へ減少。
+workspaceは343 passed / 3 ignored、追加の統合regressionは別途1 passed。Clippy警告なし、fmtも成功。
+
+後続の共有helperは全アクセスを一律に対象とせず、アクセス命令数×距離が閾値を超える候補から
+検討する。サイズにはinline/B1複製後の静的なアクセス数、実行コストには動的頻度と追加dispatchを
+別々に計上する。今回の変更にこの選択処理は含めない。

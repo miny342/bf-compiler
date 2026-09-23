@@ -398,6 +398,49 @@ fn abort_during_global_initialization_never_enters_main() {
 }
 
 #[test]
+fn reordered_global_regions_preserve_initializers_portals_and_recursive_access() {
+    let source = r#"
+        struct Triple { cell a; cell b; cell c; }
+        cell[17] large;
+        Triple state = initialize();
+        cell[16] small;
+        cell marker = mark();
+
+        Triple initialize() {
+            output('i');
+            Triple value;
+            value.a = 'A';
+            return value;
+        }
+
+        cell mark() {
+            output('j');
+            return 0;
+        }
+
+        cell descend(cell depth) {
+            if (depth == 0) { return state.a; }
+            cell saved = state.a;
+            state.a += 1;
+            cell result = descend(depth - 1);
+            state.a = saved;
+            return result;
+        }
+
+        void main() {
+            cell index = input();
+            large[index] = state.a;
+            small[index - 1] = descend(3);
+            state.b = small[index - 1];
+            output(large[index]);
+            output(state.b);
+            output(state.a);
+        }
+    "#;
+    assert_both(source, &[16], b"ijADA");
+}
+
+#[test]
 fn invalid_version_one_programs_are_compile_errors() {
     let cases = [
         "enum Bad { One = 1 } void main() {}",

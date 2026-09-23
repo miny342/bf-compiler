@@ -85,6 +85,11 @@ globals
 anchorより左はコンパイル時に位置が確定するstatic領域、anchorより右は実行時に
 伸縮するframe stack領域である。
 
+Rust backendは大きいglobal aggregate、16セル以下のglobal aggregate、scalar globals、
+remote-copy scratch、anchorの順に配置する。aggregateの各群では宣言の逆順を保つ。
+小さいstructを巨大配列の向こうへ置かず、低番号arenaの順序も維持するための配置である。
+logical GlobalId、global initializerの評価順序、portal prefix、総tape容量は変えない。
+
 ## Chunk headの役割
 
 同じ物理位置にあるhead cellは、領域ごとに異なる役割を持つ。

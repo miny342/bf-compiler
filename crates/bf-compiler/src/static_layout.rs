@@ -1,8 +1,9 @@
 //! Checked physical layout of file-scope objects and the stack anchor.
 //!
-//! Global aggregate regions occupy the low-address end in reverse declaration
-//! order, keeping the low-numbered regions used first by bump allocators close
-//! to the stack anchor.
+//! Global aggregate regions occupy the low-address end. Regions with at most
+//! one payload chunk follow larger regions, keeping small structs near the
+//! stack anchor instead of behind large arenas. Each group retains reverse
+//! declaration order, so low-numbered arena regions remain nearest the anchor.
 //! Every nonempty aggregate receives an aligned portal prefix; zero-sized
 //! aggregates retain identity without consuming tape. Scalar globals and the
 //! D=16 remote-copy scratch sit next to the stack anchor, keeping their emitted
@@ -81,11 +82,21 @@ impl StaticLayout {
             .count();
         let mut globals = Vec::with_capacity(descriptors.len());
         let mut next_head = 0usize;
-        for descriptor in descriptors.iter().rev() {
-            let cells = match descriptor.value_type() {
-                ValueType::Array(cells) | ValueType::Aggregate { cells } => cells,
-                ValueType::Cell | ValueType::Void => continue,
-            };
+        let mut aggregates = descriptors
+            .iter()
+            .rev()
+            .filter_map(|descriptor| match descriptor.value_type() {
+                ValueType::Array(cells) | ValueType::Aggregate { cells } => {
+                    Some((descriptor, cells))
+                }
+                ValueType::Cell | ValueType::Void => None,
+            })
+            .collect::<Vec<_>>();
+        // A stable partition preserves reverse declaration order within both
+        // groups. Portal prefixes and total storage are unchanged; only region
+        // bases move. With D=16, the near-anchor group holds up to 16 cells.
+        aggregates.sort_by_key(|(_, cells)| *cells <= config.chunk_cells());
+        for (descriptor, cells) in aggregates {
             let chunks = aggregate_region_chunks(cells, config)
                 .map_err(|_| StaticLayoutError::SizeOverflow)?;
             let physical_cells = chunks
@@ -489,6 +500,38 @@ mod tests {
         assert_eq!(d16.array_base_head(GlobalId::new(2)), Ok(0));
         assert_eq!(d16.array_chunk_count(GlobalId::new(2)), Ok(3));
         assert_eq!(d16.anchor_head(), 96);
+    }
+
+    #[test]
+    fn small_aggregates_follow_large_regions_without_reordering_either_group() {
+        let large = GlobalId::new(7);
+        let small = GlobalId::new(3);
+        let paged = GlobalId::new(19);
+        let one_chunk = GlobalId::new(40);
+        let scalar = GlobalId::new(0);
+        let empty = GlobalId::new(21);
+        let layout = StaticLayout::new(
+            AbiConfig::default(),
+            &[
+                GlobalDescriptor::array(large, 17),
+                GlobalDescriptor::aggregate(small, 3),
+                GlobalDescriptor::aggregate(paged, 257),
+                GlobalDescriptor::array(one_chunk, 16),
+                GlobalDescriptor::cell(scalar),
+                GlobalDescriptor::aggregate(empty, 0),
+            ],
+        )
+        .unwrap();
+
+        // Declaration order, not numeric GlobalId order, is reversed in each
+        // group. The 16/17 boundary applies to both legacy arrays and structs.
+        assert_eq!(layout.aggregate_base_head(paged), Ok(0));
+        assert_eq!(layout.aggregate_base_head(large), Ok(323));
+        assert_eq!(layout.aggregate_base_head(one_chunk), Ok(374));
+        assert_eq!(layout.aggregate_base_head(small), Ok(408));
+        assert_eq!(layout.aggregate_chunk_count(empty), Ok(0));
+        assert_eq!(layout.scalar_position(scalar), Ok(442));
+        assert_eq!(layout.anchor_head(), 452);
     }
 
     #[test]
