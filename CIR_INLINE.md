@@ -27,7 +27,8 @@ source の既定経路は空の対象リストを渡し、既存 HIR inline を�
   frame fusion は block 全体へ先頭の span を付け直す処理をやめ、元命令の index から span を引き継ぐ。
 
 `continuation_operands` に operand remap を集約し、allocator と inliner で共用する。
-read／write／clobber 分類の共用化は引き続き後続作業。
+`continuation_effects` が read／write／clobber、動的部分書き込み、Call result、I/O を分類し、
+allocator・frame fusion・virtual cleanup で共用する。
 
 検証中に、既存 Call backend が aggregate parameter と重なる scalar parameter を
 加算してしまうケースも修正した。callee frame がゼロという前提は最初の書き込みにだけ使い、
@@ -58,22 +59,50 @@ profile 有無の BF／raw／RLE カウンタを比較する。下表は **B1 �
 | 繰り返し zero 初期化、3反復 / tick | 3→0 | 7→1 | 2→2 | 2,024→1,103 | 4,874→1,427 | 1,154→229 |
 
 dispatcher 削減と raw／RLE の改善は別々に評価する。明示指定では増大ケースも許可し、
-correctness と削減能力を検証している。現状は使わない論理 inbox も一律に確保しており、
-自動選択へ進む前にこの storage と不要な初期化の削減、実 allocation に基づく frame cost を扱う。
+correctness と削減能力を検証している。この表は初版（`15c5c51`）の値。後続の storage 削減結果は次節に記録する。
+自動選択では、実 allocation と backend scratch を含む frame cost を扱う。
 
 テストは0／1／複数反復、nested Call、全 scalar return path、複数 caller、複数対象の inline、
 短絡評価、RHS→index→store、aggregate 値渡し・subrange・部分 result 更新、alias parameter、
 zero-sized aggregate、portal、Abort、直接／相互再帰、source span、ID 65,535 と ID 枯渇を含む。
 全339テスト成功（benchmark export 1件は ignored）、Clippy 警告なし。
 
+## Virtual storage と初期化の削減
+
+各 activation が明示的に使う result の種類だけを確保する。実 activation の ABI inbox と
+論理 result の対応が一意なら、最終 materialization で物理 ABI storage を再利用し、配送コピーを
+省く。別の inline activation へ配送する内側 Call がある場合は分離を維持する。
+aggregate を物理 outbox へ戻すには、残存 Call の return capacity が論理 inbox 全体をカバーする
+ことも必要。したがって、inner return が outer outbox の tail を上書きする問題を再導入しない。
+
+`virtual_cleanup` は CFG と structured branch／loop の liveness を解き、後で読まれない
+local write・copy・初期化を削除して未使用 storage を取り除く。aggregate は cell ごとの set に
+展開せず interval で扱い、部分更新・動的更新後の未更新 cell を保持する。I/O・global write・
+hard operation・loop の実行は削除しない。inline のゼロ初期化も実際に必要な invocation では残す。
+
+次は初版の inline 後→cleanup 後（いずれも B1）の比較。
+
+| Fixture | caller chunks | raw | RLE |
+|---|---:|---:|---:|
+| yielding work、2反復 | 2→2 | 9,864→9,849 | 2,350→2,303 |
+| 2 caller、f のみ | 各2→2 | 42,081→39,572 | 7,120→6,009 |
+| aggregate＋global＋portal | 13→11 | 108,708→93,668 | 7,000→6,497 |
+| alias parameter、index=1 | 6→6 | 64,217→51,814 | 3,987→3,378 |
+| outer outbox tail 保存、outer のみ | 7→7 | 163,723→142,869 | 9,767→9,539 |
+| tick、3反復 | 2→2 | 1,427→1,418 | 229→220 |
+
+この段階でも dispatcher 削減は維持する。96種類の destructive operand alias と structured cycle、
+aggregate interval の穴、Call／portal をまたぐ部分更新を追加検証した。structured branch の arm が
+condition を書き換える場合、VM が終了時のゼロ化を省いていた不一致も修正し、IR の規約・B0・B1 と
+一致させた。全343テスト成功、Clippy 警告なし。
+
 ## 計画の残作業
 
-1. 使用しない論理 result と初期化を削減し、stack frame／global navigation cost を用いた
+1. stack frame／global navigation cost を用いた
    自動 inline 選択を実装する。dispatcher 削減能力は明示指定のテストで維持する。
 2. HIR cheap inline と CIR inline を同じ fixture で比較し、correctness・frame・dispatch・raw／RLE を確認する。
    その後 HIR の汎用 inline を撤去する。高レベル専用処理を残すなら独立した効果の測定を添える。
-3. read／write／clobber と remap の内部 API を整理し、新 hard operation が pattern matcher を必要としない構成にする。
-4. B1 と CIR inline の既定経路を確定し、source／公開 CIR API／CLI／selfhost への影響を検証する。
+3. B1 と CIR inline の既定経路を確定し、source／公開 CIR API／CLI／selfhost への影響を検証する。
    frame cost・scratch・展開上限による fallback を記録し、全 regression matrix を再確認する。
 
 この migration は未完了であり、上記までを継続する。

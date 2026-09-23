@@ -10,6 +10,7 @@ mod bf_optimizer;
 mod codegen;
 #[cfg(test)]
 mod continuation_adapter;
+mod continuation_effects;
 mod continuation_inline;
 mod continuation_ir;
 mod continuation_lowering;
@@ -34,6 +35,7 @@ mod selfhost_cir;
 mod selfhost_cir_adapter;
 mod semantic;
 mod static_layout;
+mod virtual_cleanup;
 
 pub use abi_codegen::{
     AbiCodegenError, AbiCodegenOptions, CompiledProfileArtifact, ProfileGranularity,

@@ -1017,6 +1017,7 @@ impl<'a, R: Read, W: Write> Machine<'a, R, W> {
                 for instruction in body {
                     self.execute_instruction(instruction, progress)?;
                 }
+                self.write_address(*condition, 0)?;
             }
         }
         Ok(())

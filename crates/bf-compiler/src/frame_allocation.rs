@@ -14,6 +14,7 @@ use crate::{
     Terminator, ValueOperand,
 };
 
+use crate::continuation_effects::{self, Effect};
 use crate::continuation_operands::{map_body, map_terminator};
 
 type Slots = BTreeSet<usize>;
@@ -68,6 +69,17 @@ impl Node {
             }
             Address::ArrayElement { array, .. } => self.write_region(array, false),
             _ => {}
+        }
+    }
+    fn effect(&mut self, effect: Effect, function: &FunctionDescriptor) {
+        match effect {
+            Effect::Read(operand) => self.operand(operand, false, function),
+            Effect::Write(operand) => self.operand(operand, true, function),
+            Effect::Clobber(address) => self.write(address),
+            Effect::MayWrite(region) => self.write_region(region, false),
+            Effect::CallResult(callee) => {
+                let _ = callee;
+            }
         }
     }
     fn operand(&mut self, operand: ValueOperand, write: bool, function: &FunctionDescriptor) {
@@ -277,50 +289,6 @@ fn build_body(
             ..Node::new(function)
         };
         match instruction {
-            FrameInstruction::SubWithBorrow {
-                left,
-                right,
-                difference,
-                borrow,
-                ..
-            } => {
-                node.read(*left);
-                node.read(*right);
-                for address in [left, right, difference, borrow] {
-                    node.write(*address);
-                }
-            }
-            FrameInstruction::Compare {
-                left, right, dst, ..
-            } => {
-                node.read(*left);
-                node.read(*right);
-                node.write(*left);
-                node.write(*right);
-                node.write(*dst);
-            }
-            FrameInstruction::Set { dst, .. } | FrameInstruction::Input { dst } => node.write(*dst),
-            FrameInstruction::AddConst { dst, .. } => {
-                node.read(*dst);
-                node.write(*dst);
-            }
-            FrameInstruction::Copy { src, dst } => {
-                node.read(*src);
-                node.write(*dst);
-            }
-            FrameInstruction::Transfer { src, targets } => {
-                node.read(*src);
-                node.write(*src);
-                for target in targets {
-                    node.read(target.dst);
-                    node.write(target.dst);
-                }
-            }
-            FrameInstruction::AggregateCopy { src, dst, cells } => {
-                node.read_region(*src);
-                node.write_region(*dst, full_region(*dst, 0, *cells, function));
-            }
-            FrameInstruction::Output { src } => node.read(*src),
             FrameInstruction::Loop { condition, body } => {
                 node.read(*condition);
                 let header = nodes.len();
@@ -349,6 +317,9 @@ fn build_body(
                 node.read(*condition);
                 node.write(*condition);
             }
+            _ => continuation_effects::instruction(instruction, |effect| {
+                node.effect(effect, function)
+            }),
         }
         next = nodes.len();
         nodes.push(node);
@@ -362,85 +333,9 @@ fn terminator_node(
     function: &FunctionDescriptor,
 ) -> Node {
     let mut node = Node::new(function);
-    match terminator {
-        Terminator::Goto { target } => node.successors.push(entries[target]),
-        Terminator::Branch {
-            condition,
-            then_target,
-            else_target,
-        } => {
-            node.read(*condition);
-            node.write(*condition);
-            node.successors
-                .extend([entries[then_target], entries[else_target]]);
-        }
-        Terminator::Call {
-            arguments,
-            return_to,
-            ..
-        } => {
-            for argument in arguments {
-                node.operand(*argument, false, function);
-            }
-            node.successors.push(entries[return_to]);
-        }
-        Terminator::Return { value } => {
-            if let Some(value) = value {
-                node.operand(*value, false, function);
-            }
-        }
-        Terminator::ArrayLoad {
-            array,
-            index,
-            destination,
-            return_to,
-            ..
-        } => {
-            node.read_region(*array);
-            node.read(*index);
-            node.write(*destination);
-            node.successors.push(entries[return_to]);
-        }
-        Terminator::ArrayStore {
-            array,
-            index,
-            value,
-            return_to,
-            ..
-        } => {
-            node.write_region(*array, false);
-            node.read(*index);
-            node.read(*value);
-            node.successors.push(entries[return_to]);
-        }
-        Terminator::AggregateLoad {
-            source,
-            offset,
-            destination,
-            return_to,
-            ..
-        } => {
-            node.read(offset.low);
-            node.read(offset.high);
-            node.read_region(*source);
-            node.operand(*destination, true, function);
-            node.successors.push(entries[return_to]);
-        }
-        Terminator::AggregateStore {
-            destination,
-            offset,
-            source,
-            return_to,
-            ..
-        } => {
-            node.read(offset.low);
-            node.read(offset.high);
-            node.write_region(*destination, false);
-            node.operand(*source, false, function);
-            node.successors.push(entries[return_to]);
-        }
-        Terminator::Abort | Terminator::Halt => {}
-    }
+    continuation_effects::terminator(terminator, |effect| node.effect(effect, function));
+    node.successors
+        .extend(terminator.edges().map(|(target, _)| entries[&target]));
     node
 }
 

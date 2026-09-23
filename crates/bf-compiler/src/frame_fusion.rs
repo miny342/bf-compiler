@@ -54,31 +54,23 @@ fn local(address: Address) -> bool {
 }
 
 fn accesses(instruction: &I) -> Option<(Vec<Address>, Vec<Address>)> {
-    let (reads, writes) = match instruction {
-        I::Set { dst, .. } => (vec![], vec![*dst]),
-        I::AddConst { dst, .. } => (vec![*dst], vec![*dst]),
-        I::Copy { src, dst } => (vec![*src], vec![*dst]),
-        I::Transfer { src, targets } => {
-            let addresses = std::iter::once(*src)
-                .chain(targets.iter().map(|t| t.dst))
-                .collect::<Vec<_>>();
-            (addresses.clone(), addresses)
+    use crate::continuation_effects::{self, Effect};
+    if continuation_effects::observable(instruction) {
+        return None;
+    }
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    let mut scalar = true;
+    continuation_effects::instruction(instruction, |effect| match effect {
+        Effect::Read(crate::ValueOperand::Cell(address)) => reads.push(address),
+        Effect::Write(crate::ValueOperand::Cell(address)) | Effect::Clobber(address) => {
+            writes.push(address)
         }
-        I::Compare {
-            left, right, dst, ..
-        } => (vec![*left, *right], vec![*left, *right, *dst]),
-        I::SubWithBorrow {
-            left,
-            right,
-            difference,
-            borrow,
-            ..
-        } => (
-            vec![*left, *right],
-            vec![*left, *right, *difference, *borrow],
-        ),
-        _ => return None,
-    };
+        _ => scalar = false,
+    });
+    if !scalar {
+        return None;
+    }
     reads
         .iter()
         .chain(&writes)

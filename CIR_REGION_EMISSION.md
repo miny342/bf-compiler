@@ -17,7 +17,8 @@ viewer の読み取り処理は削除した。旧 variant を使う Rust API 利
 
 `Terminator` に内部用の boundary 分類、通常／resume edge の列挙、successor remap、
 callee reference を集約した。既存 optimizer と local reconstruction も edge API を使う。
-read/write/clobber と operand remap の統合は、allocation／CIR inline の後続作業に残す。
+operand remap は `continuation_operands`、read/write/clobber は `continuation_effects` に集約し、
+allocation／CIR inline／virtual cleanup で共用する。
 
 `continuation_regions.rs` は function entry とすべての hard resume target を再入 root とする。
 通常 edge のみをたどり、hard terminal または exit で止める。共有 successor の body は

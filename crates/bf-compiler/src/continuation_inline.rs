@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::continuation_operands::{map_body, map_operand, map_terminator};
+use crate::continuation_operands::{map_body, map_operand, map_region, map_terminator};
 use crate::{
     Address, AggregateRegion, Continuation, ContinuationId, ContinuationProgram,
     FrameAggregateDescriptor, FrameAggregateId, FrameInstruction as I, FrameSlot,
@@ -21,10 +21,10 @@ pub(crate) struct InlineStats {
     pub blocks_cloned: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct ResultStorage {
-    scalar: Address,
-    aggregate: AggregateRegion,
+    scalar: Option<Address>,
+    aggregate: Option<AggregateRegion>,
 }
 
 struct Ids {
@@ -60,6 +60,7 @@ struct Graph {
     functions: Vec<FunctionDescriptor>,
     nodes: Vec<Continuation>,
     results: HashMap<ContinuationId, ResultStorage>,
+    owners: HashMap<FunctionId, ResultStorage>,
     ids: Ids,
 }
 
@@ -93,9 +94,9 @@ fn result_cells(value_type: ValueType) -> usize {
 
 fn remap_result(result: ResultStorage, address: &mut Address) {
     match address {
-        Address::AbiValue => *address = result.scalar,
+        Address::AbiValue => *address = result.scalar.expect("observed scalar result"),
         Address::ArrayElement { array: region, .. } if *region == AggregateRegion::Outbox => {
-            *region = result.aggregate;
+            *region = result.aggregate.expect("observed aggregate result");
         }
         _ => {}
     }
@@ -103,23 +104,46 @@ fn remap_result(result: ResultStorage, address: &mut Address) {
 
 impl Graph {
     fn normalize(program: &ContinuationProgram) -> Result<Self, String> {
+        // Calls need no logical destination when the surrounding activation
+        // never observes that part of its result. Scan explicit operands before
+        // adding storage; an implicit ABI write alone is not an observation.
+        let mut used = HashMap::<FunctionId, (bool, bool)>::new();
+        for c in program.continuations() {
+            let usage = used.entry(c.function()).or_default();
+            let mut body = c.body().to_vec();
+            let mut terminal = c.terminator().clone();
+            let visit = &mut |address: &mut Address| match address {
+                Address::AbiValue => usage.0 = true,
+                Address::ArrayElement {
+                    array: AggregateRegion::Outbox,
+                    ..
+                } => usage.1 = true,
+                _ => {}
+            };
+            map_body(&mut body, visit);
+            map_terminator(&mut terminal, visit);
+        }
         let mut functions = Vec::new();
         let mut storage = HashMap::new();
         for f in program.functions() {
+            let (scalar_used, aggregate_used) = used.get(&f.id()).copied().unwrap_or_default();
             let mut aggregates = f.frame_aggregates().to_vec();
-            let aggregate = FrameAggregateId::new(aggregates.len());
-            aggregates.push(FrameAggregateDescriptor::new(aggregate, f.outbox_cells()));
+            let aggregate = aggregate_used.then(|| {
+                let id = FrameAggregateId::new(aggregates.len());
+                aggregates.push(FrameAggregateDescriptor::new(id, f.outbox_cells()));
+                AggregateRegion::Frame(id)
+            });
             storage.insert(
                 f.id(),
                 ResultStorage {
-                    scalar: Address::Frame(FrameSlot::new(f.frame_slots())),
-                    aggregate: AggregateRegion::Frame(aggregate),
+                    scalar: scalar_used.then_some(Address::Frame(FrameSlot::new(f.frame_slots()))),
+                    aggregate,
                 },
             );
             functions.push(descriptor(
                 f,
                 f.frame_slots()
-                    .checked_add(1)
+                    .checked_add(usize::from(scalar_used))
                     .ok_or("CIR inline frame overflow")?,
                 aggregates,
                 f.outbox_cells(),
@@ -146,6 +170,7 @@ impl Graph {
             functions,
             nodes,
             results,
+            owners: storage,
             ids: Ids::new(program),
         })
     }
@@ -217,30 +242,21 @@ impl Graph {
             match terminal {
                 Terminator::Return { value } => {
                     let count = body.len();
-                    match value {
-                        Some(ValueOperand::Cell(src)) => body.push(I::Copy {
-                            src,
-                            dst: destination.scalar,
-                        }),
-                        Some(value) => {
-                            copy_value(
-                                &mut body,
-                                value,
-                                ValueOperand::aggregate(
-                                    destination.aggregate,
-                                    result_cells(callee.return_type()),
-                                ),
-                                result_cells(callee.return_type()),
-                            );
-                            body.push(I::Set {
-                                dst: destination.scalar,
-                                value: 0,
-                            });
-                        }
-                        None => body.push(I::Set {
-                            dst: destination.scalar,
-                            value: 0,
-                        }),
+                    if let Some(dst) = destination.scalar {
+                        body.push(match value {
+                            Some(ValueOperand::Cell(src)) => I::Copy { src, dst },
+                            _ => I::Set { dst, value: 0 },
+                        });
+                    }
+                    if let (Some(value), Some(aggregate)) = (value, destination.aggregate)
+                        && !matches!(value, ValueOperand::Cell(_))
+                    {
+                        copy_value(
+                            &mut body,
+                            value,
+                            ValueOperand::aggregate(aggregate, result_cells(callee.return_type())),
+                            result_cells(callee.return_type()),
+                        );
                     }
                     sources.extend(std::iter::repeat_n(
                         call.terminator_source(),
@@ -250,13 +266,14 @@ impl Graph {
                 }
                 Terminator::Call { .. } => {
                     let result = self.results[&c.id()];
-                    let mut scalar = result.scalar;
-                    let mut aggregate = ValueOperand::Array(result.aggregate);
-                    map(&mut scalar);
-                    map_operand(&mut aggregate, map);
-                    let ValueOperand::Array(aggregate) = aggregate else {
-                        unreachable!()
-                    };
+                    let scalar = result.scalar.map(|mut address| {
+                        map(&mut address);
+                        address
+                    });
+                    let aggregate = result.aggregate.map(|mut region| {
+                        map_region(&mut region, map);
+                        region
+                    });
                     self.results
                         .insert(ids[&c.id()], ResultStorage { scalar, aggregate });
                 }
@@ -352,6 +369,63 @@ impl Graph {
             .iter()
             .map(|f| (f.id(), f.return_type()))
             .collect();
+        // Reuse the physical ABI inbox for an actual activation when no Call
+        // in that function routes the same result kind into an inlined child.
+        // Aggregate capacity must still come entirely from surviving Calls.
+        // Otherwise the virtual region preserves old/partially updated tails.
+        for f in &self.functions {
+            let own = self.owners[&f.id()];
+            let calls = self
+                .nodes
+                .iter()
+                .filter(|c| c.function() == f.id())
+                .filter_map(|c| c.terminator().callee().map(|callee| (c.id(), callee)))
+                .collect::<Vec<_>>();
+            let scalar = own.scalar.is_some()
+                && calls
+                    .iter()
+                    .all(|(id, _)| self.results[id].scalar == own.scalar);
+            let capacity = calls
+                .iter()
+                .map(|(_, callee)| result_cells(types[callee]))
+                .max()
+                .unwrap_or(0);
+            let aggregate = own.aggregate.is_some_and(|region| {
+                let AggregateRegion::Frame(id) = region else {
+                    unreachable!()
+                };
+                capacity >= f.frame_aggregate(id).unwrap().cells()
+            }) && calls.iter().all(|(id, callee)| {
+                result_cells(types[callee]) == 0 || self.results[id].aggregate == own.aggregate
+            });
+            let remap = &mut |address: &mut Address| {
+                if scalar && Some(*address) == own.scalar {
+                    *address = Address::AbiValue;
+                }
+                if let Address::ArrayElement { array, .. } = address
+                    && aggregate
+                    && Some(*array) == own.aggregate
+                {
+                    *array = AggregateRegion::Outbox;
+                }
+            };
+            for c in self.nodes.iter_mut().filter(|c| c.function() == f.id()) {
+                let mut body = c.body().to_vec();
+                let mut terminal = c.terminator().clone();
+                map_body(&mut body, remap);
+                map_terminator(&mut terminal, remap);
+                if let Some(result) = self.results.get_mut(&c.id()) {
+                    if let Some(scalar) = &mut result.scalar {
+                        remap(scalar);
+                    }
+                    if let Some(aggregate) = &mut result.aggregate {
+                        map_region(aggregate, remap);
+                    }
+                }
+                *c = Continuation::new(c.id(), c.function(), body, terminal)
+                    .with_source_spans(c.body_sources().to_vec(), c.terminator_source());
+            }
+        }
         let mut outboxes = HashMap::<FunctionId, usize>::new();
         let mut bridges = Vec::new();
         for c in &mut self.nodes {
@@ -365,19 +439,30 @@ impl Graph {
             let capacity = outboxes.entry(c.function()).or_default();
             *capacity = (*capacity).max(cells);
             let result = self.results[&c.id()];
-            let bridge = self.ids.fresh()?;
-            let mut body = vec![I::Copy {
-                src: Address::AbiValue,
-                dst: result.scalar,
-            }];
-            if cells > 0 {
+            let mut body = Vec::new();
+            if let Some(dst) = result.scalar
+                && dst != Address::AbiValue
+            {
+                body.push(I::Copy {
+                    src: Address::AbiValue,
+                    dst,
+                });
+            }
+            if let Some(aggregate) = result.aggregate
+                && aggregate != AggregateRegion::Outbox
+                && cells > 0
+            {
                 copy_value(
                     &mut body,
                     ValueOperand::aggregate(AggregateRegion::Outbox, cells),
-                    ValueOperand::aggregate(result.aggregate, cells),
+                    ValueOperand::aggregate(aggregate, cells),
                     cells,
                 );
             }
+            if body.is_empty() {
+                continue;
+            }
+            let bridge = self.ids.fresh()?;
             let sources = vec![c.terminator_source(); body.len()];
             bridges.push(
                 Continuation::new(
@@ -528,7 +613,9 @@ pub(crate) fn inline_selected(
     if stats.calls_inlined == 0 {
         return Ok((program.clone(), stats));
     }
-    Ok((graph.materialize(program)?, stats))
+    let materialized = graph.materialize(program)?;
+    let cleaned = crate::virtual_cleanup::cleanup(&materialized).map_err(|e| e.to_string())?;
+    Ok((cleaned, stats))
 }
 
 #[cfg(test)]

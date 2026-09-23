@@ -586,3 +586,52 @@ fn inline_preserves_callee_sources_through_graph_and_arithmetic_fusion() {
             .is_some_and(|s| s.start_byte == 100 && s.end_byte == 110)
     }));
 }
+
+#[test]
+fn structured_branch_consumes_its_condition_after_either_arm() {
+    let main = FunctionId::new(0);
+    let p = ContinuationProgram::new(
+        main,
+        vec![FunctionDescriptor::new(
+            main,
+            vec![],
+            1,
+            ValueType::Void,
+            id(1),
+        )],
+        vec![Continuation::new(
+            id(1),
+            main,
+            vec![
+                I::Input { dst: slot(0) },
+                I::Branch {
+                    condition: slot(0),
+                    then_body: vec![
+                        I::Set {
+                            dst: slot(0),
+                            value: 7,
+                        },
+                        I::Output { src: slot(0) },
+                    ],
+                    else_body: vec![
+                        I::Set {
+                            dst: slot(0),
+                            value: 9,
+                        },
+                        I::Output { src: slot(0) },
+                    ],
+                },
+                I::Output { src: slot(0) },
+            ],
+            Terminator::Halt,
+        )],
+    )
+    .unwrap();
+    for (input, expected) in [(0, 9), (1, 7)] {
+        for enabled in [false, true] {
+            assert_eq!(measure(&p, &[input], enabled).output, [expected, 0]);
+        }
+        let cleaned = crate::virtual_cleanup::cleanup(&p).unwrap();
+        assert_eq!(measure(&cleaned, &[input], true).output, [expected, 0]);
+    }
+}
