@@ -635,3 +635,212 @@ fn structured_branch_consumes_its_condition_after_either_arm() {
         assert_eq!(measure(&cleaned, &[input], true).output, [expected, 0]);
     }
 }
+
+#[test]
+fn automatic_cir_inline_compares_with_hir_cheap_cases() {
+    let cases: [(&str, &str, &[u8], &[u8]); 7] = [
+        (
+            "void-global",
+            "cell total; void add(cell v) { if(v) { total+=v; } } void main() { cell v=3; while(v) { add(v); add(v); v-=1; } output(total); }",
+            &[],
+            &[12],
+        ),
+        (
+            "nested-global",
+            "cell total; void bump(cell v) { total+=v; } void wrap(cell v) { if(v) { bump(v); } } void main() { wrap(1); wrap(2); output(total); }",
+            &[],
+            &[3],
+        ),
+        (
+            "scalar-pure",
+            "cell add1(cell v) { cell r=v+1; return r; } void main() { cell v=3; output(add1(v)); output(add1(v)); }",
+            &[],
+            &[4, 4],
+        ),
+        (
+            "input-arg",
+            "cell add1(cell v) { return v+1; } void main() { output(add1(input())); }",
+            &[9],
+            &[10],
+        ),
+        (
+            "input-body",
+            "cell add_input(cell v) { return v+input(); } void main() { output(add_input(3)); }",
+            &[4],
+            &[7],
+        ),
+        (
+            "scalar-loop",
+            "cell twice(cell v) { cell r=v+v; return r; } void main() { cell v=input(); while(v) { output(twice(v)); v-=1; } }",
+            &[3],
+            &[6, 4, 2],
+        ),
+        (
+            "yield-early",
+            "cell leaf(cell v) { output(76); return v+1; } cell work(cell v) { if(v==1) { return leaf(v); } output(65); cell y=leaf(v); output(66); return y+1; } void main() { cell n=input(); while(n) { output(work(n)); n-=1; } }",
+            &[2],
+            b"ALB\x04L\x02",
+        ),
+    ];
+    for (label, text, input, expected) in cases {
+        let ast = crate::parser::parse(crate::lexer::lex(text).unwrap()).unwrap();
+        let mut hir = crate::semantic::analyze(&ast).unwrap();
+        let plain = crate::continuation_lowering::lower_hir_unallocated(&hir).unwrap();
+        crate::hir_inline::inline_single_use_functions(&mut hir);
+        let hir = crate::continuation_lowering::lower_hir_unallocated(&hir).unwrap();
+        let (auto, stats) =
+            crate::continuation_inline::inline_automatic(&plain, Default::default()).unwrap();
+        let (hir, _) = crate::continuation_pipeline::finish(&hir, Default::default()).unwrap();
+        let (auto, _) = crate::continuation_pipeline::finish(&auto, Default::default()).unwrap();
+        let before = measure(&hir, input, true);
+        let after = measure(&auto, input, true);
+        assert_eq!(before.output, expected, "{label}");
+        assert_eq!(after.output, expected, "{label}");
+        let hir_frame = estimated_frame_chunks(&hir).unwrap()[&hir.main()];
+        let cir_frame = estimated_frame_chunks(&auto).unwrap()[&auto.main()];
+        eprintln!(
+            "HIR->CIR {label}: accepted={} frame rejected={} calls={}->{} visits={}->{} frame={}->{} bytes={}->{} raw={}->{} RLE={}->{}",
+            stats.calls_inlined,
+            stats.frame_limit_calls_preserved,
+            before.semantic.calls,
+            after.semantic.calls,
+            before.visits.values().sum::<u64>(),
+            after.visits.values().sum::<u64>(),
+            hir_frame,
+            cir_frame,
+            before.bytes,
+            after.bytes,
+            before.instructions,
+            after.instructions,
+            before.rle_instructions,
+            after.rle_instructions
+        );
+        assert!(after.semantic.calls <= before.semantic.calls, "{label}");
+    }
+}
+
+#[test]
+fn automatic_inline_limits_transitive_global_frame_growth() {
+    let locals = (0..17)
+        .map(|n| format!("cell v{n}=input();"))
+        .collect::<String>();
+    let outputs = (0..17)
+        .map(|n| format!("output(v{n});"))
+        .collect::<String>();
+    for global in [true, false] {
+        let prefix = if global {
+            "cell g; void touch() { output(g); }"
+        } else {
+            "void touch() { output(65); }"
+        };
+        let p = source(&format!(
+            "{prefix} void leaf() {{ {locals} touch(); {outputs} }} void main() {{ cell saved=input(); leaf(); output(saved); }}"
+        ));
+        let (auto, stats) =
+            crate::continuation_inline::inline_automatic(&p, Default::default()).unwrap();
+        let (before, _) = crate::continuation_pipeline::finish(&p, Default::default()).unwrap();
+        let (after, _) = crate::continuation_pipeline::finish(&auto, Default::default()).unwrap();
+        let before_frames = estimated_frame_chunks(&before).unwrap();
+        let after_frames = estimated_frame_chunks(&after).unwrap();
+        if global {
+            assert!(stats.frame_limit_calls_preserved > 0);
+            for (&id, &size) in &after_frames {
+                assert!(size <= before_frames[&id]);
+            }
+        } else {
+            assert!(after_frames[&after.main()] > before_frames[&before.main()]);
+            assert!(
+                after
+                    .continuations()
+                    .iter()
+                    .all(|c| !matches!(c.terminator(), Terminator::Call { .. }))
+            );
+        }
+        let mut input = vec![1; 18];
+        input[0] = 9;
+        let mut expected = vec![if global { 0 } else { 65 }];
+        expected.extend([1; 17]);
+        expected.push(9);
+        assert_eq!(measure(&after, &input, true).output, expected);
+        eprintln!("global={global} frame guard: {stats:?}");
+    }
+}
+
+#[test]
+fn readonly_parameter_aliases_preserve_frame_and_abi_snapshots() {
+    let main = FunctionId::new(0);
+    let callee = FunctionId::new(1);
+    for reverse in [false, true] {
+        let mut arguments = vec![
+            ValueOperand::Cell(slot(0)),
+            ValueOperand::Cell(Address::AbiValue),
+        ];
+        if reverse {
+            arguments.reverse();
+        }
+        let program = ContinuationProgram::new(
+            main,
+            vec![
+                FunctionDescriptor::new(main, vec![], 1, ValueType::Void, id(1)),
+                FunctionDescriptor::new(
+                    callee,
+                    vec![FrameSlot::new(0), FrameSlot::new(1)],
+                    2,
+                    ValueType::Cell,
+                    id(3),
+                ),
+            ],
+            vec![
+                Continuation::new(
+                    id(1),
+                    main,
+                    vec![
+                        I::Set {
+                            dst: slot(0),
+                            value: 11,
+                        },
+                        I::Set {
+                            dst: Address::AbiValue,
+                            value: 22,
+                        },
+                    ],
+                    Terminator::Call {
+                        callee,
+                        arguments,
+                        return_to: id(2),
+                    },
+                ),
+                Continuation::new(
+                    id(2),
+                    main,
+                    vec![
+                        I::Output {
+                            src: Address::AbiValue,
+                        },
+                        I::Output { src: slot(0) },
+                    ],
+                    Terminator::Halt,
+                ),
+                Continuation::new(
+                    id(3),
+                    callee,
+                    vec![],
+                    Terminator::Return {
+                        value: Some(ValueOperand::Cell(slot(1))),
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+        compare(
+            &program,
+            &[callee],
+            &[],
+            &[if reverse { 11 } else { 22 }, 11],
+        );
+    }
+    let p = source(
+        "cell g; cell change() { g=9; return 7; } cell f(cell a, cell b) { cell ignored=change(); b+=1; return a+b; } void main() { g=3; cell n=4; output(f(g,n)); output(n); output(g); }",
+    );
+    compare(&p, &named(&p, &["f", "change"]), &[], &[8, 4, 9]);
+}

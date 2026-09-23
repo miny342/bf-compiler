@@ -394,6 +394,18 @@ fn build_layouts_with_regions(
     Ok(layouts)
 }
 
+/// Use the actual B1 layout, including selectors, loop gates and portal scratch.
+pub(crate) fn estimated_frame_chunks(
+    program: &ContinuationProgram,
+) -> Result<HashMap<FunctionId, usize>, AbiCodegenError> {
+    let regions = RegionPlan::new(program);
+    let layouts = build_layouts_with_regions(program, AbiConfig::default(), Some(&regions))?;
+    Ok(layouts
+        .into_iter()
+        .map(|(id, layout)| (id, layout.frame.frame_chunks()))
+        .collect())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PortalAccessKind {
     Load,

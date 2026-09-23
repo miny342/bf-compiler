@@ -6,6 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod automatic;
+pub(crate) use automatic::inline_automatic;
+
 use crate::continuation_operands::{map_body, map_operand, map_region, map_terminator};
 use crate::{
     Address, AggregateRegion, Continuation, ContinuationId, ContinuationProgram,
@@ -19,6 +22,8 @@ pub(crate) struct InlineStats {
     pub recursive_calls_preserved: usize,
     pub id_limit_calls_preserved: usize,
     pub blocks_cloned: usize,
+    pub frame_limit_calls_preserved: usize,
+    pub work_limit_calls_preserved: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,6 +32,7 @@ struct ResultStorage {
     aggregate: Option<AggregateRegion>,
 }
 
+#[derive(Clone)]
 struct Ids {
     used: HashSet<ContinuationId>,
     next: u32,
@@ -56,6 +62,7 @@ impl Ids {
     }
 }
 
+#[derive(Clone)]
 struct Graph {
     functions: Vec<FunctionDescriptor>,
     nodes: Vec<Continuation>,
@@ -192,6 +199,52 @@ impl Graph {
             .find(|f| f.id() == *callee)
             .unwrap()
             .clone();
+        // A read-only scalar parameter can directly use its already evaluated
+        // caller-frame argument. Globals and ABI cells can change inside the
+        // callee, so they still require a value snapshot.
+        let mut written = HashSet::new();
+        let mut record = |effect| match effect {
+            crate::continuation_effects::Effect::Write(ValueOperand::Cell(Address::Frame(
+                slot,
+            )))
+            | crate::continuation_effects::Effect::Clobber(Address::Frame(slot)) => {
+                written.insert(slot);
+            }
+            _ => {}
+        };
+        for c in self.nodes.iter().filter(|c| c.function() == callee.id()) {
+            let mut pending = vec![c.body()];
+            while let Some(body) = pending.pop() {
+                for instruction in body {
+                    crate::continuation_effects::instruction(instruction, &mut record);
+                    match instruction {
+                        I::Loop { body, .. } => pending.push(body),
+                        I::Branch {
+                            then_body,
+                            else_body,
+                            ..
+                        } => {
+                            pending.push(then_body);
+                            pending.push(else_body);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            crate::continuation_effects::terminator(c.terminator(), &mut record);
+        }
+        let aliases: HashMap<_, _> = callee
+            .parameter_locations()
+            .iter()
+            .zip(arguments)
+            .filter_map(|(parameter, argument)| match (parameter, argument) {
+                (
+                    ParameterLocation::Cell(slot),
+                    ValueOperand::Cell(address @ Address::Frame(_)),
+                ) if !written.contains(slot) => Some((*slot, *address)),
+                _ => None,
+            })
+            .collect();
         let caller_index = self
             .functions
             .iter()
@@ -212,7 +265,12 @@ impl Graph {
         }
         self.functions[caller_index] = descriptor(caller, slots, aggregates, caller.outbox_cells());
         let map = &mut |address: &mut Address| match address {
-            Address::Frame(slot) => *slot = FrameSlot::new(scalar_base + slot.index()),
+            Address::Frame(slot) => {
+                *address = aliases
+                    .get(slot)
+                    .copied()
+                    .unwrap_or_else(|| Address::Frame(FrameSlot::new(scalar_base + slot.index())));
+            }
             Address::ArrayElement {
                 array: AggregateRegion::Frame(a),
                 ..
@@ -289,6 +347,9 @@ impl Graph {
         // this initialization and from the ordered, possibly aliased parameters.
         let mut body = call.body().to_vec();
         for slot in 0..callee.frame_slots() {
+            if aliases.contains_key(&FrameSlot::new(slot)) {
+                continue;
+            }
             body.push(I::Set {
                 dst: Address::Frame(FrameSlot::new(scalar_base + slot)),
                 value: 0,
@@ -308,6 +369,9 @@ impl Graph {
             }
         }
         for (&argument, &parameter) in arguments.iter().zip(callee.parameter_locations()) {
+            if matches!(parameter, ParameterLocation::Cell(slot) if aliases.contains_key(&slot)) {
+                continue;
+            }
             let (mut destination, cells) = match parameter {
                 ParameterLocation::Cell(slot) => (ValueOperand::Cell(Address::Frame(slot)), 1),
                 ParameterLocation::AggregateElement { aggregate, index } => (
@@ -342,15 +406,12 @@ impl Graph {
         Ok(cloned.len())
     }
 
-    fn materialize(
-        mut self,
-        original: &ContinuationProgram,
-    ) -> Result<ContinuationProgram, String> {
+    fn reachable(&self, main: FunctionId) -> HashSet<ContinuationId> {
         // Reachability is rooted at main, not at every function descriptor.
         let entries: HashMap<_, _> = self.functions.iter().map(|f| (f.id(), f.entry())).collect();
         let nodes: HashMap<_, _> = self.nodes.iter().map(|c| (c.id(), c)).collect();
         let mut reachable = HashSet::new();
-        let mut pending = vec![entries[&original.main()]];
+        let mut pending = vec![entries[&main]];
         while let Some(id) = pending.pop() {
             if !reachable.insert(id) {
                 continue;
@@ -361,6 +422,14 @@ impl Graph {
                 pending.push(entries[&callee]);
             }
         }
+        reachable
+    }
+
+    fn materialize(
+        mut self,
+        original: &ContinuationProgram,
+    ) -> Result<ContinuationProgram, String> {
+        let reachable = self.reachable(original.main());
         self.nodes.retain(|c| reachable.contains(&c.id()));
         let live_functions: HashSet<_> = self.nodes.iter().map(Continuation::function).collect();
         self.functions.retain(|f| live_functions.contains(&f.id()));
@@ -382,6 +451,7 @@ impl Graph {
                 .filter_map(|c| c.terminator().callee().map(|callee| (c.id(), callee)))
                 .collect::<Vec<_>>();
             let scalar = own.scalar.is_some()
+                && !calls.is_empty()
                 && calls
                     .iter()
                     .all(|(id, _)| self.results[id].scalar == own.scalar);

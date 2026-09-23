@@ -25,6 +25,7 @@ struct Node {
     uses: Slots,
     defs: Slots,
     successors: Vec<usize>,
+    copy: Option<(usize, usize)>,
 }
 
 impl Node {
@@ -149,7 +150,12 @@ pub(crate) fn allocate(
         // Backend operations must retain distinct operands even when an input
         // dies at this instruction (notably destructive transfers and portals).
         let operands: Slots = node.uses.union(&node.defs).copied().collect();
-        clique(&mut interference, &operands);
+        // A non-destructive scalar Copy can become a self-copy when its
+        // source dies here. Live-out interference still separates both cells
+        // whenever either value must remain independently observable.
+        if node.copy.is_none() {
+            clique(&mut interference, &operands);
+        }
         for successor in &node.successors {
             for &definition in &node.defs {
                 for &other in &live[*successor] {
@@ -187,7 +193,12 @@ pub(crate) fn allocate(
             .iter()
             .map(|region| Some(region.cells())),
     );
-    let mapping = color(&interference, &classes);
+    let mut preferred = vec![Vec::new(); interference.len()];
+    for (src, dst) in nodes.iter().filter_map(|n| n.copy) {
+        preferred[src].push(dst);
+        preferred[dst].push(src);
+    }
+    let mapping = color(&interference, &classes, &preferred);
     let count = mapping[..function.frame_slots()]
         .iter()
         .max()
@@ -288,6 +299,13 @@ fn build_body(
             successors: vec![next],
             ..Node::new(function)
         };
+        if let FrameInstruction::Copy {
+            src: Address::Frame(src),
+            dst: Address::Frame(dst),
+        } = instruction
+        {
+            node.copy = Some((src.index(), dst.index()));
+        }
         match instruction {
             FrameInstruction::Loop { condition, body } => {
                 node.read(*condition);
@@ -382,7 +400,7 @@ fn clique(graph: &mut [Slots], slots: &Slots) {
         }
     }
 }
-fn color(graph: &[Slots], classes: &[Option<usize>]) -> Vec<usize> {
+fn color(graph: &[Slots], classes: &[Option<usize>], preferred: &[Vec<usize>]) -> Vec<usize> {
     let mut order: Vec<_> = (0..graph.len()).collect();
     order.sort_by_key(|&slot| (std::cmp::Reverse(graph[slot].len()), slot));
     let mut mapping = vec![usize::MAX; graph.len()];
@@ -392,11 +410,21 @@ fn color(graph: &[Slots], classes: &[Option<usize>]) -> Vec<usize> {
             .iter()
             .map(|&neighbor| mapping[neighbor])
             .collect();
-        mapping[slot] = color_classes
+        mapping[slot] = preferred[slot]
             .iter()
-            .enumerate()
-            .find(|(color, class)| **class == classes[slot] && !used.contains(color))
-            .map(|(color, _)| color)
+            .map(|&neighbor| mapping[neighbor])
+            .find(|&color| {
+                color != usize::MAX
+                    && color_classes[color] == classes[slot]
+                    && !used.contains(&color)
+            })
+            .or_else(|| {
+                color_classes
+                    .iter()
+                    .enumerate()
+                    .find(|(color, class)| **class == classes[slot] && !used.contains(color))
+                    .map(|(color, _)| color)
+            })
             .unwrap_or_else(|| {
                 color_classes.push(classes[slot]);
                 color_classes.len() - 1
