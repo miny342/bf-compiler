@@ -472,22 +472,24 @@ fn full_initialization(
 #[cfg(test)]
 mod tests {
     use crate::{
-        AbiConfig, ContinuationProgram, ContinuationRunOptions, continuation_lowering, hir_inline,
-        lexer, macro_expansion, parser, run_continuations_with_io, semantic,
+        AbiConfig, ContinuationProgram, ContinuationRunOptions, continuation_lowering, lexer,
+        macro_expansion, parser, run_continuations_with_io, semantic,
     };
 
     fn lower(source: &str, inline: bool, reuse: bool) -> ContinuationProgram {
         let ast = parser::parse(lexer::lex(source).unwrap()).unwrap();
         let ast = macro_expansion::expand(ast).unwrap();
-        let mut hir = semantic::analyze(&ast).unwrap();
-        if inline {
-            hir_inline::inline_single_use_functions(&mut hir);
-        }
-        if reuse {
-            continuation_lowering::lower_hir(&hir).unwrap()
+        let hir = semantic::analyze(&ast).unwrap();
+        let original = continuation_lowering::lower_hir_unallocated(&hir).unwrap();
+        let program = if inline {
+            crate::continuation_inline::inline_automatic(&original, Default::default())
+                .unwrap()
+                .0
         } else {
-            continuation_lowering::lower_hir_without_slot_reuse(&hir).unwrap()
-        }
+            original
+        };
+        let (program, _) = crate::optimize_continuations(&program).unwrap();
+        crate::continuation_pipeline::allocate(&program, reuse).unwrap()
     }
 
     fn execute(program: &ContinuationProgram, input: &[u8]) -> Vec<u8> {
@@ -631,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn non_frame_arguments_keep_void_calls_out_of_inline() {
+    fn side_effecting_arguments_are_evaluated_once_during_inline() {
         let source = r"
             cell counter;
             cell next() { counter += 1; return counter; }
@@ -648,7 +650,7 @@ mod tests {
             }
         ";
         assert_eq!(lower(source, false, true).functions().len(), 3);
-        assert_eq!(lower(source, true, true).functions().len(), 3);
+        assert_eq!(lower(source, true, true).functions().len(), 2);
         check(source, b"", &[0, 1, 2, 0, 0, 3, 4, 0, 0]);
     }
 
@@ -691,13 +693,13 @@ mod tests {
     }
 
     #[test]
-    fn recursive_and_early_returning_void_functions_are_not_inlined() {
+    fn recursive_functions_remain_calls_and_early_returns_inline() {
         let source = r"
             void recursive(cell n) { if (n) { recursive(n - 1); } }
             void early(cell n) { if (n) { return; } output(1); }
             void main() { recursive(2); early(1); output(2); }
         ";
-        assert_eq!(lower(source, true, true).functions().len(), 3);
+        assert_eq!(lower(source, true, true).functions().len(), 2);
         check(source, b"", &[2]);
     }
 }

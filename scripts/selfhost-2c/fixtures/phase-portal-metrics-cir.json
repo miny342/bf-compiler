@@ -3,14 +3,20 @@
   "artifact": {
     "kind": "cir",
     "id": "computed-by-test",
-    "identity_version": "bfc-ir-artifact-v5",
+    "identity_version": "bfc-ir-artifact-v6",
     "lowering_options": {
       "inline_branch_successors": true,
-      "structure_local_control_flow": false
+      "structure_local_control_flow": false,
+      "inline_functions": false
     }
   },
-  "chunk_cells": [16],
+  "chunk_cells": [
+    16
+  ],
   "phases": [
-    {"name": "cir_main", "function_id": 0}
+    {
+      "name": "cir_main",
+      "function_id": 0
+    }
   ]
 }

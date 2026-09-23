@@ -25,7 +25,6 @@ mod frame_fusion;
 mod frame_layout;
 mod frontend;
 mod hir;
-mod hir_inline;
 mod hir_reachability;
 mod ir;
 mod lexer;

@@ -142,6 +142,24 @@ fn allocated_costs(
     crate::abi_codegen::estimated_frame_chunks(&allocated).map_err(|e| e.to_string())
 }
 
+fn caller_cost(
+    graph: &Graph,
+    original: &ContinuationProgram,
+    caller: FunctionId,
+    options: ContinuationOptimizationOptions,
+    global_portal: bool,
+) -> Result<(usize, ContinuationProgram), String> {
+    // A splice changes only its caller. Callee signatures remain available
+    // for validation, but other bodies are stubbed before cleanup/allocation.
+    let projection = graph.clone().materialize_caller(original, caller)?;
+    let projection = crate::virtual_cleanup::cleanup(&projection).map_err(|e| e.to_string())?;
+    let (allocated, _) =
+        crate::continuation_pipeline::finish(&projection, options).map_err(|e| e.to_string())?;
+    let costs = crate::abi_codegen::estimated_frame_chunks_with_route(&allocated, global_portal)
+        .map_err(|e| e.to_string())?;
+    Ok((costs[&caller], projection))
+}
+
 pub(crate) fn inline_automatic(
     program: &ContinuationProgram,
     options: ContinuationOptimizationOptions,
@@ -204,24 +222,75 @@ fn inline_with_budget(
             continue;
         }
         spent += work;
-        let mut candidate = graph.clone();
+        let caller = graph
+            .nodes
+            .iter()
+            .find(|c| c.id() == site)
+            .unwrap()
+            .function();
+        let mut candidate = graph.trial(caller, callee);
         let copied = candidate.splice(site)?;
-        let materialized = candidate.clone().materialize(&cleaned)?;
-        let materialized =
-            crate::virtual_cleanup::cleanup(&materialized).map_err(|e| e.to_string())?;
-        let Ok(new_costs) = allocated_costs(&materialized, options) else {
+        let Ok((new_cost, projection)) = caller_cost(
+            &candidate,
+            &cleaned,
+            caller,
+            options,
+            crate::abi_codegen::has_global_portal(&cleaned),
+        ) else {
             stats.frame_limit_calls_preserved += 1;
             continue;
         };
-        if new_costs
-            .iter()
-            .any(|(id, after)| global.contains(id) && *after > costs[id])
-        {
+        if global.contains(&caller) && new_cost > costs[&caller] {
             stats.frame_limit_calls_preserved += 1;
             continue;
         }
-        graph = candidate;
-        costs = new_costs;
+        // Keep the accepted template compact too. Otherwise dead storage from
+        // earlier splices is zeroed again when this caller is itself cloned,
+        // causing quadratic initialization growth despite clean final output.
+        let refreshed = Graph::normalize(&projection)?;
+        let old_nodes: HashSet<_> = candidate
+            .nodes
+            .iter()
+            .filter(|c| c.function() == caller)
+            .map(Continuation::id)
+            .collect();
+        graph.nodes.retain(|c| c.function() != caller);
+        graph.results.retain(|id, _| !old_nodes.contains(id));
+        for c in refreshed
+            .nodes
+            .into_iter()
+            .filter(|c| c.function() == caller)
+        {
+            if let Some(result) = refreshed.results.get(&c.id()) {
+                graph.results.insert(c.id(), *result);
+            }
+            graph.nodes.push(c);
+        }
+        let descriptor = graph
+            .functions
+            .iter_mut()
+            .find(|f| f.id() == caller)
+            .unwrap();
+        *descriptor = refreshed
+            .functions
+            .into_iter()
+            .find(|f| f.id() == caller)
+            .unwrap();
+        graph.owners.insert(caller, refreshed.owners[&caller]);
+        graph.ids.used.extend(candidate.ids.used);
+        graph.ids.used.extend(refreshed.ids.used);
+        #[cfg(test)]
+        {
+            let materialized = graph.clone().materialize(&cleaned)?;
+            let materialized =
+                crate::virtual_cleanup::cleanup(&materialized).map_err(|e| e.to_string())?;
+            assert_eq!(
+                new_cost,
+                allocated_costs(&materialized, options)?[&caller],
+                "isolated caller cost must match full program layout"
+            );
+        }
+        costs.insert(caller, new_cost);
         stats.calls_inlined += 1;
         stats.blocks_cloned += copied;
     }

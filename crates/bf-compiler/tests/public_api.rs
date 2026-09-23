@@ -6,18 +6,29 @@ use bf_compiler::{
     lower_continuations, lower_source, lower_sources,
 };
 
+fn source_without_inline(source: &str) -> ContinuationProgram {
+    bf_compiler::lower_source_with_options(
+        source,
+        bf_compiler::ContinuationOptimizationOptions {
+            inline_functions: false,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .0
+}
+
 fn continuation_id(value: u16) -> ContinuationId {
     ContinuationId::new(value).unwrap()
 }
 
 #[test]
 fn profile_artifact_preserves_brainfuck_and_separates_abi_phases() {
-    let program = lower_source(
+    let program = source_without_inline(
         "cell[2] values; cell index; void helper() { while (input() != 0) { values[index] = 1; } } \
          void main() { helper(); helper(); output('x'); \
          cell index; values[index] = 1; output(values[index]); }",
-    )
-    .unwrap();
+    );
     let normal = compile_continuations(&program).unwrap();
     for granularity in [
         ProfileGranularity::Abi,
@@ -96,7 +107,7 @@ fn source_lowering_exposes_validated_continuation_ir() {
 
 #[test]
 fn unused_functions_are_removed_and_live_calls_are_remapped() {
-    let program = lower_source(
+    let program = source_without_inline(
         r"
         void unused_before() { unused_after(); }
         cell global = initialize();
@@ -108,8 +119,7 @@ fn unused_functions_are_removed_and_live_calls_are_remapped() {
         void emit(cell value) { output(value); output(next(value)); while (0) { output(0); } }
         cell next(cell value) { cell result = value + 1; inline_marker += 1; return result; }
         ",
-    )
-    .unwrap();
+    );
 
     assert_eq!(program.main(), FunctionId::new(1));
     assert_eq!(program.functions().len(), 4);

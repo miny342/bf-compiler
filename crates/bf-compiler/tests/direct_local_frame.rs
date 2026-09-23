@@ -21,6 +21,7 @@ fn repeat_256_frame_only_bodies_can_be_inlined() {
             bfc::ContinuationOptimizationOptions {
                 inline_branch_successors: true,
                 structure_local_control_flow: structure,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -40,11 +41,22 @@ fn repeat_256_frame_only_bodies_can_be_inlined() {
             .iter()
             .filter(|c| c.function() == function.id())
             .collect();
-        assert_eq!(nodes.len(), 1);
-        assert!(matches!(nodes[0].terminator(), Terminator::Halt));
-        let loops: Vec<_> = nodes[0]
-            .body()
+        assert!(
+            nodes
+                .iter()
+                .all(|c| !matches!(c.terminator(), Terminator::Call { .. }))
+        );
+        if structure {
+            assert_eq!(nodes.len(), 1);
+        }
+        assert!(
+            nodes
+                .iter()
+                .any(|c| matches!(c.terminator(), Terminator::Halt))
+        );
+        let loops: Vec<_> = nodes
             .iter()
+            .flat_map(|c| c.body())
             .filter_map(|instruction| {
                 if let FrameInstruction::Loop { condition, body } = instruction {
                     Some((condition, body))
@@ -59,7 +71,7 @@ fn repeat_256_frame_only_bodies_can_be_inlined() {
                 matches!(body.as_slice(), [FrameInstruction::Output { src }, FrameInstruction::AddConst { dst, value: 1 }] if dst == condition && src != dst)
             );
         }
-        assert!(!nodes[0].body().iter().any(|i| matches!(
+        assert!(!nodes.iter().flat_map(|c| c.body()).any(|i| matches!(
             i,
             FrameInstruction::Branch { .. } | FrameInstruction::Copy { .. }
         )));
@@ -131,7 +143,7 @@ fn direct_conditions_preserve_values_wrapping_and_nested_local_lifetimes() {
 }
 
 #[test]
-fn calls_and_early_returns_keep_their_control_boundaries() {
+fn cir_inline_eliminates_calls_and_preserves_early_returns() {
     let source = "cell tick(cell n){output(n);return n-1;}
         cell work(cell n){while(n!=0){if(n==2){return n;}n=tick(n);}return 0;}
         void main(){output(work(3));output(work(0));}";
@@ -140,7 +152,7 @@ fn calls_and_early_returns_keep_their_control_boundaries() {
         program
             .continuations()
             .iter()
-            .any(|c| matches!(c.terminator(), Terminator::Call { .. }))
+            .all(|c| !matches!(c.terminator(), Terminator::Call { .. }))
     );
     assert_eq!(
         bf_interpreter::run(

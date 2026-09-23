@@ -1,6 +1,6 @@
 # 生存解析によるframe領域の再利用
 
-Rust版compilerのsource frontendでは、HIRをContinuation IRへloweringした後、関数ごとに
+Rust版compilerのsource frontendでは、全関数をvirtual Continuation IRへloweringし、CIR inlineとgraph cleanupの後で関数ごとに
 `frame_allocation::allocate`を実行する。HIRのlocal名・型はこの時点では必要ない。
 `FrameSlot`をvirtual register、frame aggregateを分割しないvirtual regionとして扱う。
 
@@ -11,8 +11,8 @@ Rust版compilerのsource frontendでは、HIRをContinuation IRへloweringした
 - 構造化`Loop`にもback edgeを作り、`Branch`は両枝を解析する。
   structured branchのconditionはbackendがbranch終了まで使用するため、その期間は再利用しない。
 - worklistで `live_in = uses ∪ (live_out − defs)` の固定点を求める。
-- definitionとlive-out、同じ命令のoperand間に干渉edgeを作る。破壊的`Transfer`、copy、
-  portalの入出力を新たにaliasさせない。parameter同士とentryで生存する初期値も干渉させる。
+- definitionとlive-out、同じ命令のoperand間に干渉edgeを作る。破壊的`Transfer`、aggregate copy、
+  portalの入出力を新たにaliasさせない。死ぬscalar Copyのsourceとdestinationは同居できる。parameter同士とentryで生存する初期値も干渉させる。
 - 干渉数の多い領域から決定的なgreedy coloringを行い、scalarとaggregateを分けて配置する。
   aggregateは同じpayloadサイズのものだけを共有する。protocol、head、paddingも領域と一緒に共有される。
 - parameter、命令、terminatorの参照とfunction descriptorを更新し、最終IRをconstructorで検証する。
@@ -23,19 +23,18 @@ loweringが生成する連続した全要素`Set`による初期化では古い�
 regionをcellごとに解析しないので、大きなarrayでもlivenessの変数数はpayload長に比例しない。
 
 これは最小値を保証する最適彩色ではない。異なるサイズのaggregateの重ね合わせ、aggregate内の
-個別fieldへの分割、copy coalescing、dead store除去は行わない。`--cir-input`のflat frameや、
+個別fieldへの分割は行わない。scalar Copyのcoalescingを行い、allocation前のvirtual cleanupで
+不要なlocal writeとstorageを除去する。`--cir-input`のflat frameや、
 公開APIで手動構築したIRにも自動適用しない。source loweringが作る独立したlocal領域が対象である。
 
 ## インライン化の採否
 
-単一の静的call siteから呼ばれるvoid関数で、再帰せず、末尾以外にreturnがないものを候補にする。
-parameterとlocalをfresh IDへrenameし、引数の左から右への評価順序を保ってbodyを挿入する。
-到達可能性とcall siteの収集は同じHIR walkerを使用する。
+採否は allocation 前の CIR graph で判断する。yield、途中 return、aggregate 引数・結果も扱い、
+直接／相互再帰 SCC を除外する。詳細は [CIR_INLINE.md](CIR_INLINE.md) を参照。
 
-候補を試験的にCIRへloweringして領域を再利用し、callerのframe chunk数を変更前と比較する。
-D=16で増加しない場合だけ採用する。見積もりにはbranch temporary、portal temporary、
-outbox、aggregate protocolとalignmentを含める。program全体で共通のroute領域は比較から省く。
-採用したcallerの見積もりはcacheする。
+候補を試験的に allocation し、B1 の selector／loop gate、portal scratch、outbox、aggregate protocol、
+alignment、global route scratch を含む実 layout を比較する。global に直接または Call 経由でアクセスする
+caller は persistent frame を増やさない。global-free caller は ABI 上限の範囲で増加を許容する。
 
 これは「call時の最大stackが小さければよい」という判定より保守的である。calleeをinline化すると、
 その領域はcallerの全実行期間に常駐する。calleeを呼んでいない時間もglobal navigationが余分な
@@ -49,7 +48,7 @@ loop back edge、再帰callをまたぐ値、短絡評価、aggregateの部分�
 portal offset、繰り返す初期化、inline化によるframe膨張の抑止を含む。
 100個の独立したscalar scopeでは、300以上のvirtual slotが4以下のphysical slotへ収まることも確認する。
 
-## selfhost測定
+## 旧 HIR inline 段階の selfhost 測定
 
 入力は `logs/full-selfhost-20260907-013902/stage2-compiler-test.bfc`。
 元の2行はユーザー提供のJSON profile、残りは同じソースをこの変更でcompileして実行した結果。

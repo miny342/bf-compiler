@@ -6,6 +6,7 @@ fn lower(source: &str) -> (ContinuationProgram, usize) {
         ContinuationOptimizationOptions {
             inline_branch_successors: false,
             structure_local_control_flow: false,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -138,22 +139,8 @@ fn selfhost_hex_serializer_keeps_frame_control_and_exact_output() {
         include_str!("../../../selfhost/stage2/compiler/09_bf_serialization.bfc")
     );
     let (program, _) = lower(&source);
-    for (name, expected_count) in [("emit_repeat_wide", 4), ("emit_repeat_character", 1)] {
-        let function = program
-            .functions()
-            .iter()
-            .find(|f| f.name() == Some(name))
-            .unwrap();
-        assert_eq!(
-            program
-                .continuations()
-                .iter()
-                .filter(|c| c.function() == function.id())
-                .count(),
-            expected_count,
-            "{name}"
-        );
-    }
+    // The ordinary CFG inliner now removes serializer helpers as well.
+    assert_eq!(program.functions().len(), 1);
     let mut input = Vec::new();
     let mut expected = String::new();
     for count in (0..=255u32).chain([

@@ -1,14 +1,15 @@
-# CIR soft boundary の region emission prototype
+# CIR soft boundary の region emission
 
 2026-09-22。案 B の prototype、soft cycle 対応、yielding control の通常 CFG 化を実装した。
 B0 は既存の CFG optimizer と
 continuation ごとの ABI emission、B1 は同じ semantic CIR を参照して soft edge を
 直接実行する非公開の backend 出力計画である。
 
-公開 API と CLI の既定動作は B0。B1 は
-`abi_codegen::lower_continuations_annotated_with_options` の内部引数
-`region_emission` で有効化し、`abi_codegen/region_probe.rs` から比較する。
-公開 `AbiCodegenOptions`、selfhost wire format、ABI field layout は変更していない。
+2026-09-23、公開 API と CLI の既定を B1 に切り替えた。
+`AbiCodegenOptions::region_emission = false` または `bfc --disable-region-emission` で
+B0 を比較できる。出力計画は非公開型のままで、selfhost wire format と ABI field layout は変更しない。
+B1 の追加 scratch により frame／main tape capacity に収まらなくなる場合は、B0 の layout と emission
+へ戻す。容量内では frame や BF size が増えても soft dispatcher 削減を優先する。
 通常 CFG 化に伴い、公開 `Terminator::BranchWithBodies` と VM の対応する統計種別、
 viewer の読み取り処理は削除した。旧 variant を使う Rust API 利用側は arm を通常 block へ
 移し、旧 variant を含む CIR JSON は再生成する。互換 variant は残さない。
@@ -83,7 +84,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 測定 fixture は `region_probe.rs` に固定した。最初の2ケースは source frontend の
-既定 optimizer を通し、conditional early return により callee の HIR inline を防いでいる。
+既定 CFG optimizer を通し、CIR inline を明示的に無効化して backend の効果を単独で測る。
+初版では conditional early return により当時の HIR inline を防いでいた。
 BF bytes は全 program の最適化済み通常 BF、BF 命令数は全 program の実行命令数。
 過去の調査用 fixture の BF bytes と直接比較する値ではない。
 
@@ -102,7 +104,7 @@ BF bytes は全 program の最適化済み通常 BF、BF 命令数は全 program
 最初の2ケースは dispatcher 削減目標を満たし、frame chunks は増えていない。
 最後の手動 CIR fixture は frame 境界の影響を分離するために16 scalar slotsを固定している。
 scratch による1 chunk増加が global navigation を長くし、訪問数が減っても BF 実行命令は増えた。
-B1 はこの理由で候補を棄却しない。現段階では既定有効化を行わず、この費用を別に報告する。
+B1 はこの理由で候補を棄却しない。この表は初版の記録であり、frame と navigation の費用を別に報告する。
 
 ## Soft cycle 対応の追加測定
 
@@ -197,9 +199,9 @@ ID 65,535、255／256 terminal、soft SCC、展開上限を含む。加えて32�
 各3通りの入力で実行し、self edge・nested backedge・複数入口の cycle を検証する。
 terminal のない閉じた SCC も BF 出力可能であることを確認する。
 
-CIR inline と virtual inbox／outbox は [CIR_INLINE.md](CIR_INLINE.md) の内部明示指定で実装した。
-自動選択、HIR inline の移行、展開上限を超える graph の直接実行は後続作業。
-公開機能として有効化する前に、frame cost と追加 scratch を減らす方式の評価が必要になる。
+CIR inline と virtual inbox／outbox、自動 frame cost 判定、HIR inline の撤去は
+[CIR_INLINE.md](CIR_INLINE.md) に記録する。展開上限を超える graph は引き続き部分的に dispatcher へ戻す。
+任意の大きな CFG から dispatcher を完全に除去することは、この実装の保証に含めない。
 
 検証時の `cargo test --workspace`（329成功、1件は benchmark export 用のため ignored）、
 format／diff check、`cargo clippy --workspace --all-targets -- -D warnings`、
@@ -216,3 +218,28 @@ profile site lookup と lowering の分岐、HIR inline の Option／cost 走査
 本段階で上記 fixture の dispatcher 訪問・frame・raw／RLE 命令数はすべて維持した。
 この移動時点では全329テストと Clippy を確認済み。その後の CIR inline と virtual result は
 [CIR_INLINE.md](CIR_INLINE.md) に記録する。
+
+## 既定化と互換性
+
+- source、公開 CIR、flat selfhost CIR のいずれも B1 を使用する。profile 有無・通常／圧縮出力で同じ BF を生成する。
+- source の自動 CIR inline と B1 は独立して無効化できる。B0／B1 の acceptance テストでは
+  inline を無効化し、2-call loop の8→5訪問、both-arm if の4→2訪問を引き続き直接 BF で検証する。
+- `AbiCodegenOptions` の Rust struct literal は `region_emission` または `..Default::default()` を指定する。
+- scratch が frame 上限を1 chunk超える入力で、既定 backend の BF が B0 と一致し、正常終了することを検証する。
+- 旧 HIR 専用の block 数や関数残存数に依存したテストは、目的に応じて明示的に inline を無効化するか、
+  新しい Call 除去と意味の一致を検証する形に更新した。
+
+2026-09-23 の既定化時点の再測定（CIR inline は無効、同一 CIR の B0→B1）。
+訪問数は対象関数、raw／RLE と BF bytes は全 program。
+
+| Fixture | 実 BF 訪問 | frame chunks | BF bytes | raw | RLE |
+|---|---:|---:|---:|---:|---:|
+| 2-call loop、n=2 | 8→5 | 2→2 | 4,668→6,019 | 14,251→11,831 | 4,428→3,855 |
+| both-arm if | 4→2 | 2→2 | 4,318→5,144 | 5,709→4,294 | 1,831→1,459 |
+| optional Call loop | 14→3 | 2→2 | 4,281→5,884 | 14,522→9,892 | 4,383→3,109 |
+| nested optional Call | 21→3 | 2→2 | 4,969→7,724 | 17,371→9,955 | 5,429→3,179 |
+| soft loop＋aggregate portal | 13→5 | 7→7 | 1,099,395→1,105,110 | 84,972→77,773 | 12,023→9,776 |
+| global access＋frame 増加 | 2→1 | 2→3 | 5,565→7,344 | 394,009→528,944 | 51,850→60,033 |
+
+portal の内部訪問は18→18を保つ。最後の例は dispatcher 削減と実行コスト改善が一致しないケースで、
+B1 の selector／scratch と global navigation の調整課題として残す。

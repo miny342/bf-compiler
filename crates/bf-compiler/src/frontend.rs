@@ -251,7 +251,6 @@ fn lower_tokens(
     let ast = crate::macro_expansion::expand(ast)?;
     let mut hir = semantic::analyze(&ast)?;
     hir.source_files = source_files;
-    crate::hir_inline::inline_single_use_functions(&mut hir);
     crate::continuation_lowering::lower_hir_with_options(&hir, options)
         .map_err(|error| FrontendError::without_offset(error.to_string()))
 }

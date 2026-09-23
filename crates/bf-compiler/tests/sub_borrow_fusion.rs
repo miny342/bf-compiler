@@ -79,6 +79,7 @@ fn source_fusion_covers_every_pair_and_preserves_inputs() {
             bfc::ContinuationOptimizationOptions {
                 inline_branch_successors: true,
                 structure_local_control_flow: structure,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -255,7 +256,15 @@ fn production_wide_subtract_preserves_borrow_chains_and_call_frames() {
             }}
         }}"
     );
-    let program = bfc::lower_source(&source).unwrap();
+    let program = bfc::lower_source_with_options(
+        &source,
+        bfc::ContinuationOptimizationOptions {
+            inline_functions: false,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .0;
     let wide = program
         .functions()
         .iter()

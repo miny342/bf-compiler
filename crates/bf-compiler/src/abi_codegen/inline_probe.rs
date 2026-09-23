@@ -35,6 +35,15 @@ fn compare(
     expected: &[u8],
 ) -> (ContinuationProgram, InlineStats) {
     let (inlined, stats) = inline_selected(program, selected).unwrap();
+    let (automatic, _) =
+        crate::continuation_inline::inline_automatic(program, Default::default()).unwrap();
+    let (automatic, _) =
+        crate::continuation_pipeline::finish(&automatic, Default::default()).unwrap();
+    assert_eq!(
+        measure(&automatic, input, true).output,
+        expected,
+        "automatic inline semantics"
+    );
     for p in [program, &inlined] {
         let mut output = Vec::new();
         crate::run_continuations_with_io(
@@ -637,7 +646,7 @@ fn structured_branch_consumes_its_condition_after_either_arm() {
 }
 
 #[test]
-fn automatic_cir_inline_compares_with_hir_cheap_cases() {
+fn automatic_cir_inline_covers_former_hir_cheap_cases() {
     let cases: [(&str, &str, &[u8], &[u8]); 7] = [
         (
             "void-global",
@@ -683,39 +692,22 @@ fn automatic_cir_inline_compares_with_hir_cheap_cases() {
         ),
     ];
     for (label, text, input, expected) in cases {
-        let ast = crate::parser::parse(crate::lexer::lex(text).unwrap()).unwrap();
-        let mut hir = crate::semantic::analyze(&ast).unwrap();
-        let plain = crate::continuation_lowering::lower_hir_unallocated(&hir).unwrap();
-        crate::hir_inline::inline_single_use_functions(&mut hir);
-        let hir = crate::continuation_lowering::lower_hir_unallocated(&hir).unwrap();
+        let plain = source(text);
         let (auto, stats) =
             crate::continuation_inline::inline_automatic(&plain, Default::default()).unwrap();
-        let (hir, _) = crate::continuation_pipeline::finish(&hir, Default::default()).unwrap();
         let (auto, _) = crate::continuation_pipeline::finish(&auto, Default::default()).unwrap();
-        let before = measure(&hir, input, true);
         let after = measure(&auto, input, true);
-        assert_eq!(before.output, expected, "{label}");
         assert_eq!(after.output, expected, "{label}");
-        let hir_frame = estimated_frame_chunks(&hir).unwrap()[&hir.main()];
-        let cir_frame = estimated_frame_chunks(&auto).unwrap()[&auto.main()];
-        eprintln!(
-            "HIR->CIR {label}: accepted={} frame rejected={} calls={}->{} visits={}->{} frame={}->{} bytes={}->{} raw={}->{} RLE={}->{}",
-            stats.calls_inlined,
-            stats.frame_limit_calls_preserved,
-            before.semantic.calls,
-            after.semantic.calls,
-            before.visits.values().sum::<u64>(),
-            after.visits.values().sum::<u64>(),
-            hir_frame,
-            cir_frame,
-            before.bytes,
-            after.bytes,
-            before.instructions,
-            after.instructions,
-            before.rle_instructions,
-            after.rle_instructions
+        assert_eq!(after.semantic.calls, 0, "{label}");
+        assert_eq!(after.visits.values().sum::<u64>(), 1, "{label}");
+        assert!(
+            estimated_frame_chunks(&auto).unwrap()[&auto.main()] <= 2,
+            "{label}"
         );
-        assert!(after.semantic.calls <= before.semantic.calls, "{label}");
+        eprintln!(
+            "CIR {label}: accepted={} bytes={} raw={} RLE={}",
+            stats.calls_inlined, after.bytes, after.instructions, after.rle_instructions
+        );
     }
 }
 

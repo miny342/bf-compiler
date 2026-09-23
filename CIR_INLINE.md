@@ -1,9 +1,11 @@
 # CIR graph inline migration
 
 2026-09-23。allocation 前の CIR graph に clone／splice を実装した。
-現在は `continuation_inline::inline_selected` の内部明示指定で検証する。
-source の既定経路は空の対象リストを渡し、既存 HIR inline を維持している。
-新しい source 構文は追加しない。B1 region emission も引き続き内部オプション。
+source の既定経路は frame cost に基づく自動 CIR inline を使用する。HIR の汎用 inliner は撤去した。
+`ContinuationOptimizationOptions::inline_functions = false` または `bfc --disable-function-inline` で
+比較できる。公開の allocated CIR／selfhost flat CIR に再 allocation や自動 inline は適用しない。
+内部の `inline_selected` は削減能力と細かい activation invariant の検証用に残す。
+新しい source 構文は追加しない。backend の B1 region emission も既定で有効。
 
 ## 実装と invariant
 
@@ -132,10 +134,79 @@ correctness・frame・dispatcher は既存 cheap case を満たす。一方、HI
 global ありでは内側 helper のみ inline して外側 Call を保持し、global なしでは両方を inline して
 caller frame の増加を許可する。入力消費と値の保持は生成 BF でも一致する。
 
-## 計画の残作業
+## 既定経路への移行
 
-1. 自動 CIR inline を source の既定経路にして HIR の汎用 inline を撤去する。
-2. B1 の既定経路を確定し、source／公開 CIR API／CLI／selfhost への影響を検証する。
-   frame cost・scratch・展開上限による fallback を記録し、全 regression matrix を再確認する。
+HIR の汎用 inliner とその試験 lowering の frame estimator を削除した。cheap case の同一 fixture は
+CIR での意味・frame chunks・実 dispatcher 訪問を固定する回帰テストとして残す。上の HIR 比較は
+`885eddd` で両経路を実行した記録であり、HIR 実装をテスト専用に残してはいない。
 
-この migration は未完了であり、上記までを継続する。
+自動選択の試行は caller と callee の graph だけを複製する。残存 Call の signature は保持し、
+caller の materialization／virtual cleanup／CFG cleanup／allocation／B1 layout を実行する。
+全 program に必要な global portal route scratch も計上する。テストでは全 program の試験 allocation と
+同じ caller cost になることを照合する。採用後の caller template も不要 storage を削減し、次の clone で
+死んだ領域の初期化が増殖することを避ける。
+
+CLI の artifact identity は `bfc-ir-artifact-v6` とし、`inline_functions` を hash と measurement options
+に含める。identity helper／phase config generator／固定 fixture も更新した。関数を phase 境界にする
+計測では `--disable-function-inline` を使い、同じオプションで identity と config を再生成する。
+古い hash や config は意図的に拒否する。これは計測 identity の変更で、CIR wire schema の変更ではない。
+
+selfhost 全体の差分検証は次で再実行できる。
+
+```sh
+cargo test --release -p bf-compiler --test cir_selfhost_migration -- --ignored --nocapture
+```
+
+この検証は compiler 自体を CIR VM 上で動かし、inline 有無で出力 CIR bytes・入力消費・終了状態を
+照合する。生成された loop／aggregate snapshot／recursion のプログラムを B0 と B1 の BF で実行し、
+raw／RLE も記録する。不正 return のエラーも両方で照合する。巨大な selfhost compiler 全体の BF 実行時間を
+この測定から推定しない。
+
+## selfhost と最終 regression matrix
+
+同じ selfhost compiler source を source lowering した比較では、inline 無効→有効で
+197→161関数、3,926→7,507 semantic block となった。lowering 時間はこの環境で1,322→201,757 ms。
+Call は減るが、試行 allocation と複製によるコンパイル時間増加は大きい。これは BF の実行時間ではない。
+
+| selfhost への入力 | compiler の実 Call | compiler の CIR 訪問 | 出力 CIR bytes |
+|---|---:|---:|---:|
+| scalar loop | 4,444→2,324 | 15,232→10,872 | 89（一致） |
+| aggregate snapshot | 15,461→8,143 | 52,777→37,715 | 200（一致） |
+| recursion | 7,348→3,833 | 25,201→17,968 | 151（一致） |
+| 不正 return | 2,492→1,216 | 8,636→5,941 | error 21（一致） |
+
+入力消費と終了状態も一致。生成物の B0→B1 は、loop が raw 5,512／RLE 555で不変、
+snapshot が raw 32,917／RLE 3,513で不変、recursion が raw 24,590→23,025／RLE 3,401→3,166。
+compiler 自体の CIR 訪問数を BF dispatcher 訪問数として扱わない。
+
+元の計画の各項目は次の回帰群で確認する。
+
+| 計画のケース | 主な回帰 |
+|---|---|
+| 1. 1-call loop | `region_probe::source_yield_lowering_preserves_dispatch_minimum` |
+| 2. 2-call loop | `region_probe::two_call_loop_reaches_five_real_dispatcher_visits` |
+| 3–4. nested if／while、soft cycle | `region_probe` の optional/nested Call と32種類の有限 CFG |
+| 5. both-arm yielding if | `region_probe::both_yielding_arms_reach_two_real_dispatcher_visits` |
+| 6–7. RHS→index→portal、aggregate snapshot／部分更新 | `region_probe` と `inline_probe` の Call/portal、subrange、outbox tail |
+| 8–9. yielding short-circuit | `inline_probe::inline_keeps_short_circuit_evaluation_and_zero_sized_returns` |
+| 10. yielding inline、内側 Call 保持 | `inline_probe::yielding_and_early_return_inline_preserves_inner_calls_and_iteration_order` |
+| 11. 複数 caller | `inline_probe::multiple_callers_and_nested_inline_have_fresh_storage` |
+| 12. scalar return、毎回の初期化 | `inline_probe` の fresh storage／loop invocation／readonly snapshot |
+| 13. aggregate 値渡し・結果 | `inline_probe` の nested results／parameter subrange／outbox tail／zero-sized return |
+| 14. 直接／相互再帰 | `inline_probe::direct_and_mutual_recursive_sccs_are_never_inlined` と automatic budget test |
+| 15. Abort／early return | `inline_probe`、`structured_frame_lowering`、selfhost error case |
+| condition 再利用・共有 resume・source span・ID上限 | `region_probe`／`inline_probe`／`explicit_inline_retains_call_when_no_clone_ids_fit` |
+| frame／展開上限 | automatic global frame guard／work budget、region capacity fallback／255・256 terminal／depth・node limit |
+| 公開API・CLI・wire・profile・圧縮 | `public_api`／`ir_metrics_cli`／`cir_selfhost_migration` |
+
+残る性能調整は、cheap case の定数／コピー簡約、B1 の追加 scratch と selector cost、
+大規模入力の試行 allocation／複製量である。dispatcher 削減を保証するテストを維持したまま調整する。
+
+selfhost の全テストソース（`concat-stage2-compiler.sh test`）も既定の CIR inline で lowering し、
+CIR VM 上で `ok\n` を確認した。lowering は58,114 ms、287関数・12,659 block、実行は
+508,746 CIR訪問・132,390 Call・3,517,301 frame instruction。通常 workspace からは重い
+selfhost 2検証を ignored にし、上記 release コマンドで両方を実行する。
+
+最終確認：`cargo test --workspace` は342成功・3 ignored（benchmark export 1件、別途成功した selfhost 2件）。
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、diff check は成功。
+Python の artifact identity helper と Rust CLI の hash も inline 有効／無効の両方で一致した。

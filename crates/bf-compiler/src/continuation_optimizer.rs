@@ -16,6 +16,10 @@ use crate::continuation_ir::{
 /// Continuation CFG transformations applied after lowering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContinuationOptimizationOptions {
+    /// Inline nonrecursive functions before source frame allocation, subject to
+    /// frame costs and bounded expansion. Does not inline already allocated CIR
+    /// passed to `optimize_continuations_with_options` or the selfhost adapter.
+    pub inline_functions: bool,
     /// Inline a nonempty same-function Branch successor into a Goto source.
     pub inline_branch_successors: bool,
     /// Reconstruct single-entry local branches and loops after CFG cleanup.
@@ -27,6 +31,7 @@ pub struct ContinuationOptimizationOptions {
 impl Default for ContinuationOptimizationOptions {
     fn default() -> Self {
         Self {
+            inline_functions: true,
             inline_branch_successors: true,
             structure_local_control_flow: true,
         }
@@ -526,6 +531,7 @@ mod tests {
             ContinuationOptimizationOptions {
                 inline_branch_successors: false,
                 structure_local_control_flow: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -536,6 +542,7 @@ mod tests {
             ContinuationOptimizationOptions {
                 inline_branch_successors: true,
                 structure_local_control_flow: false,
+                ..Default::default()
             },
         )
         .unwrap();

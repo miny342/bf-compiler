@@ -13,6 +13,7 @@ from ir_artifact_identity import VERSION, cir_identity, source_identity
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("root", type=Path)
+parser.add_argument("--disable-function-inline", action="store_true")
 parser.add_argument("--disable-2c", action="store_true")
 parser.add_argument("--enable-local-control-flow", dest="local", action="store_true")
 parser.add_argument("--disable-local-control-flow", dest="local", action="store_false")
@@ -22,8 +23,8 @@ root = args.root.resolve()
 inline_branch_successors = not args.disable_2c
 source_program = root / "source" / "stage2-compiler.bfc"
 cir_program = root / "artifacts" / "cir" / "stage2-compiler.cir"
-source_id = source_identity([str(source_program)], inline_branch_successors, args.local)
-cir_id = cir_identity(str(cir_program), inline_branch_successors, args.local)
+source_id = source_identity([str(source_program)], inline_branch_successors, args.local, not args.disable_function_inline)
+cir_id = cir_identity(str(cir_program), inline_branch_successors, args.local, not args.disable_function_inline)
 
 # These IDs were verified against the fixed production CIR and the source/CIR
 # function correspondence recorded in the phase-portal evaluation. A new CIR
@@ -50,7 +51,8 @@ if cir_phases is None:
     raise SystemExit("no verified phase/function mapping for this production CIR")
 
 lowering_options = {"inline_branch_successors": inline_branch_successors,
-                    "structure_local_control_flow": args.local}
+                    "structure_local_control_flow": args.local,
+                    "inline_functions": not args.disable_function_inline}
 
 
 def write(path: Path, value: dict) -> None:

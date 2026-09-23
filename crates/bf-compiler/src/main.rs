@@ -24,6 +24,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let mut unlimited_tape = false;
     let mut compressed_bf = false;
     let mut nibble_transfer = false;
+    let mut region_emission = true;
     let mut profile_map_output = None;
     let mut profile_granularity = None;
     let mut embed_profile = false;
@@ -43,6 +44,10 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             unlimited_tape = true;
         } else if argument == "--enable-nibble-transfer" {
             nibble_transfer = true;
+        } else if argument == "--disable-region-emission" {
+            region_emission = false;
+        } else if argument == "--enable-region-emission" {
+            region_emission = true;
         } else if argument == "--compressed-bf" {
             compressed_bf = true;
         } else if argument == "--profile-map-output" {
@@ -61,6 +66,10 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             embed_profile = true;
         } else if argument == "--run-ir" {
             run_ir = true;
+        } else if argument == "--enable-function-inline" {
+            optimization_options.inline_functions = true;
+        } else if argument == "--disable-function-inline" {
+            optimization_options.inline_functions = false;
         } else if argument == "--enable-2c" {
             optimization_options.inline_branch_successors = true;
         } else if argument == "--disable-2c" {
@@ -96,7 +105,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     }
     if source_paths.is_empty() && cir_input.is_none() {
         return Err(format!(
-            "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
+            "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--enable-function-inline|--disable-function-inline] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--disable-region-emission] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--disable-region-emission] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
             executable.to_string_lossy(),
             executable.to_string_lossy()
         )
@@ -131,7 +140,8 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
             || profile_granularity.is_some()
             || embed_profile
             || compressed_bf
-            || nibble_transfer)
+            || nibble_transfer
+            || !region_emission)
     {
         return Err("--run-ir cannot be combined with Brainfuck code-generation options".into());
     }
@@ -180,6 +190,7 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
     let codegen_options = bf_compiler::AbiCodegenOptions {
         unlimited_tape,
         nibble_transfer,
+        region_emission,
     };
 
     if let Some(path) = cir_input {
@@ -893,12 +904,13 @@ fn write_ir_metrics(
     Ok(())
 }
 
-const IR_ARTIFACT_ID_VERSION: &str = "bfc-ir-artifact-v5";
+const IR_ARTIFACT_ID_VERSION: &str = "bfc-ir-artifact-v6";
 
 fn lowering_options_json(
     optimization_options: bf_compiler::ContinuationOptimizationOptions,
 ) -> Value {
     json!({
+        "inline_functions": optimization_options.inline_functions,
         "inline_branch_successors": optimization_options.inline_branch_successors,
         "structure_local_control_flow": optimization_options.structure_local_control_flow,
     })
@@ -951,6 +963,14 @@ fn append_lowering_options(
     data: &mut Vec<u8>,
     options: bf_compiler::ContinuationOptimizationOptions,
 ) {
+    append_identity_frame(
+        data,
+        if options.inline_functions {
+            b"inline_functions=true"
+        } else {
+            b"inline_functions=false"
+        },
+    );
     append_identity_frame(
         data,
         if options.inline_branch_successors {

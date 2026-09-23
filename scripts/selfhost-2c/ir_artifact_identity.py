@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 
-VERSION = b"bfc-ir-artifact-v5"
+VERSION = b"bfc-ir-artifact-v6"
 
 
 def frame(value: bytes) -> bytes:
@@ -18,9 +18,10 @@ def digest(data: bytes) -> str:
 
 
 def source_identity(paths: list[str], inline_branch_successors: bool = True,
-                    structure_local_control_flow: bool = True) -> str:
+                    structure_local_control_flow: bool = True, inline_functions: bool = True) -> str:
     data = bytearray(VERSION)
     data.extend(frame(b"source"))
+    data.extend(frame(f"inline_functions={str(inline_functions).lower()}".encode()))
     data.extend(frame(f"inline_branch_successors={str(inline_branch_successors).lower()}".encode()))
     data.extend(frame(f"structure_local_control_flow={str(structure_local_control_flow).lower()}".encode()))
     data.extend(len(paths).to_bytes(8, "big"))
@@ -30,9 +31,10 @@ def source_identity(paths: list[str], inline_branch_successors: bool = True,
 
 
 def cir_identity(path: str, inline_branch_successors: bool = True,
-                 structure_local_control_flow: bool = True) -> str:
+                 structure_local_control_flow: bool = True, inline_functions: bool = True) -> str:
     data = bytearray(VERSION)
     data.extend(frame(b"cir"))
+    data.extend(frame(f"inline_functions={str(inline_functions).lower()}".encode()))
     data.extend(frame(f"inline_branch_successors={str(inline_branch_successors).lower()}".encode()))
     data.extend(frame(f"structure_local_control_flow={str(structure_local_control_flow).lower()}".encode()))
     data.extend(frame(Path(path).read_bytes()))
@@ -44,14 +46,15 @@ if __name__ == "__main__":
     parser.add_argument("kind", choices=["source", "cir"])
     parser.add_argument("paths", nargs="+")
     parser.add_argument("--disable-2c", action="store_true")
+    parser.add_argument("--disable-function-inline", action="store_true")
     parser.add_argument("--enable-local-control-flow", dest="local", action="store_true")
     parser.add_argument("--disable-local-control-flow", dest="local", action="store_false")
     parser.set_defaults(local=True)
     args = parser.parse_args()
     kind, paths = args.kind, args.paths
     if kind == "source":
-        print(source_identity(paths, not args.disable_2c, args.local))
+        print(source_identity(paths, not args.disable_2c, args.local, not args.disable_function_inline))
     elif kind == "cir" and len(paths) == 1:
-        print(cir_identity(paths[0], not args.disable_2c, args.local))
+        print(cir_identity(paths[0], not args.disable_2c, args.local, not args.disable_function_inline))
     else:
         raise SystemExit("cir identity requires exactly one input path")

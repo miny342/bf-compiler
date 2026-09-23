@@ -115,6 +115,7 @@ fn all_unsigned_pairs_preserve_source_operands_and_relational_results() {
             bfc::ContinuationOptimizationOptions {
                 inline_branch_successors: true,
                 structure_local_control_flow: structure,
+                ..Default::default()
             },
         )
         .unwrap();

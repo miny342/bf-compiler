@@ -2,6 +2,17 @@
 use super::*;
 use bf_interpreter::{ProfileMode, ProfileOptions, RunOptions};
 
+fn source_without_inline(source: &str) -> Result<ContinuationProgram, crate::FrontendError> {
+    crate::lower_source_with_options(
+        source,
+        crate::ContinuationOptimizationOptions {
+            inline_functions: false,
+            ..Default::default()
+        },
+    )
+    .map(|(program, _)| program)
+}
+
 pub(super) struct Measurement {
     pub(super) output: Vec<u8>,
     pub(super) visits: HashMap<ContinuationId, u64>,
@@ -156,7 +167,7 @@ fn two_call_loop_reaches_five_real_dispatcher_visits() {
     let source = format!(
         "{MARK} void worker(cell n) {{ while(n) {{ output(65); mark(n); output(66); mark(n); output(67); n-=1; }} }} void main() {{ worker(input()); }}"
     );
-    let program = crate::lower_source(&source).unwrap();
+    let program = source_without_inline(&source).unwrap();
     let worker = program
         .functions()
         .iter()
@@ -181,7 +192,7 @@ fn both_yielding_arms_reach_two_real_dispatcher_visits() {
     let source = format!(
         "{MARK} void worker(cell n) {{ if(n) {{ output(65); mark(n); output(66); }} else {{ output(67); mark(n); output(68); }} output(69); }} void main() {{ worker(input()); }}"
     );
-    let program = crate::lower_source(&source).unwrap();
+    let program = source_without_inline(&source).unwrap();
     let worker = program
         .functions()
         .iter()
@@ -241,7 +252,7 @@ fn source_yield_lowering_preserves_dispatch_minimum() {
     for (label, body, input, expected) in cases {
         let source =
             format!("{MARK} void worker(cell n) {{ {body} }} void main() {{ worker(input()); }}");
-        let program = crate::lower_source(&source).unwrap();
+        let program = source_without_inline(&source).unwrap();
         let worker = program
             .functions()
             .iter()
@@ -373,7 +384,7 @@ fn report(
 }
 
 fn check_source(source: &str, cases: &[(&[u8], &[u8])]) {
-    let program = crate::lower_source(source).unwrap();
+    let program = source_without_inline(source).unwrap();
     for &(input, expected) in cases {
         let mut output = Vec::new();
         crate::run_continuations_with_io(
@@ -993,7 +1004,7 @@ fn optional_calls_in_soft_loops_visit_only_entry_and_hard_resumes() {
         ),
     ];
     for (label, source, cases) in fixtures {
-        let program = crate::lower_source(&source).unwrap();
+        let program = source_without_inline(&source).unwrap();
         let worker = program
             .functions()
             .iter()
@@ -1017,7 +1028,7 @@ fn optional_calls_in_soft_loops_visit_only_entry_and_hard_resumes() {
 
 #[test]
 fn aggregate_portal_exits_and_reenters_a_soft_cycle_after_full_cleanup() {
-    let program = crate::lower_source("struct Pair { cell a; cell b; } Pair[2] g; void worker(cell n) { cell i=input(); Pair p; while(n) { if(input()) { p.a=n; p.b=n+1; g[i]=p; } else { output(76); } output(n); n-=1; } output(g[i].a); output(g[i].b); } void main() { worker(input()); }").unwrap();
+    let program = source_without_inline("struct Pair { cell a; cell b; } Pair[2] g; void worker(cell n) { cell i=input(); Pair p; while(n) { if(input()) { p.a=n; p.b=n+1; g[i]=p; } else { output(76); } output(n); n-=1; } output(g[i].a); output(g[i].b); } void main() { worker(input()); }").unwrap();
     let worker = program
         .functions()
         .iter()
@@ -1180,4 +1191,47 @@ fn closed_soft_cycle_needs_no_terminal_selector_dispatch() {
         .map
         .validate_for_source(artifact.source.as_bytes())
         .unwrap();
+}
+
+#[test]
+fn default_regions_fall_back_when_scratch_exceeds_frame_capacity() {
+    let config = AbiConfig::default();
+    let slots = (0..crate::TAPE_CELLS)
+        .step_by(config.chunk_cells())
+        .take_while(|&cells| FrameLayout::new(config, cells, 0).is_ok())
+        .last()
+        .unwrap();
+    let main = FunctionId::new(0);
+    let first = ContinuationId::new(1).unwrap();
+    let last = ContinuationId::new(2).unwrap();
+    let program = ContinuationProgram::new(
+        main,
+        vec![FunctionDescriptor::new(
+            main,
+            vec![],
+            slots,
+            ValueType::Void,
+            first,
+        )],
+        vec![
+            Continuation::new(first, main, vec![], Terminator::Goto { target: last }),
+            Continuation::new(last, main, vec![], Terminator::Halt),
+        ],
+    )
+    .unwrap();
+    assert!(estimated_frame_chunks(&program).is_err());
+    let ordinary = lower_continuations_with_codegen_options(
+        &program,
+        AbiCodegenOptions {
+            region_emission: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let default = lower_continuations(&program).unwrap();
+    assert_eq!(default, ordinary);
+    assert_eq!(
+        bf_interpreter::run(default.to_source().as_bytes(), &[]).unwrap(),
+        b""
+    );
 }

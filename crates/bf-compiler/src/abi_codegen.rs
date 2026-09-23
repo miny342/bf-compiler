@@ -35,14 +35,27 @@ pub enum ProfileGranularity {
 }
 
 /// BF backend choices independent of source/CIR lowering and ABI geometry.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbiCodegenOptions {
+    /// Execute bounded soft CFG regions during one dispatcher visit. Enabled
+    /// by default; oversized regions retain ordinary dispatcher edges.
+    pub region_emission: bool,
     /// Skip the standard tape capacity check during code generation.
     pub unlimited_tape: bool,
     /// Bound byte-wise frame/global crossings using two nibble counters.
     /// Off by default: RemoteTransfer can execute unary loops directly.
     /// This does not change offset decomposition or portal window jumps.
     pub nibble_transfer: bool,
+}
+
+impl Default for AbiCodegenOptions {
+    fn default() -> Self {
+        Self {
+            region_emission: true,
+            unlimited_tape: false,
+            nibble_transfer: false,
+        }
+    }
 }
 
 /// Lower BF with explicit backend options, without profiling metadata.
@@ -70,7 +83,7 @@ pub fn lower_continuations_with_profile_and_codegen_options(
         !options.unlimited_tape,
         granularity,
         options.nibble_transfer,
-        false,
+        options.region_emission,
     )
 }
 
@@ -135,7 +148,7 @@ pub fn lower_continuations_with_profile(
         true,
         granularity,
         false,
-        false,
+        true,
     )
 }
 
@@ -151,7 +164,7 @@ pub fn lower_continuations_unbounded_with_profile(
         false,
         granularity,
         false,
-        false,
+        true,
     )
 }
 
@@ -181,7 +194,7 @@ fn lower_continuations_with_options(
         check_capacity,
         ProfileGranularity::Abi,
         false,
-        false,
+        true,
     )?
     .into_plain())
 }
@@ -194,14 +207,30 @@ fn lower_continuations_annotated_with_options(
     nibble_transfer: bool,
     region_emission: bool,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
-    // B1 is a private experiment exercised by region_probe. Public entry
-    // points deliberately keep region_emission=false during this prototype.
-    let regions = region_emission.then(|| RegionPlan::new(program));
-    let layouts = build_layouts_with_regions(program, config, regions.as_ref())?;
+    let mut regions = region_emission.then(|| RegionPlan::new(program));
     let static_layout = if check_capacity {
         StaticLayout::new(config, program.globals())?
     } else {
         StaticLayout::new_unbounded(config, program.globals())?
+    };
+    let make_layouts = |regions: Option<&RegionPlan>| {
+        let layouts = build_layouts_with_regions(program, config, regions)?;
+        if check_capacity {
+            layouts[&program.main()]
+                .frame
+                .validate_main_capacity(static_layout.anchor_head())?;
+        }
+        Ok::<_, AbiCodegenError>(layouts)
+    };
+    let layouts = match make_layouts(regions.as_ref()) {
+        Ok(layouts) => layouts,
+        Err(_) if regions.is_some() => {
+            // Region scratch must not make previously valid programs fail to
+            // fit. Use the ordinary backend and retain its precise errors.
+            regions = None;
+            make_layouts(None)?
+        }
+        Err(error) => return Err(error),
     };
     let portal = PortalPlan::new(program)?;
     let mut emitter = AbiEmitter::new(
@@ -314,7 +343,11 @@ fn build_layouts_with_regions(
     config: AbiConfig,
     regions: Option<&RegionPlan>,
 ) -> Result<HashMap<FunctionId, FunctionLayout>, AbiCodegenError> {
-    let has_global_portal = program.continuations().iter().any(|continuation| {
+    build_layouts_with_route(program, config, regions, has_global_portal(program))
+}
+
+pub(crate) fn has_global_portal(program: &ContinuationProgram) -> bool {
+    program.continuations().iter().any(|continuation| {
         matches!(
             continuation.terminator(),
             Terminator::ArrayLoad {
@@ -331,8 +364,16 @@ fn build_layouts_with_regions(
                 ..
             }
         )
-    });
-    let route_cells = if has_global_portal {
+    })
+}
+
+fn build_layouts_with_route(
+    program: &ContinuationProgram,
+    config: AbiConfig,
+    regions: Option<&RegionPlan>,
+    global_portal: bool,
+) -> Result<HashMap<FunctionId, FunctionLayout>, AbiCodegenError> {
+    let route_cells = if global_portal {
         GLOBAL_ROUTE_NIBBLE_CELLS
     } else {
         0
@@ -398,8 +439,16 @@ fn build_layouts_with_regions(
 pub(crate) fn estimated_frame_chunks(
     program: &ContinuationProgram,
 ) -> Result<HashMap<FunctionId, usize>, AbiCodegenError> {
+    estimated_frame_chunks_with_route(program, has_global_portal(program))
+}
+
+pub(crate) fn estimated_frame_chunks_with_route(
+    program: &ContinuationProgram,
+    global_portal: bool,
+) -> Result<HashMap<FunctionId, usize>, AbiCodegenError> {
     let regions = RegionPlan::new(program);
-    let layouts = build_layouts_with_regions(program, AbiConfig::default(), Some(&regions))?;
+    let layouts =
+        build_layouts_with_route(program, AbiConfig::default(), Some(&regions), global_portal)?;
     Ok(layouts
         .into_iter()
         .map(|(id, layout)| (id, layout.frame.frame_chunks()))
@@ -4062,9 +4111,30 @@ mod tests {
             assert_eq!(execute_continuations(&program, chunk_cells), b"ABCD");
         }
 
-        let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
-            .expect("profiled dispatcher should compile");
-        assert_eq!(artifact.source, compile_continuations(&program).unwrap());
+        let artifact = lower_continuations_with_profile_and_codegen_options(
+            &program,
+            ProfileGranularity::Abi,
+            AbiCodegenOptions {
+                region_emission: false,
+                ..Default::default()
+            },
+        )
+        .map(|p| optimize_annotated_bf(&p).profile_artifact(false))
+        .expect("profiled dispatcher should compile");
+        assert_eq!(
+            artifact.source,
+            optimize_bf(
+                &lower_continuations_with_codegen_options(
+                    &program,
+                    AbiCodegenOptions {
+                        region_emission: false,
+                        ..Default::default()
+                    }
+                )
+                .unwrap()
+            )
+            .to_source()
+        );
         artifact
             .map
             .validate_for_source(artifact.source.as_bytes())
@@ -4336,8 +4406,16 @@ mod tests {
             let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"S");
         }
-        let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
-            .expect("sparse profiled dispatcher should compile");
+        let artifact = lower_continuations_with_profile_and_codegen_options(
+            &program,
+            ProfileGranularity::Abi,
+            AbiCodegenOptions {
+                region_emission: false,
+                ..Default::default()
+            },
+        )
+        .map(|p| optimize_annotated_bf(&p).profile_artifact(false))
+        .expect("sparse profiled dispatcher should compile");
         assert!(
             artifact
                 .map
@@ -4392,8 +4470,16 @@ mod tests {
             let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"ABC");
         }
-        let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
-            .expect("profiled high-byte countdown should compile");
+        let artifact = lower_continuations_with_profile_and_codegen_options(
+            &program,
+            ProfileGranularity::Abi,
+            AbiCodegenOptions {
+                region_emission: false,
+                ..Default::default()
+            },
+        )
+        .map(|p| optimize_annotated_bf(&p).profile_artifact(false))
+        .expect("profiled high-byte countdown should compile");
         let keys = artifact
             .map
             .sites
@@ -4438,8 +4524,16 @@ mod tests {
             let chunk_cells = 16;
             assert_eq!(execute_continuations(&program, chunk_cells), b"H");
         }
-        let artifact = compile_continuations_with_profile(&program, ProfileGranularity::Abi)
-            .expect("profiled sparse high-byte dispatcher should compile");
+        let artifact = lower_continuations_with_profile_and_codegen_options(
+            &program,
+            ProfileGranularity::Abi,
+            AbiCodegenOptions {
+                region_emission: false,
+                ..Default::default()
+            },
+        )
+        .map(|p| optimize_annotated_bf(&p).profile_artifact(false))
+        .expect("profiled sparse high-byte dispatcher should compile");
         let keys = artifact
             .map
             .sites

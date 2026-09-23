@@ -13,6 +13,7 @@ fn run_bfc(root: &Path, arguments: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bfc"))
         .current_dir(root)
         .arg("--disable-local-control-flow")
+        .arg("--disable-function-inline")
         .args(arguments)
         .output()
         .expect("failed to execute bfc")
@@ -22,6 +23,7 @@ fn run_bfc_with_stdin(root: &Path, arguments: &[&str], input: &[u8]) -> std::pro
     let mut child = Command::new(env!("CARGO_BIN_EXE_bfc"))
         .current_dir(root)
         .arg("--disable-local-control-flow")
+        .arg("--disable-function-inline")
         .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -358,13 +360,13 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     assert_eq!(after["accounting"]["ok"], true);
     assert_eq!(
         after["artifact_identity_definition"]["version"],
-        "bfc-ir-artifact-v5"
+        "bfc-ir-artifact-v6"
     );
     let options = &after["measurement_options"]["lowering_options"];
     assert_eq!(options["structure_local_control_flow"], true);
     let id = after["artifact_identity"].as_str().unwrap();
     let mut config = json!({"format": "bfc-ir-phase-config-v1",
-        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v5",
+        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v6",
             "lowering_options": options},
         "chunk_cells": [16], "phases": [{"name": "main", "function_name": "main"}]});
     fs::write(root.join("phase.json"), config.to_string()).unwrap();
@@ -668,7 +670,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "0e5c242d282ad1a7259177105cc652884185f4eb9b45a028a31823b45ebf86ed",
+            "1e17ca41e768ac8d1a36a9f5b745b5680e847e4b8fa4090bd6deb7cb4f3e0431",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -686,7 +688,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
     assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
     assert_eq!(
         report["artifact_identity"],
-        "0e5c242d282ad1a7259177105cc652884185f4eb9b45a028a31823b45ebf86ed"
+        "1e17ca41e768ac8d1a36a9f5b745b5680e847e4b8fa4090bd6deb7cb4f3e0431"
     );
     assert_eq!(report["phase_config"]["artifact"]["kind"], "source");
     assert_eq!(report["accounting"]["ok"], true);
@@ -956,7 +958,7 @@ fn phase_metrics_break_portal_adjacency_across_a_non_portal_phase() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "6a529bcb8c32f603d2e3aec51d37d6ac642ac3f4ea2f946f5cba2a05f29d5770",
+            "0303eced1b8cbdceed0546e74d78d737ea130e66cdef630f6a29df578aedb97a",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -994,4 +996,58 @@ fn phase_metrics_break_portal_adjacency_across_a_non_portal_phase() {
     );
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cir_inline_and_region_defaults_match_explicit_flags_and_preserve_execution() {
+    let root = test_root().with_file_name(format!("cir-region-defaults-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("main.bfc"), "void mark(cell n){if(n){output(120);return;}output(121);}void worker(cell n){while(n){output(65);mark(n);output(66);mark(n);output(67);n-=1;}}void main(){worker(2);}").unwrap();
+    let run = |flags: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_bfc"))
+            .current_dir(&root)
+            .args(flags)
+            .arg("main.bfc")
+            .output()
+            .unwrap()
+    };
+    let default = run(&[]);
+    assert!(default.status.success(), "{:?}", default.stderr);
+    let enabled = run(&["--enable-function-inline", "--enable-region-emission"]);
+    assert!(enabled.status.success(), "{:?}", enabled.stderr);
+    assert_eq!(default.stdout, enabled.stdout);
+    for inline in ["--disable-function-inline", "--enable-function-inline"] {
+        let fused = run(&[inline]);
+        let ordinary = run(&[inline, "--disable-region-emission"]);
+        for output in [&fused, &ordinary] {
+            assert!(output.status.success(), "{:?}", output.stderr);
+            assert_eq!(
+                bf_interpreter::run(&output.stdout, &[]).unwrap(),
+                b"AxBxCAxBxC"
+            );
+        }
+        if inline == "--disable-function-inline" {
+            assert_ne!(fused.stdout, ordinary.stdout);
+        }
+    }
+    let baseline = run(&[
+        "--disable-function-inline",
+        "--run-ir",
+        "--ir-metrics",
+        "before.json",
+    ]);
+    let inlined = run(&["--run-ir", "--ir-metrics", "after.json"]);
+    assert!(baseline.status.success());
+    assert!(inlined.status.success());
+    assert_eq!(baseline.stdout, inlined.stdout);
+    let before: Value =
+        serde_json::from_slice(&fs::read(root.join("before.json")).unwrap()).unwrap();
+    let after: Value = serde_json::from_slice(&fs::read(root.join("after.json")).unwrap()).unwrap();
+    assert_ne!(before["artifact_identity"], after["artifact_identity"]);
+    assert_eq!(
+        after["measurement_options"]["lowering_options"]["inline_functions"],
+        true
+    );
+    assert!(before["run"]["calls"].as_u64().unwrap() > 0);
+    assert_eq!(after["run"]["calls"], 0);
 }

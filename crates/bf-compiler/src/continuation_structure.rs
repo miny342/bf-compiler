@@ -219,6 +219,7 @@ pub fn structure_local_control_flow(
         ContinuationOptimizationOptions {
             inline_branch_successors: false,
             structure_local_control_flow: false,
+            ..Default::default()
         },
     )?;
     stats.continuations_removed = program.continuations().len() - compacted.continuations().len();
@@ -372,6 +373,7 @@ mod tests {
                 source,
                 ContinuationOptimizationOptions {
                     inline_branch_successors,
+                    inline_functions: false,
                     structure_local_control_flow: false,
                 },
             )
@@ -380,6 +382,7 @@ mod tests {
                 source,
                 ContinuationOptimizationOptions {
                     inline_branch_successors,
+                    inline_functions: false,
                     structure_local_control_flow: true,
                 },
             )
@@ -496,6 +499,7 @@ mod tests {
                 &decoded,
                 ContinuationOptimizationOptions {
                     inline_branch_successors,
+                    inline_functions: false,
                     structure_local_control_flow: false,
                 },
             )
@@ -504,6 +508,7 @@ mod tests {
                 &decoded,
                 ContinuationOptimizationOptions {
                     inline_branch_successors,
+                    inline_functions: false,
                     structure_local_control_flow: true,
                 },
             )

@@ -18,6 +18,7 @@ pub(crate) fn finish(
         ContinuationOptimizationOptions {
             inline_branch_successors: false,
             structure_local_control_flow: false,
+            ..Default::default()
         },
     )?;
     stats.continuations_after = cleanup.continuations_after;

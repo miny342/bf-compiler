@@ -1627,7 +1627,15 @@ mod tests {
     use crate::FrameSlot;
 
     fn execute(source: &str, input: &[u8]) -> (Vec<u8>, ContinuationRunStats) {
-        let program = crate::lower_source(source).unwrap();
+        let program = crate::lower_source_with_options(
+            source,
+            crate::ContinuationOptimizationOptions {
+                inline_functions: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .0;
         let mut input = input;
         let mut output = Vec::new();
         let stats = run_continuations_with_io(
@@ -1653,7 +1661,15 @@ mod tests {
         assert_eq!(stats.returns, 3);
         assert!(stats.executed_frame_instructions > 0);
         assert!(stats.max_call_depth >= 2);
-        let program = crate::lower_source(source).unwrap();
+        let program = crate::lower_source_with_options(
+            source,
+            crate::ContinuationOptimizationOptions {
+                inline_functions: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .0;
         stats.validate_transition_accounting(&program).unwrap();
         assert!(
             stats
@@ -1670,7 +1686,15 @@ mod tests {
         assert_eq!(output, b"OK");
         assert!(stats.aggregate_loads > 0);
         assert_eq!(stats.calls, 1);
-        let program = crate::lower_source(source).unwrap();
+        let program = crate::lower_source_with_options(
+            source,
+            crate::ContinuationOptimizationOptions {
+                inline_functions: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .0;
         stats.validate_transition_accounting(&program).unwrap();
     }
 
@@ -1762,7 +1786,15 @@ mod tests {
     #[test]
     fn transition_metrics_record_portals_and_abort_terminals() {
         let source = "struct Pair { cell a; cell b; } Pair choose(Pair[2] values, cell index) { return values[index]; } void main() { Pair[2] values; values[1].a = 'O'; values[1].b = 'K'; Pair result = choose(values, input()); output(result.a); output(result.b); }";
-        let program = crate::lower_source(source).unwrap();
+        let program = crate::lower_source_with_options(
+            source,
+            crate::ContinuationOptimizationOptions {
+                inline_functions: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .0;
         let mut input = &[1][..];
         let mut output = Vec::new();
         let stats = run_continuations_with_io(
@@ -1809,7 +1841,15 @@ mod tests {
     #[test]
     fn phase_metrics_are_opt_in_and_phase_boundaries_return_after_calls() {
         let source = "cell recurse(cell depth) { if (depth == 0) { return 7; } return recurse(depth - 1); } void main() { output(recurse(2)); }";
-        let program = crate::lower_source(source).unwrap();
+        let program = crate::lower_source_with_options(
+            source,
+            crate::ContinuationOptimizationOptions {
+                inline_functions: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .0;
         let main = program
             .functions()
             .iter()

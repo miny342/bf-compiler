@@ -110,6 +110,26 @@ fn remap_result(result: ResultStorage, address: &mut Address) {
 }
 
 impl Graph {
+    fn trial(&self, caller: FunctionId, callee: FunctionId) -> Self {
+        let nodes = self
+            .nodes
+            .iter()
+            .filter(|c| c.function() == caller || c.function() == callee)
+            .cloned()
+            .collect::<Vec<_>>();
+        let results = nodes
+            .iter()
+            .filter_map(|c| self.results.get(&c.id()).map(|r| (c.id(), *r)))
+            .collect();
+        Self {
+            functions: self.functions.clone(),
+            nodes,
+            results,
+            owners: self.owners.clone(),
+            ids: self.ids.clone(),
+        }
+    }
+
     fn normalize(program: &ContinuationProgram) -> Result<Self, String> {
         // Calls need no logical destination when the surrounding activation
         // never observes that part of its result. Scan explicit operands before
@@ -425,11 +445,32 @@ impl Graph {
         reachable
     }
 
-    fn materialize(
+    fn materialize(self, original: &ContinuationProgram) -> Result<ContinuationProgram, String> {
+        let reachable = self.reachable(original.main());
+        self.materialize_reachable(original, &reachable)
+    }
+
+    fn materialize_caller(
         mut self,
         original: &ContinuationProgram,
+        caller: FunctionId,
     ) -> Result<ContinuationProgram, String> {
-        let reachable = self.reachable(original.main());
+        self.nodes.retain(|c| c.function() == caller);
+        self.nodes.extend(
+            self.functions
+                .iter()
+                .filter(|f| f.id() != caller)
+                .map(|f| Continuation::new(f.entry(), f.id(), vec![], Terminator::Abort)),
+        );
+        let retained = self.nodes.iter().map(Continuation::id).collect();
+        self.materialize_reachable(original, &retained)
+    }
+
+    fn materialize_reachable(
+        mut self,
+        original: &ContinuationProgram,
+        reachable: &HashSet<ContinuationId>,
+    ) -> Result<ContinuationProgram, String> {
         self.nodes.retain(|c| reachable.contains(&c.id()));
         let live_functions: HashSet<_> = self.nodes.iter().map(Continuation::function).collect();
         self.functions.retain(|f| live_functions.contains(&f.id()));

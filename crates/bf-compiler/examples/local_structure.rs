@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = ContinuationOptimizationOptions {
         inline_branch_successors: true,
         structure_local_control_flow: false,
+        ..Default::default()
     };
     let program = if route == "source" {
         lower_source_with_options(std::str::from_utf8(&bytes)?, options)?.0

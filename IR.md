@@ -6,7 +6,7 @@
 以下では、実装に存在するものを「現行」、まだ存在しないpassやIRを「提案」と明記する。
 型名と公開範囲は現在のRust実装を基準とする。設計候補を、実装済みであるかのようには記述しない。
 
-既定無効の CFG region emission prototype と実 BF dispatcher 訪問数の比較は
+既定有効の CFG region emission と実 BF dispatcher 訪問数の比較は
 [CIR_REGION_EMISSION.md](CIR_REGION_EMISSION.md) を参照。yielding control は通常 CFG に統一し、
 旧 `BranchWithBodies` は削除した。
 allocation 前の CIR inline と virtual result の実装・比較は [CIR_INLINE.md](CIR_INLINE.md) を参照。
@@ -22,12 +22,13 @@ source/CLIの本線:
     → tokens
     → AST
     → macro expansion
-    → typed HIR / frame-aware single-use inlining
+    → typed HIR
     → 全 reachable function の unallocated Continuation IR
+    → virtual inbox/outbox normalization / frame-aware CIR graph inline / virtual cleanup
     → CFG cleanup / local reconstruction
     → function ごとの frame fusion / liveness-based frame allocation
     → allocation 後の conservative CFG cleanup
-    → ABI layout / portal planning / BF template selection
+    → soft-region emission plan / ABI layout / portal planning / BF template selection
     → BF IR（内部ではprovenance付きvariantも使用）
     → BF peephole optimization
     → Brainfuck source text
@@ -239,14 +240,17 @@ HIRからのloweringは、sourceの`if`、`while`、短絡論理演算、call、
 
 ### 現在の最適化pass
 
-source frontendでは、HIRの単一呼び出しvoid関数を、再帰・途中return・caller frameの増加がない場合に
-inline化する。mainとglobal initializerから到達しない関数はloweringで除去する。
+source frontendでは、再帰 SCC を除く Call を allocation 前の CIR で clone／splice する。
+試験 allocation と B1 layout で frame cost を確認し、global を使う caller の frame 増加を抑える。
+main と global initializer から到達しない関数は lowering／inline 後の reachability で除去する。
 全 reachable 関数を virtual slot の Continuation に lowering し、`continuation_pipeline` が
 CFG cleanup／local reconstruction の後で関数ごとに `frame_fusion` と `frame_allocation` を実行する。
 最後は空の Goto の threading だけを行い、再利用後の descriptor と命令列を
 `ContinuationProgram` constructorで検証する。これはsource frontend内のpassであり、公開APIで手動構築した
 Continuation IRや`--cir-input`のalias-preserving flat frameには自動適用しない。
-詳細と計測結果は[FRAME_ALLOCATION.md](FRAME_ALLOCATION.md)に記録する。
+詳細と計測結果は[FRAME_ALLOCATION.md](FRAME_ALLOCATION.md)と[CIR_INLINE.md](CIR_INLINE.md)に記録する。
+`--disable-function-inline` は source の Call を保持し、`--disable-region-emission` は BF backend を B0 に戻す。
+両者は独立した比較オプションで、source 構文には inline 指定を追加していない。
 
 開発時は`bfc --run-ir source.bfc`で、ABI backendとBrainfuckへの展開を行わず
 `ContinuationProgram`をRust上で直接実行できる。この経路はcellのmod 256演算、frame、call/return、
