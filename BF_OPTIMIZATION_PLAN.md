@@ -236,23 +236,95 @@ profile結果によっては次をABI versionとして検討する。
 ## Milestone 3: Global navigationとframe境界
 
 現行のglobal accessは、動的位置にあるframe contextからflag laneをanchorまで走査し、static globalへ
-移動し、再びfrontier側へ戻る。再帰深度やglobal access頻度によってはこの往復が支配的になる。
+移動し、再びfrontier側へ戻る。走査量はactivation数だけでなくlive frame chunk数に依存する。
 
-現行ABI内では次を試す。
+### 2026-09-24時点の判断
 
-- 副作用境界を越えない連続global operationのbatch化。
-- global側に滞在したまま処理できるclear/copy/compareの融合。
-- 同じaggregateへの連続portal transactionの結合。
-- contextへ戻す必要のない終端処理との融合。
+小さいglobal aggregateの近接配置だけを実装・検証し、以降のABI変更は保留する。
+以下の番号はfull38調査時の候補番号であり、実装順序や着手予定を表さない。
+候補と再検討条件はこの文書を正とし、一時artifactがなくても設計判断を参照できるようにする。
 
-現行ABIで不十分な場合は次を比較する。
+候補1は`ee4fa7e`で実装済み。16セル以下のaggregateを大きいaggregateの後、scalar globalsの
+直前へ移し、各群の宣言逆順、portal prefix、anchor位置、総容量を維持した。full38との比較で
+圧縮前BFは9,169,772,770から780,510,141 bytes（91.5%減）、実行raw命令数は51.5%減となった。
+RLE/native命令数は一致し、生成結果もSHA-256まで一致した。定数moveをまとめる現在のinterpreterでは
+実行速度改善とは扱わない。測定の詳細は[BF_OPTIMIZATION_NOTES.md](BF_OPTIMIZATION_NOTES.md)の
+「2026-09-24: 小さいglobal aggregateをanchor近傍へ配置」に記録する。
 
-- global navigation専用lane。
-- frequently-used globalのframe-local cacheと同期点。
-- stack depthに依存しないstatic region navigation。
-- global dataとruntime control metadataの再配置。
+巨大arenaの向こうに小structが置かれることで生じた長距離移動は、この配置変更で大きく減った。
+以降の候補は変更後のprofileで必要性が示された場合に再検討し、現時点では実装しない。
 
-cacheを導入する場合はrecursion、alias、call境界、abort、I/O前後の同期規則をABIへ明記する。
+### 候補2: Portal不要aggregateのpacking（低優先度・保留）
+
+現行layoutは非空aggregateすべてにportal prefixを与える。D=16では3セルのstructでもpayloadと
+prefixで計2 chunk、34物理セルを使う。動的AggregateLoad/Storeを受けないregionを通常のdata slotへ
+詰める、またはscalar replacementする余地はある。
+
+ただし、prefixを持つ変数が大量にあることは今回の巨大BFの原因ではなかった。近接配置後に
+prefixだけを削る効果は小さいと見込み、積極的な実装候補からは外す。allocatorの寿命再利用後にも
+残るregion数と削減可能chunk数が、frame容量・stack scan・Call/Returnを圧迫すると測定された場合のみ
+再検討する。globalのstatic距離短縮とframe縮小の効果は分けて評価する。
+
+再検討時には型サイズだけでなくregionの使用方法を解析する。動的portalが必要なregionは従来layoutを
+保ち、定数field access、AggregateCopy、値渡し、aggregate subrange、parameterとelementのalias、
+outbox配送の意味を保持する。backendのregionからelement位置へのmappingも対応が必要であり、
+allocation後にprefixだけを一律削除する方式にはしない。
+
+### 候補3: Global側での処理とframe復帰の削減（保留）
+
+各helperがframe contextから出発して毎回frameへ戻る規約は、言語仕様ではない。
+次の変更をそれぞれ独立した候補として残す。
+
+- global→global copy、連続Set、global同士の比較をstatic座標とstatic scratchで実行する。
+  比較結果だけをframeへ返すなど、運ぶ値そのものを減らせる場合も対象にする。
+- global→frame copyのsource保存・復元をstatic側scratchで行う。既存9セルscratchの予約と
+  非再入性を確認し、scratchまでの距離によって逆効果になる場合も計上する。
+- backendでFrame/Staticの現在位置を追跡し、依存するload/compute/storeをまとめ、必要な境界で
+  frameへ戻る。同じaggregateへの連続portal処理や、frame復帰不要の終端処理との融合も候補にする。
+
+単に区間をまとめても複数cellの値が一度のpointer往復で運べるわけではない。不要な復元・frame復帰・
+要求metadata・搬送する値の数を区別する。CIRのeffectsに従い、対象globalを観測・更新するCall/portalや
+依存する操作を越えず、snapshotとI/O順序を維持する。local templateの変更とyieldを伴う変更も分ける。
+B1のframe-relative branch/loopを閉じてからcontextを移す条件は保持する。
+
+### 候補4: 閾値で選ぶ共有globalサービス（保留）
+
+全globalアクセスをdispatcher経由にはしない。inline/B1による複製後の静的なアクセス命令数×移動距離が
+閾値を超える候補に限り、global/operationごとの移動列を共有する案を検討する。閾値は未決定である。
+コードサイズの判断には共有helperと各request/resume stubの費用を含め、実行速度には動的な頻度、
+要求・結果の搬送、追加dispatchの費用を別に計上する。共有化だけでは動的な移動命令は減らない。
+
+候補のprotocolは、callerで引数・store値をsnapshotして共通mailboxとresume PCを設定し、通常calleeの
+frameを作らずhelperで処理し、frame復帰を終えてからcallerへ結果を配送する形とする。
+長い往路と復路の両方を共有する必要がある。現在のportal routerを流用するだけでは、siteごとのresumeに
+長い復路が残る。constant offset専用の要求や複数field処理ならmetadataを減らせる可能性がある。
+
+global operandはFrameInstructionのBranch/Loop内にもあるため、その途中からdispatcherへ飛ばさない。
+選択したアクセスだけをallocation/local reconstruction前の内部CFGでrequest/resumeへ分割するか、
+同等のbackend出力計画を持つ。live temporary、破壊的condition、snapshot、評価順序を保持し、
+helperのresume PCを通常関数のReturn PCと混同しない。近いアクセスは直接実行する選択肢を残す。
+
+### その他のABI候補（保留）
+
+| 候補 | 狙い | 再検討時の条件・費用 |
+|---|---|---|
+| global側の計算・frame-local cache | 同じ値の再搬送を減らす | callee effects、再帰、動的storeとのaliasを追跡し、call・abort・I/O等の観測点で同期する |
+| transport専用lane / moving mailbox | 遠距離の反復搬送を隣接chunk間の搬送へ変える | tape増、stack flagとの共存、page移動、scratch初期化、pointer復帰を計上する |
+| global側の固定dispatcher/context | global同士の操作を近くする | local・parameter・resultへのアクセスが遠くなる費用も計上する |
+| runtime control metadataの分離 | globalへの走査量とlive data chunk数の依存を減らす | 元frameを特定してlocalへアクセスするlocator・搬送費用を含める |
+| Return時のframe全域clearの削減 | dead storageのclearを省く | 次のCallのzero前提を見直し、entryでread-before-writeになるcellだけを初期化する解析が必要 |
+
+専用laneとcode共有は独立した変更であり、共有helper化だけでstack scanが短くなるわけではない。
+clearをReturnからCallへ移すだけでも削減にはならない。sourceの初期値0、共通gateのzero条件、
+portal cleanup、再帰時の値分離を維持する。
+
+### 再検討する場合の測定
+
+同じCIR・入力・interpreter設定で、出力、入力消費、終了状態、global更新順序を比較する。
+圧縮前/圧縮後BF bytes、raw/RLE/native命令数、実dispatcher訪問、frame chunks、stack scan steps、
+parse/RSS/executeを分ける。実dispatcher訪問はcounters付きfixtureで確認する。
+0/1/255、浅い/深いstack、再帰、aggregateのoverlap、複数field、early return/abortを含める。
+単回sample時間の差だけを採否の根拠にせず、命令カウンタと反復測定を使う。
 
 ## Milestone 4: Branch、comparison、scalar template
 

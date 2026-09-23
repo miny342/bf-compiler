@@ -1091,3 +1091,5 @@ workspaceは343 passed / 3 ignored、追加の統合regressionは別途1 passed�
 後続の共有helperは全アクセスを一律に対象とせず、アクセス命令数×距離が閾値を超える候補から
 検討する。サイズにはinline/B1複製後の静的なアクセス数、実行コストには動的頻度と追加dispatchを
 別々に計上する。今回の変更にこの選択処理は含めない。
+その他のABI案も含む将来候補・再検討条件は[BF_OPTIMIZATION_PLAN.md](BF_OPTIMIZATION_PLAN.md)の
+「Milestone 3: Global navigationとframe境界」に移管し、現時点では保留とする。
