@@ -1093,3 +1093,41 @@ workspaceは343 passed / 3 ignored、追加の統合regressionは別途1 passed�
 別々に計上する。今回の変更にこの選択処理は含めない。
 その他のABI案も含む将来候補・再検討条件は[BF_OPTIMIZATION_PLAN.md](BF_OPTIMIZATION_PLAN.md)の
 「Milestone 3: Global navigationとframe境界」に移管し、現時点では保留とする。
+
+### 2026-09-24: Rust compilerのCFG再構成コストを削減
+
+CIR inlineのframe cost判定では候補ごとにCFG cleanup・local reconstruction・frame allocationを
+実行する。full38 sourceでは3,081回の試行があり、旧local reconstructionはblockを一つ結合するたびに
+全blockのindexとincoming countを再構築し、先頭から候補を探していた。その際、結合できないblockの
+bodyも複製していたため、inline試行と最後の全program cleanupで大きな費用になっていた。
+
+`continuation_structure`でincoming countとpredecessorを差分更新し、変更したblockと影響を受ける
+predecessorだけをworklistへ戻す。worklistは元のblock順で処理し、従来の結合順・scratch割り当てを
+維持する。bodyの複製は結合が決まってから行う。同じtargetへの二つのbranch edgeは別々に数え、
+function entryとCall/portal resumeの参照も引き続き保護する。inlineの採否条件や展開budgetは変えない。
+
+一時的な計測用buildでは、同一source・設定のコンパイルが180.076秒から46.797秒となった。
+allocation前のCFG最適化の合計は135.551秒から7.118秒、最後の62,238 blockに対する同処理は
+39.673秒から0.634秒へ減った。frame allocationの合計は9.020秒から7.867秒で、主因は再構成側だった。
+これらの内訳用timerは最終コードから削除した。
+
+通常のrelease buildでも同じfull38 sourceを`--compressed-bf --unlimited-tape`、source granularityの
+profile map付きで再測定した。build・test・別variantは並行実行していない。旧版は1回、新版は上記の
+計測用実行後に3回測定しており、旧版の中央値との比較ではない。
+
+| 指標 | 旧版（`12e0429`） | 変更後 |
+|---|---:|---:|
+| コンパイル秒 | 165.298 | 46.833 / 45.468 / 42.985 |
+| 比較に用いる秒 | 165.298 | 45.468（中央値） |
+| peak RSS KiB | 1,032,656 | 1,032,660–1,032,916 |
+
+この条件では約3.64倍、時間で72.5%減となった。BF実行の高速化ではなく、Rust compiler自身の
+コンパイル時間の改善である。結果とコマンドは`tmp/rust-compile-speed/comparison.{md,json}`と各runのJSONに保存する。
+
+旧実装との一時的なdifferential testで、順序を入れ替えた10,000種類のCFG（cycle、重複edge、Call、
+portalを含む）の変換後programと統計が一致した。恒久regressionには、後方blockの変換による前方候補の
+再判定、diamondのjoinが単一入口になる場合、重複edgeを減らしても共有resumeを消費しない場合を追加した。
+workspace testは345 passed / 3 ignored、Clippy警告なし、fmt成功。
+
+full38 sourceからの生成BFとprofile mapも旧実装とbyte単位で一致した。BFは前回selfhost実行を完走した
+小global近接配置版の保存artifactとも一致する。計測ログ・再現コマンドは`tmp/rust-compile-speed/`に保存する。

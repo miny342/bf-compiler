@@ -3,7 +3,7 @@
 //! Only single-entry regions are consumed. Calls, portal requests and terminal
 //! exits remain explicit; no operation crosses one of those boundaries.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::continuation_ir::{
     Address, Continuation, ContinuationId, ContinuationIrError, ContinuationProgram,
@@ -29,37 +29,59 @@ pub fn structure_local_control_flow(
     program: &ContinuationProgram,
 ) -> Result<(ContinuationProgram, LocalStructureStats), ContinuationIrError> {
     let mut functions = program.functions().to_vec();
-    let mut nodes = program.continuations().to_vec();
+    let order: HashMap<_, _> = program
+        .continuations()
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id(), index))
+        .collect();
+    let mut nodes: HashMap<_, _> = program
+        .continuations()
+        .iter()
+        .map(|node| (node.id(), node.clone()))
+        .collect();
+    let mut incoming = HashMap::<ContinuationId, usize>::new();
+    let mut predecessors = HashMap::<ContinuationId, HashSet<ContinuationId>>::new();
+    // Count edges, not distinct predecessors: both arms may name the same
+    // target. Entry, return and resume references also prevent consumption.
+    for function in &functions {
+        *incoming.entry(function.entry()).or_default() += 1;
+    }
+    for node in nodes.values() {
+        for target in successors(node.terminator()) {
+            *incoming.entry(target).or_default() += 1;
+            predecessors.entry(target).or_default().insert(node.id());
+        }
+    }
+    // Preserve the original greedy source order, including when a later
+    // reduction makes an earlier candidate possible. Only changed nodes and
+    // predecessors whose successor or entry count changed need reconsidering.
+    let mut pending: BTreeSet<_> = order.iter().map(|(&id, &index)| (index, id)).collect();
     let mut scratch = HashMap::<FunctionId, Address>::new();
     let mut stats = LocalStructureStats::default();
     loop {
-        let by_id: HashMap<_, _> = nodes.iter().map(|node| (node.id(), node)).collect();
-        let mut incoming = HashMap::<ContinuationId, usize>::new();
-        // Entry, return and resume references prevent consuming a node even
-        // when its only ordinary CFG predecessor is inside the region.
-        for function in &functions {
-            *incoming.entry(function.entry()).or_default() += 1;
-        }
-        for node in &nodes {
-            for target in successors(node.terminator()) {
-                *incoming.entry(target).or_default() += 1;
-            }
-        }
+        let by_id = &nodes;
         let mut replacement = None;
-        for node in &nodes {
+        while let Some((_, id)) = pending.pop_first() {
+            let Some(node) = by_id.get(&id) else {
+                continue;
+            };
             let single_entry = |target: ContinuationId| {
                 target != node.id()
                     && incoming.get(&target) == Some(&1)
                     && by_id[&target].function() == node.function()
             };
-            let mut body = node.body().to_vec();
-            let mut body_sources = node.body_sources().to_vec();
+            // Build only the suffix while checking a candidate. Most nodes do
+            // not reduce, and cloning their (possibly large) structured bodies
+            // on every scan makes repeated inline cost trials expensive.
+            let mut body = Vec::new();
+            let mut body_sources = Vec::new();
             let mut removed = HashSet::new();
             let exit;
             let terminator_source;
             match *node.terminator() {
                 Terminator::Goto { target } if single_entry(target) => {
-                    let next = by_id[&target];
+                    let next = &by_id[&target];
                     body.extend_from_slice(next.body());
                     body_sources.extend_from_slice(next.body_sources());
                     removed.insert(target);
@@ -201,12 +223,47 @@ pub fn structure_local_control_flow(
         else {
             break;
         };
-        let function = by_id[&id].function();
-        nodes.retain(|node| !removed.contains(&node.id()));
-        *nodes.iter_mut().find(|node| node.id() == id).unwrap() =
-            Continuation::new(id, function, body, terminator)
-                .with_source_spans(body_sources, terminator_source);
+        let original = &by_id[&id];
+        let function = original.function();
+        let body = original.body().iter().cloned().chain(body).collect();
+        let body_sources = original
+            .body_sources()
+            .iter()
+            .copied()
+            .chain(body_sources)
+            .collect();
+        let replacement = Continuation::new(id, function, body, terminator)
+            .with_source_spans(body_sources, terminator_source);
+        let mut changed_targets = HashSet::new();
+        for old_id in removed.into_iter().chain([id]) {
+            let old = nodes.remove(&old_id).unwrap();
+            for target in successors(old.terminator()) {
+                *incoming.get_mut(&target).unwrap() -= 1;
+                predecessors.get_mut(&target).unwrap().remove(&old_id);
+                changed_targets.insert(target);
+            }
+        }
+        for target in successors(replacement.terminator()) {
+            *incoming.entry(target).or_default() += 1;
+            predecessors.entry(target).or_default().insert(id);
+            changed_targets.insert(target);
+        }
+        nodes.insert(id, replacement);
+        pending.insert((order[&id], id));
+        // A predecessor can now see a different terminator/body at `id`, or a
+        // formerly shared successor may have become single-entry. Update after
+        // all edge edits so duplicate edges and backedges are counted together.
+        for target in changed_targets.into_iter().chain([id]) {
+            for &predecessor in predecessors.get(&target).into_iter().flatten() {
+                pending.insert((order[&predecessor], predecessor));
+            }
+        }
     }
+    let nodes = program
+        .continuations()
+        .iter()
+        .filter_map(|node| nodes.remove(&node.id()))
+        .collect();
     let reduced = ContinuationProgram::new_with_globals(
         program.main(),
         program.globals().to_vec(),
@@ -290,6 +347,91 @@ mod tests {
             );
         }
         stats
+    }
+
+    #[test]
+    fn later_reduction_revisits_predecessors_and_preserves_resume_entries() {
+        let id = |n| ContinuationId::new(n).unwrap();
+        let main = FunctionId::new(0);
+        let callee = FunctionId::new(1);
+        let condition = Address::Frame(FrameSlot::new(0));
+        let value = Address::Frame(FrameSlot::new(1));
+        for call_arm in [false, true] {
+            let program = ContinuationProgram::new(
+                main,
+                vec![
+                    FunctionDescriptor::new(main, vec![], 2, ValueType::Void, id(1)),
+                    FunctionDescriptor::new(callee, vec![], 0, ValueType::Void, id(5)),
+                ],
+                vec![
+                    Continuation::new(
+                        id(1),
+                        main,
+                        vec![FrameInstruction::Input { dst: condition }],
+                        Terminator::Branch {
+                            condition,
+                            then_target: id(2),
+                            else_target: id(3),
+                        },
+                    ),
+                    // Source order differs from ID order. The entry and else
+                    // arm are examined before the then arm becomes a Goto.
+                    Continuation::new(
+                        id(4),
+                        main,
+                        vec![FrameInstruction::Output { src: value }],
+                        Terminator::Halt,
+                    ),
+                    Continuation::new(
+                        id(3),
+                        main,
+                        vec![FrameInstruction::Set {
+                            dst: value,
+                            value: b'B',
+                        }],
+                        if call_arm {
+                            Terminator::Call {
+                                callee,
+                                arguments: vec![],
+                                return_to: id(4),
+                            }
+                        } else {
+                            Terminator::Goto { target: id(4) }
+                        },
+                    ),
+                    Continuation::new(
+                        id(2),
+                        main,
+                        vec![FrameInstruction::Set {
+                            dst: value,
+                            value: b'A',
+                        }],
+                        Terminator::Branch {
+                            condition,
+                            then_target: id(4),
+                            else_target: id(4),
+                        },
+                    ),
+                    Continuation::new(id(5), callee, vec![], Terminator::Return { value: None }),
+                ],
+            )
+            .unwrap();
+            for input in [0, 1, 255] {
+                let stats = check(&program, &[input]);
+                if call_arm {
+                    // Collapsing two identical edges must leave the hard
+                    // resume reference protecting the shared join.
+                    assert_eq!(stats.continuations_removed, 0);
+                    assert_eq!(stats.straight_blocks, 0);
+                } else {
+                    // Revisit the earlier entry, form the diamond, then see
+                    // that the shared join has become single-entry too.
+                    assert_eq!(stats.continuations_removed, 3);
+                    assert_eq!(stats.branches, 1);
+                    assert_eq!(stats.straight_blocks, 1);
+                }
+            }
+        }
     }
 
     #[test]
