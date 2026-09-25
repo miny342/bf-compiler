@@ -586,6 +586,7 @@ fn inline_preserves_callee_sources_through_graph_and_arithmetic_fusion() {
         ProfileGranularity::Source,
         false,
         true,
+        false,
     )
     .unwrap()
     .profile_artifact(false);

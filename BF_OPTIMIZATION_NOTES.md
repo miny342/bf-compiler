@@ -1131,3 +1131,106 @@ workspace testは345 passed / 3 ignored、Clippy警告なし、fmt成功。
 
 full38 sourceからの生成BFとprofile mapも旧実装とbyte単位で一致した。BFは前回selfhost実行を完走した
 小global近接配置版の保存artifactとも一致する。計測ログ・再現コマンドは`tmp/rust-compile-speed/`に保存する。
+
+### 2026-09-25: 非再帰関数の固定frame prototype
+
+`--experimental-static-frames`を追加した。既定は無効。CIRとinline判断を変更せず、backendで再帰SCC外の
+関数ごとに固定位置を割り当てる。関数間の領域共有、frame guardの緩和、frame全域clearの削減は含めない。
+再帰関数から呼ばれる非再帰関数も固定配置する。globalと固定frame間の移動は定数距離になり、既存の
+RLE Move・Transfer最適化を利用できる。interpreterの変更はない。
+
+固定frameと動的frameは共通のABI context geometryを使い、既存dispatcherを共有する。固定/動的をまたぐ
+Returnは静的inboxへ結果とresume PCを渡し、次のdispatcher訪問でcallerへ配送して元resumeのB1 regionを
+続けて実行する。通常のresume entryを再利用し、soft edge・portal・異なる結果幅からも入る共有先には
+専用entryを追加する。これによる追加の動的dispatcher訪問はない。aggregate結果の必要範囲だけを書き、
+scalar/void returnでcallerの既存outboxを破壊しない。
+
+再帰関数同士のCall/Returnは従来経路を残す。固定callerから入った再帰activationだけがinboxへ戻る。
+function contextで未使用だった`AbiField::Index`をreturn-route bitに使う。portalのIndexは別contextに
+あり、このbitを変更しない。分岐gateはcontext移動前に消費し、移動先で閉じるgateがゼロである条件を保つ。
+
+引数はcallerにいる間にsnapshotの値を転送する。転送完了後にcalleeへ移動し、そこでheaderを初期化する。
+動的callerに留まったまま固定calleeの各head・ABI fieldを初期化すると、fieldごとにstack scanを繰り返す。
+これを避けることが今回の構成では重要だった。固定frameからのglobal portal要求も、その場でrouterの
+転送を実行し、router専用のdispatcher訪問を省く。動的indexのaccessor/countdownは維持する。
+
+full39 sourceでは168関数が固定、35関数が動的。固定frameとinboxに22,933セルを予約し、1,852個の
+resume entryを再利用、47個を追加する。意味上のCIR block数は7,486のまま。profile mapの
+`abi.initialization.attributes`にも配置統計を記録する。
+
+検証はCIR VMとの出力・入力消費比較、B1 ON/OFF、scalar/void/aggregate return、直接・相互再帰、
+再帰経路のglobal/local portal、short circuit、abort、繰り返し呼び出し、共有resume、outboxの部分更新、
+aggregate subrangeと重複parameterを含む。nibble transferとinterpreterのCompare/RemoteTransfer無効時も
+確認する。固定calleeの領域を1,024セル増やしてもscan stepsが60のままであることを回帰テストにする。
+このfixtureでは全域clearのためnative命令は1,750から8,854へ増える。固定配置でもframe容量の費用が
+ゼロになるわけではない。
+
+小規模の非再帰fixtureでは、B1の実dispatcher訪問は19のまま、scan stepsは372から0、native命令は
+2,988から2,846となった。再帰とaggregate portalを含むfixtureでは、訪問44から40、scan steps
+1,200から900、native命令31,252から31,272となった。これらはfull selfhostの速度改善を保証しない。
+
+既定オプションで再生成したfull39のBFとprofile mapは、保存していた従来版とbyte単位で一致した。
+実験artifact・run log・集計scriptは`tmp/static-frames/`に保存する。
+
+full39と同じsource/input（195,591 bytes）、Compare最適化ON、sample profileでfull selfhostを完走した。
+出力は277,640,590 bytes、SHA-256
+`97cad5f6291ac1882db71a4425dc82687c06163648afb04480893f7b635c4918`で従来版と一致した。
+
+| 指標 | full39従来版 | 固定frame版 | 差 |
+|---|---:|---:|---:|
+| execute | 833.437秒 | 919.783秒 | +10.36% |
+| native operations | 149,307,465,068 | 153,263,457,003 | +2.65% |
+| raw BF実行命令 | 2,033,728,709,155,792 | 2,735,096,535,994,751 | +34.49% |
+| RLE実行命令 | 22,963,600,253,188 | 35,657,649,514,399 | +55.28% |
+| scan steps | 141,458,150,278 | 261,029,699,064 | +84.53% |
+| 最大pointer | 1,331,470 | 1,351,769 | +20,299セル |
+| 圧縮前BF bytes | 780,510,141 | 2,155,638,935 | 2.76倍 |
+| BFCRLE bytes | 10,202,565 | 10,553,336 | +3.44% |
+| emitted dispatcher entries | 2,474 | 2,521 | +47 |
+
+時間は保存済みfull39との単回比較であり、反復測定の中央値ではない。sampleによる内訳も正確な
+per-site実行回数ではない。fullでの実dispatcher訪問数はこのprofileからは求めず、上記の小規模
+counters fixtureで確認した。Rust compilerによる同sourceの生成時間は、同じ実装の既定版43.56秒、
+固定版44.36秒だった（これも各1回）。
+
+exclusive sample時間はaggregate copyが81.454→30.870秒、portal合計が147.884→114.854秒、
+scalar copyが65.074→57.580秒になった。一方Callは43.939→181.081秒、navigationは
+35.932→56.791秒、Returnと結果配送の合計は99.700→125.754秒となった。
+dispatcher合計は212.099→214.777秒で、今回の全体悪化の主因ではない。
+
+Callの増加は再帰関数`emit_array_countdown_level`に集中し、同関数内では5.492→143.119秒だった。
+特にsourceの5388行目、8引数の`emit_array_countdown_case`呼び出しは1.530→97.259秒。
+5373行目には自己再帰だけでなく引数評価の`wide_from_cell`・`wide_add`も含まれ、そのsource spanに
+帰属するCall時間は3.326→34.480秒となった。固定領域へ値を渡す経路には動的stack scanが必要で、
+RemoteTransferで転送loopをまとめてもscan自体は残る。融合されたRemoteTransferの時間はCallにも
+帰属するため、`abi.navigation.global`の時間だけを全scan費用と解釈しない。
+
+したがって「固定frameとglobal間を定数距離にする」効果は確認できるが、このABI接続のままでは
+full39全体の改善にはならない。再帰関数の静的な個数が少なくても、深い再帰から固定calleeを呼ぶ
+動的な回数は大きい。次に調べるならこの境界の転送を優先し、単純なframe guard緩和はまだ行わない。
+今回の圧縮前サイズ増加には、globalと固定frame間・固定frame同士の長い定数移動も含まれる。
+領域共有・配置順の調整は未実装であり、今回の2.76倍を方式全体の上限とは扱わない。
+
+初期版では再帰同士のReturnもinbox経由にし、calleeのheaderをcaller側から初期化していた。
+同じfull入力の出力は一致したが、executeは1,416.641秒、scan stepsは2,433,447,064,988だった。
+再帰同士の従来経路を維持し、headerをcalleeへ移ってから初期化する修正を入れたものが上表の版。
+途中で止めた`hybrid-v1-incomplete`は比較対象に含めない。
+
+再現コマンド（release build後、従来版は`--experimental-static-frames`を外す）:
+
+```sh
+target/release/bfc --unlimited-tape --compressed-bf --experimental-static-frames \
+  --profile-granularity source \
+  --profile-map-output tmp/static-frames/hybrid/full39.bfmap.json \
+  logs/full-selfhost-20260924-071651/stage2-compiler.bfc > tmp/static-frames/hybrid/full39.bf
+target/release/bf-interpreter --unlimited-tape \
+  --profile-map tmp/static-frames/hybrid/full39.bfmap.json --profile-mode sample \
+  --profile-output tmp/static-frames/hybrid/full39.profile.json --profile-format json \
+  tmp/static-frames/hybrid/full39.bf \
+  < logs/full-selfhost-20260924-071651/stage2-compiler.bfc > tmp/static-frames/hybrid/full39-output.bf
+```
+
+通常形式の集計は`tmp/full39-static-frames-profile-summary.txt`、行別sourceは
+`tmp/full39-static-frames-profile-annotated.bfc`、全variantの比較は
+`tmp/static-frames/comparison.{md,json}`に保存した。workspace testは356 passed / 3 ignored、
+Clippyは`--workspace --all-targets -- -D warnings`で成功。

@@ -326,6 +326,33 @@ parse/RSS/executeを分ける。実dispatcher訪問はcounters付きfixtureで�
 0/1/255、浅い/深いstack、再帰、aggregateのoverlap、複数field、early return/abortを含める。
 単回sample時間の差だけを採否の根拠にせず、命令カウンタと反復測定を使う。
 
+### 2026-09-25: 非再帰関数の固定frame実験
+
+`--experimental-static-frames`で、再帰SCC外の関数ごとにcompiler-ownedな固定領域を割り当てる。
+既定は無効。semantic CIR、inline判断、per-function allocation、B1のregion発見は従来どおりとし、
+まず同じCIRに対する配置・Call/Return・portal接続の差を測る。関数間の領域共有はまだ行わない。
+結果は`BF_OPTIMIZATION_NOTES.md`へ記録する。
+
+- 固定frame内のlocalとglobalは既知の相対距離でアクセスし、stackのflag走査を省く。
+- 再帰SCC内は動的frameを残す。再帰関数から呼ばれる非再帰関数も固定配置できる。
+- 固定/動的frame間のReturnは静的inboxで接続する。結果配送と元resumeのB1実行は同じ訪問で行う。
+- 再帰関数同士のCall/Returnは従来経路を残す。全Returnを静的inbox経由にすると、再帰の深さに
+  比例するnavigationを増やすため、固定frameだけの測定結果で採用を決めない。
+- 固定frameからのglobal portal要求は、その場でrouterの転送を実行する。動的indexの
+  accessor/countdownは残す。関数の固定配置だけでportal自体を除去したとは扱わない。
+
+初回実験ではframe全域clear・引数の値渡しを維持し、既存のframe容量制限とinlineのframe guardも
+変更しない。効果が確認できた場合の後続候補は、呼び出し関係による領域共有、read-before-writeと
+既知zeroに基づくclear削減、固定配置を考慮したinline cost判断。追加のdispatcher entry、結果の
+二段配送、再帰境界のscan、圧縮前BFとtape使用量を個別に測る。
+
+full39の初回結果は出力一致、execute +10.36%、native命令 +2.65%。aggregate copyとportalの
+時間は減ったが、深い再帰から固定calleeへ渡すCallの費用が上回った。既定有効化は行わない。
+後続では、再帰境界の引数・結果転送の集約、または再帰から頻繁に呼ぶcalleeだけ動的配置を
+維持する判断を先に検討する。静的な関数数だけでなく実行頻度・再帰の深さ・転送cell数を測り、
+動的配置を残す場合はglobal navigationが戻る費用も比較する。領域共有とframe guard緩和は
+この境界費用と分けて評価する。詳細な数値と再現手順はNOTESの同日sectionを参照。
+
 ## Milestone 4: Branch、comparison、scalar template
 
 ### Branch

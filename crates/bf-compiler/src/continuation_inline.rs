@@ -654,7 +654,7 @@ fn copy_value(body: &mut Vec<I>, src: ValueOperand, dst: ValueOperand, cells: us
     }
 }
 
-fn recursive_functions(program: &ContinuationProgram) -> HashSet<FunctionId> {
+pub(crate) fn recursive_functions(program: &ContinuationProgram) -> HashSet<FunctionId> {
     let mut edges = HashMap::<FunctionId, Vec<FunctionId>>::new();
     for c in program.continuations() {
         if let Some(callee) = c.terminator().callee() {

@@ -45,6 +45,7 @@ pub(super) fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool
         ProfileGranularity::Source,
         false,
         enabled,
+        false,
     )
     .unwrap();
     let artifact = optimize_annotated_bf(&annotated).profile_artifact(false);
@@ -592,6 +593,7 @@ fn condition_slot_reuse_shared_resume_and_sparse_ids_keep_values_and_sources() {
         ProfileGranularity::Source,
         false,
         true,
+        false,
     )
     .unwrap();
     let artifact = optimize_annotated_bf(&annotated).profile_artifact(false);
@@ -1176,6 +1178,7 @@ fn closed_soft_cycle_needs_no_terminal_selector_dispatch() {
         ProfileGranularity::Source,
         false,
         true,
+        false,
     )
     .unwrap()
     .profile_artifact(false);

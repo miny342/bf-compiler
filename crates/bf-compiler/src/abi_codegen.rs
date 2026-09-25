@@ -19,6 +19,8 @@ use crate::{
 };
 
 mod region_emission;
+mod static_frames;
+use static_frames::{StaticFramePlan, StaticResume};
 
 /// Selects how much compiler provenance is emitted into a profile map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,9 @@ pub enum ProfileGranularity {
 /// BF backend choices independent of source/CIR lowering and ABI geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbiCodegenOptions {
+    /// Experimental fixed storage for functions outside recursive call SCCs.
+    /// Does not change CIR, inlining decisions, or reuse storage between functions.
+    pub static_frames: bool,
     /// Execute bounded soft CFG regions during one dispatcher visit. Enabled
     /// by default; oversized regions retain ordinary dispatcher edges.
     pub region_emission: bool,
@@ -51,6 +56,7 @@ pub struct AbiCodegenOptions {
 impl Default for AbiCodegenOptions {
     fn default() -> Self {
         Self {
+            static_frames: false,
             region_emission: true,
             unlimited_tape: false,
             nibble_transfer: false,
@@ -84,6 +90,7 @@ pub fn lower_continuations_with_profile_and_codegen_options(
         granularity,
         options.nibble_transfer,
         options.region_emission,
+        options.static_frames,
     )
 }
 
@@ -149,6 +156,7 @@ pub fn lower_continuations_with_profile(
         granularity,
         false,
         true,
+        false,
     )
 }
 
@@ -165,6 +173,7 @@ pub fn lower_continuations_unbounded_with_profile(
         granularity,
         false,
         true,
+        false,
     )
 }
 
@@ -195,6 +204,7 @@ fn lower_continuations_with_options(
         ProfileGranularity::Abi,
         false,
         true,
+        false,
     )?
     .into_plain())
 }
@@ -206,9 +216,10 @@ fn lower_continuations_annotated_with_options(
     granularity: ProfileGranularity,
     nibble_transfer: bool,
     region_emission: bool,
+    static_frames: bool,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
     let mut regions = region_emission.then(|| RegionPlan::new(program));
-    let static_layout = if check_capacity {
+    let mut static_layout = if check_capacity {
         StaticLayout::new(config, program.globals())?
     } else {
         StaticLayout::new_unbounded(config, program.globals())?
@@ -233,6 +244,17 @@ fn lower_continuations_annotated_with_options(
         Err(error) => return Err(error),
     };
     let portal = PortalPlan::new(program)?;
+    let fixed = static_frames
+        .then(|| {
+            StaticFramePlan::new(
+                program,
+                &layouts,
+                &portal,
+                &mut static_layout,
+                check_capacity,
+            )
+        })
+        .transpose()?;
     let mut emitter = AbiEmitter::new(
         program,
         &layouts,
@@ -243,13 +265,16 @@ fn lower_continuations_annotated_with_options(
     );
     emitter.nibble_transfer = nibble_transfer;
     emitter.regions = regions.as_ref();
-    if let Some(regions) = &regions {
-        emitter.dispatch_encoding = DispatchEncoding::with_regions(program, &portal, Some(regions));
-    }
-    emitter.with_profile_site(
+    emitter.fixed = fixed.as_ref();
+    emitter.dispatch_encoding =
+        DispatchEncoding::with_fixed_frames(program, &portal, regions.as_ref(), fixed.as_ref());
+    emitter.with_profile_attributes(
         "abi",
         "abi.initialization",
         "ABI initialization",
+        fixed
+            .as_ref()
+            .map_or_else(BTreeMap::new, StaticFramePlan::profile_attributes),
         |emitter| emitter.initialize_main(check_capacity),
     )?;
     emitter.with_profile_site("abi", "abi.dispatcher", "ABI dispatcher", |emitter| {
@@ -275,7 +300,7 @@ impl fmt::Display for AbiCodegenError {
                 write!(f, "function {} has no ABI frame layout", function.index())
             }
             Self::ContinuationIdsExhausted => {
-                write!(f, "array portals exhaust the 16-bit continuation ID space")
+                write!(f, "ABI helpers exhaust the 16-bit continuation ID space")
             }
         }
     }
@@ -515,6 +540,7 @@ enum DispatchEntry<'a> {
     PortalAccessor(PortalAccessor),
     PortalResume(PortalSite),
     GlobalPortalRouter(GlobalPortalRouter),
+    StaticResume(StaticResume),
 }
 
 impl DispatchEntry<'_> {
@@ -524,6 +550,7 @@ impl DispatchEntry<'_> {
             Self::PortalAccessor(accessor) => accessor.id,
             Self::PortalResume(site) => site.resume,
             Self::GlobalPortalRouter(router) => router.id,
+            Self::StaticResume(resume) => resume.id,
         }
     }
 }
@@ -550,6 +577,15 @@ impl DispatchEncoding {
         portal: &PortalPlan,
         regions: Option<&RegionPlan>,
     ) -> Self {
+        Self::with_fixed_frames(program, portal, regions, None)
+    }
+
+    fn with_fixed_frames(
+        program: &ContinuationProgram,
+        portal: &PortalPlan,
+        regions: Option<&RegionPlan>,
+        fixed: Option<&StaticFramePlan>,
+    ) -> Self {
         let mut entries = program
             .continuations()
             .iter()
@@ -558,6 +594,12 @@ impl DispatchEncoding {
             .chain(portal.accessors.iter().map(|a| (a.id, true)))
             .chain(portal.ordered_sites.iter().map(|s| (s.resume, true)))
             .chain(portal.routers.iter().map(|r| (r.id, true)))
+            .chain(
+                fixed
+                    .into_iter()
+                    .flat_map(|p| p.extra_resumes.iter())
+                    .map(|r| (r.id, false)),
+            )
             .collect::<Vec<_>>();
         let count = entries.len();
         let maximum = entries.iter().map(|(id, _)| id.get()).max().unwrap_or(1);
@@ -849,6 +891,10 @@ struct AbiEmitter<'a> {
     static_layout: &'a StaticLayout,
     portal: &'a PortalPlan,
     regions: Option<&'a RegionPlan>,
+    fixed: Option<&'a StaticFramePlan>,
+    /// Known absolute origin of function-relative operations in this entry.
+    /// Dispatcher and dynamic recursive entries retain the common relative ABI.
+    fixed_context: Option<usize>,
     dispatch_encoding: DispatchEncoding,
     config: AbiConfig,
     output: Vec<AnnotatedBfInstruction>,
@@ -900,6 +946,8 @@ impl<'a> AbiEmitter<'a> {
             static_layout,
             portal,
             regions: None,
+            fixed: None,
+            fixed_context: None,
             dispatch_encoding,
             config,
             output: Vec::new(),
@@ -1030,6 +1078,9 @@ impl<'a> AbiEmitter<'a> {
     }
 
     fn initialize_main(&mut self, check_capacity: bool) -> Result<(), AbiCodegenError> {
+        if self.fixed.is_some() {
+            return self.initialize_fixed_main(check_capacity);
+        }
         let function = self.function(self.program.main())?;
         let function_id = function.id();
         let entry = function.entry();
@@ -1093,6 +1144,15 @@ impl<'a> AbiEmitter<'a> {
                     .entry((encoded >> 8) as u8)
                     .or_default()
                     .push(DispatchEntry::GlobalPortalRouter(router));
+            }
+            if let Some(fixed) = emitter.fixed {
+                for &resume in &fixed.extra_resumes {
+                    let encoded = emitter.dispatch_encoding.encode(resume.id);
+                    pages
+                        .entry((encoded >> 8) as u8)
+                        .or_default()
+                        .push(DispatchEntry::StaticResume(resume));
+                }
             }
             let pages = pages
                 .into_iter()
@@ -1436,25 +1496,64 @@ impl<'a> AbiEmitter<'a> {
         &mut self,
         entry: DispatchEntry<'a>,
     ) -> Result<(), AbiCodegenError> {
+        let previous = self.fixed_context;
+        let result = self.emit_dispatch_entry_body_inner(entry);
+        self.fixed_context = previous;
+        result
+    }
+
+    fn emit_dispatch_entry_body_inner(
+        &mut self,
+        entry: DispatchEntry<'a>,
+    ) -> Result<(), AbiCodegenError> {
         match entry {
             DispatchEntry::Continuation(continuation) => {
-                if let Some(region) = self
-                    .regions
-                    .and_then(|plan| plan.regions.get(&continuation.id()))
+                if let Some(resume) = self
+                    .fixed
+                    .and_then(|p| p.resumes.get(&continuation.id()))
+                    .copied()
                 {
-                    self.emit_region(region, continuation.function())
-                } else {
-                    self.emit_continuation_body(continuation)
+                    return self.emit_static_resume(resume);
                 }
+                self.fixed_context = self
+                    .fixed
+                    .and_then(|p| p.contexts.get(&continuation.function()))
+                    .copied();
+                self.emit_function_entry(continuation)
             }
+            DispatchEntry::StaticResume(resume) => self.emit_static_resume(resume),
             DispatchEntry::PortalAccessor(accessor) => {
+                self.fixed_context = None;
                 self.emit_aggregate_accessor(accessor)?;
                 self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
                 self.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
                 Ok(())
             }
-            DispatchEntry::PortalResume(site) => self.emit_portal_resume(site),
-            DispatchEntry::GlobalPortalRouter(router) => self.emit_global_portal_router(router),
+            DispatchEntry::PortalResume(site) => {
+                self.fixed_context = self
+                    .fixed
+                    .and_then(|p| p.contexts.get(&site.function))
+                    .copied();
+                self.emit_portal_resume(site)
+            }
+            DispatchEntry::GlobalPortalRouter(router) => {
+                self.fixed_context = None;
+                self.emit_global_portal_router(router)
+            }
+        }
+    }
+
+    fn emit_function_entry(
+        &mut self,
+        continuation: &'a Continuation,
+    ) -> Result<(), AbiCodegenError> {
+        if let Some(region) = self
+            .regions
+            .and_then(|plan| plan.regions.get(&continuation.id()))
+        {
+            self.emit_region(region, continuation.function())
+        } else {
+            self.emit_continuation_body(continuation)
         }
     }
 
@@ -1611,11 +1710,12 @@ impl<'a> AbiEmitter<'a> {
         for (instruction_offset, instruction) in instructions.iter().enumerate() {
             let index = first + instruction_offset;
             let mut offset = aggregate_element_physical_offset(index, self.config)? as isize;
-            // Global navigation rebases emitter bookkeeping at the aggregate
-            // head. A frame-relative move retains the caller-context origin,
-            // so keep the base displacement in that case.
+            // Dynamic-to-global navigation rebases at the aggregate head.
+            // Relative and fixed-to-global moves retain the function origin.
             if let Location::Relative(base) = base {
                 offset += base;
+            } else if let (Location::Global(base), Some(context)) = (base, self.fixed_context) {
+                offset += base as isize - context as isize;
             }
             let source = sources
                 .and_then(|sources| sources.get(instruction_start + instruction_offset))
@@ -1771,6 +1871,7 @@ impl<'a> AbiEmitter<'a> {
                 let dst = self.address_location(*dst, function)?;
                 let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
                 if self.nibble_transfer
+                    && self.fixed_context.is_none()
                     && matches!(source_address, Address::Global(_))
                     && let (Location::Global(source), Location::Relative(destination)) = (src, dst)
                 {
@@ -2068,6 +2169,9 @@ impl<'a> AbiEmitter<'a> {
         return_to: ContinuationId,
     ) -> Result<(), AbiCodegenError> {
         self.with_profile_site("abi", "abi.call", "ABI call", |emitter| {
+            if emitter.fixed.is_some() {
+                return emitter.emit_fixed_call(caller, callee, arguments, return_to);
+            }
             emitter.emit_call_inner(caller, callee, arguments, return_to)
         })
     }
@@ -2202,6 +2306,9 @@ impl<'a> AbiEmitter<'a> {
         value: Option<ValueOperand>,
     ) -> Result<(), AbiCodegenError> {
         self.with_profile_site("abi", "abi.return", "ABI return", |emitter| {
+            if emitter.fixed.is_some() {
+                return emitter.emit_fixed_return(callee, value);
+            }
             emitter.emit_return_inner(callee, value)
         })
     }
@@ -2504,7 +2611,19 @@ impl<'a> AbiEmitter<'a> {
                 Ok(())
             },
         )?;
-        self.set_next_pc(router)
+        if self.fixed_context.is_some() {
+            // The route is already at a known absolute position. Perform its
+            // transfer directly instead of redispatching through a dynamic router.
+            self.emit_global_portal_router_inner(GlobalPortalRouter {
+                id: router,
+                global: match site.region {
+                    AggregateRegion::Global(global) => global,
+                    _ => unreachable!("global route"),
+                },
+            })
+        } else {
+            self.set_next_pc(router)
+        }
     }
 
     fn emit_global_portal_router(
@@ -2573,6 +2692,7 @@ impl<'a> AbiEmitter<'a> {
                     // repay that source-size cost; high bytes and payload values use
                     // the compact unary move.
                     let use_nibbles = emitter.nibble_transfer
+                        && emitter.fixed_context.is_none()
                         && matches!(
                             route,
                             ROUTE_OFFSET_LOW | ROUTE_ACCESSOR_LOW | ROUTE_RESUME_LOW
@@ -3719,6 +3839,10 @@ impl<'a> AbiEmitter<'a> {
         match location {
             Location::Relative(offset) => self.move_to(offset),
             Location::Global(position) => {
+                if let Some(base) = self.fixed_context {
+                    self.move_to(position as isize - base as isize);
+                    return;
+                }
                 debug_assert_eq!(self.position, 0);
                 self.emit_context_to_global(position, self.config.portal_chunks());
             }
@@ -3729,6 +3853,10 @@ impl<'a> AbiEmitter<'a> {
         match location {
             Location::Relative(_) => self.move_to(0),
             Location::Global(position) => {
+                if self.fixed_context.is_some() {
+                    self.move_to(0);
+                    return;
+                }
                 debug_assert_eq!(self.position, 0);
                 self.emit_global_to_context(position, self.config.portal_chunks());
             }
@@ -3738,6 +3866,10 @@ impl<'a> AbiEmitter<'a> {
     /// Move from a function context base to one absolute static cell and
     /// rebase the compile-time origin at that cell. Stack flags are preserved.
     fn emit_context_to_global(&mut self, position: usize, context_chunks: usize) {
+        if let Some(base) = self.fixed_context {
+            self.migrate_context(position as isize - base as isize);
+            return;
+        }
         self.with_profile_site_infallible(
             "abi",
             "abi.navigation.global",
@@ -3762,6 +3894,10 @@ impl<'a> AbiEmitter<'a> {
     /// Move from one absolute static cell through the anchor to the current
     /// frame context and rebase the compile-time origin there.
     fn emit_global_to_context(&mut self, position: usize, context_chunks: usize) {
+        if let Some(base) = self.fixed_context {
+            self.migrate_context(base as isize - position as isize);
+            return;
+        }
         self.with_profile_site_infallible(
             "abi",
             "abi.navigation.global",

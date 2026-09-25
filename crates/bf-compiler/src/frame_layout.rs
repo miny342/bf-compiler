@@ -91,6 +91,9 @@ pub enum AbiField {
     Condition = 6,
     Restore = 7,
     Branch = 8,
+    /// Portal index in portal contexts. Function-local templates leave this
+    /// field untouched; experimental static frames use it as a persistent
+    /// return-route bit in recursive function contexts.
     Index = 9,
     ReturnPcLow = 10,
     ReturnPcHigh = 11,

@@ -162,6 +162,19 @@ impl StaticLayout {
         self.anchor_head
     }
 
+    /// Reserve compiler-owned static storage before the dynamic stack anchor.
+    /// User global addresses stay unchanged.
+    pub(crate) fn reserve_internal_cells(
+        &mut self,
+        cells: usize,
+    ) -> Result<usize, StaticLayoutError> {
+        let start = self.anchor_head;
+        self.anchor_head = start
+            .checked_add(cells)
+            .ok_or(StaticLayoutError::SizeOverflow)?;
+        Ok(start)
+    }
+
     /// Minimum tape length containing the static regions and the complete
     /// anchor chunk, including its ABI scratch cells.
     pub fn minimum_tape_cells(&self) -> Result<usize, StaticLayoutError> {
