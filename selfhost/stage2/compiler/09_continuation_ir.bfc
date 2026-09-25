@@ -828,6 +828,20 @@ void lower_ast_statement(NodeId statement) {
         lower_ast_expression(node_a(statement), condition);
         append_ir_instruction(IR_BOOLEANIZE, condition, 0);
         NodeId then_continuation = new_continuation();
+        if (node_is_null(node_c(statement))) {
+            NodeId join = new_continuation();
+            finish_branch(condition, then_continuation, join);
+            release_lowering_temp(condition);
+
+            select_new_continuation(then_continuation);
+            lower_ast_statement(node_b(statement));
+            if (!node_is_null(lowering_current_continuation)) {
+                finish_goto(join);
+            }
+            select_new_continuation(join);
+            return;
+        }
+
         NodeId else_continuation = new_continuation();
         finish_branch(condition, then_continuation, else_continuation);
         release_lowering_temp(condition);
