@@ -347,11 +347,24 @@ parse/RSS/executeを分ける。実dispatcher訪問はcounters付きfixtureで�
 二段配送、再帰境界のscan、圧縮前BFとtape使用量を個別に測る。
 
 full39の初回結果は出力一致、execute +10.36%、native命令 +2.65%。aggregate copyとportalの
-時間は減ったが、深い再帰から固定calleeへ渡すCallの費用が上回った。既定有効化は行わない。
-後続では、再帰境界の引数・結果転送の集約、または再帰から頻繁に呼ぶcalleeだけ動的配置を
+時間は減ったが、深い再帰から固定calleeへ渡すCallの費用が上回った。実験はここで保留し、
+既定無効のexperimentalオプションとして残す。以下は将来の候補であり、現在の実装予定にはしない。
+再開する場合は、再帰境界の引数・結果転送の集約、または再帰から頻繁に呼ぶcalleeだけ動的配置を
 維持する判断を先に検討する。静的な関数数だけでなく実行頻度・再帰の深さ・転送cell数を測り、
 動的配置を残す場合はglobal navigationが戻る費用も比較する。領域共有とframe guard緩和は
 この境界費用と分けて評価する。詳細な数値と再現手順はNOTESの同日sectionを参照。
+
+別の候補として、tapeを`globals | fixed locals | spill storage`に分け、再帰関数にも固定の
+作業領域を与える方式がある。呼び出し先から直接・間接に同じ作業領域へ再入する可能性があるとき、
+そのCallをまたいで生存する値だけをpage方式の退避領域へ保存し、Return後に復元する。
+localだけでなくreturn PC等のactivation情報も対象になる。aggregateの生存範囲、結果配送と復元の
+順序、sourceのzero初期化を保存する必要がある。非再入のCallまで一律に退避する必要はない。
+
+これはcompiler内部のLIFO退避領域として実装でき、言語仕様への汎用address/pointer追加は必須ではない。
+frame位置を探すstack Scanをなくす余地はあるが、費用はpage選択・address管理・退避復元へ移る。
+既存portalの単純流用で全Scanが消えるとも、高速化するとも仮定しない。再検討するなら、再帰の深さと
+Callごとの退避cell数を変え、page選択回数・dispatcher訪問・native命令数を含めて比較する。
+固定配置の効果を測る初回prototypeからは大きく範囲が広がるため、現時点ではメモに留める。
 
 ## Milestone 4: Branch、comparison、scalar template
 
