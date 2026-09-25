@@ -29,6 +29,9 @@ cell physical_frame_slot(cell slot) {
 }
 
 cell emit_add_constant(cell position, cell destination, cell value) {
+    if (value == 0) {
+        return position;
+    }
     position = emit_move_to(position, destination);
     if (value <= 128) {
         emit_repeat_character('+', value);
