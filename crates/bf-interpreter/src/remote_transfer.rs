@@ -8,7 +8,7 @@ use super::*;
 
 const MAX_BODY: usize = 32;
 
-pub(super) fn recognize(body: &[FastInstruction]) -> bool {
+pub(super) fn recognize(body: &[FastInstruction], optimizations: &[LoopOptimization]) -> bool {
     if body.len() > MAX_BODY
         || !matches!(
             body.first(),
@@ -25,9 +25,15 @@ pub(super) fn recognize(body: &[FastInstruction]) -> bool {
         match instruction {
             FastInstruction::Add { .. } | FastInstruction::Move { .. } => {}
             FastInstruction::Loop {
-                optimization: Some(LoopOptimization::Scan { amount, .. }),
+                optimization: Some(optimization),
                 ..
-            } if *amount != 0 => scans += 1,
+            } if matches!(
+                optimizations.get(*optimization as usize),
+                Some(LoopOptimization::Scan { amount, .. }) if *amount != 0
+            ) =>
+            {
+                scans += 1
+            }
             _ => return false,
         }
     }
@@ -65,6 +71,7 @@ impl Machine<'_> {
         &mut self,
         site: ResolvedProfileSite,
         body: &[FastInstruction],
+        optimizations: &[LoopOptimization],
     ) -> Result<Option<Probe>, Error> {
         let mut probe = Probe {
             updates: [(0, 0); MAX_BODY],
@@ -124,13 +131,20 @@ impl Machine<'_> {
                     probe.distance = distance;
                 }
                 FastInstruction::Loop {
-                    optimization:
-                        Some(LoopOptimization::Scan {
-                            amount,
-                            source_offsets,
-                        }),
+                    optimization: Some(optimization),
                     ..
-                } => {
+                } if matches!(
+                    optimizations.get(*optimization as usize),
+                    Some(LoopOptimization::Scan { .. })
+                ) =>
+                {
+                    let Some(LoopOptimization::Scan {
+                        amount,
+                        source_offsets,
+                    }) = optimizations.get(*optimization as usize)
+                    else {
+                        unreachable!()
+                    };
                     let start = pointer;
                     let mut steps = 0u64;
                     // Probe allocated cells only. Growth/boundary errors use
@@ -203,6 +217,7 @@ impl Machine<'_> {
         &mut self,
         site: ResolvedProfileSite,
         body: &[FastInstruction],
+        optimizations: &[LoopOptimization],
     ) -> Result<bool, Error> {
         let initial = self.tape[self.pointer];
         if initial == 0 {
@@ -220,7 +235,7 @@ impl Machine<'_> {
             }
             return Ok(true);
         }
-        let Some(probe) = self.probe_remote_transfer(site, body)? else {
+        let Some(probe) = self.probe_remote_transfer(site, body, optimizations)? else {
             return Ok(self.remote_transfer_fallback::<PROFILE>(site));
         };
         let delta = probe.updates[..probe.updates_len]
@@ -309,8 +324,8 @@ mod tests {
         b.pointer = origin;
         a.max_pointer = origin;
         b.max_pointer = origin;
-        let actual = a.execute_block(&optimized);
-        let expected = b.execute_block(&baseline);
+        let actual = a.execute_block(&optimized, optimized.root);
+        let expected = b.execute_block(&baseline, baseline.root);
         assert_eq!(actual, expected);
         assert_eq!(a.tape, b.tape);
         assert_eq!(a.pointer, b.pointer);
@@ -372,7 +387,7 @@ mod tests {
         let mut m = machine();
         m.grow_tape = true;
         m.tape[0] = 1;
-        m.execute_block(&optimized).unwrap();
+        m.execute_block(&optimized, optimized.root).unwrap();
         assert_eq!(m.tape[30000], 1);
         assert_eq!(m.pointer, 0);
         assert_eq!(m.optimization.remote_transfer_fallbacks, 1);
@@ -391,9 +406,13 @@ mod tests {
         m.tape[2] = 1;
         let before = m.tape.clone();
         assert!(
-            m.probe_remote_transfer(ResolvedProfileSite::ROOT, body)
-                .unwrap()
-                .is_none()
+            m.probe_remote_transfer(
+                ResolvedProfileSite::ROOT,
+                body.slice(&parsed.instructions),
+                &parsed.optimizations,
+            )
+            .unwrap()
+            .is_none()
         );
         assert_eq!(m.tape, before);
         assert_eq!(m.pointer, 1);
@@ -418,7 +437,11 @@ mod tests {
             callback: Arc::new(|_| {}),
         });
         assert!(matches!(
-            m.probe_remote_transfer(ResolvedProfileSite::ROOT, body),
+            m.probe_remote_transfer(
+                ResolvedProfileSite::ROOT,
+                body.slice(&parsed.instructions),
+                &parsed.optimizations,
+            ),
             Err(Error::Interrupted)
         ));
         assert_eq!(m.pointer, 1);

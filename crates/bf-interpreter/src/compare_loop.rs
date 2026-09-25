@@ -19,7 +19,7 @@ fn added(instruction: &FastInstruction, expected: u8) -> bool {
         if *amount == expected)
 }
 
-pub(super) fn recognize(body: &[FastInstruction]) -> bool {
+pub(super) fn recognize(body: &[FastInstruction], arena: &[FastInstruction]) -> bool {
     let [
         a,
         b,
@@ -32,13 +32,13 @@ pub(super) fn recognize(body: &[FastInstruction]) -> bool {
     else {
         return false;
     };
-    let [n0, n1, n2, n3, n4] = nonzero.as_slice() else {
+    let [n0, n1, n2, n3, n4] = nonzero.slice(arena) else {
         return false;
     };
-    let [z0, z1, FastInstruction::Loop { body: clear, .. }, z2] = zero.as_slice() else {
+    let [z0, z1, FastInstruction::Loop { body: clear, .. }, z2] = zero.slice(arena) else {
         return false;
     };
-    let [clear] = clear.as_slice() else {
+    let [clear] = clear.slice(arena) else {
         return false;
     };
     moved(a, 2)
@@ -57,11 +57,11 @@ pub(super) fn recognize(body: &[FastInstruction]) -> bool {
         && moved(z2, 3)
 }
 
-pub(super) fn recognize_slide(body: &[FastInstruction]) -> bool {
+pub(super) fn recognize_slide(body: &[FastInstruction], arena: &[FastInstruction]) -> bool {
     let [a, FastInstruction::Loop { body: inner, .. }, b, c] = body else {
         return false;
     };
-    let [d, e] = inner.as_slice() else {
+    let [d, e] = inner.slice(arena) else {
         return false;
     };
     moved(a, 3) && moved(b, -2) && added(c, 255) && added(d, 255) && moved(e, -1)
@@ -178,11 +178,8 @@ mod tests {
     fn slide_covers_every_pair_exit_pointer_remainder_and_raw_counts() {
         let parsed = parse_optimized(SLIDE, None).unwrap();
         assert!(matches!(
-            parsed[0],
-            FastInstruction::Loop {
-                optimization: Some(LoopOptimization::CompareSlide),
-                ..
-            }
+            parsed.instruction_optimization(&parsed[0]),
+            Some(LoopOptimization::CompareSlide)
         ));
         let mut source = b",>+>>,<<<".to_vec();
         source.extend_from_slice(SLIDE);
@@ -193,7 +190,7 @@ mod tests {
             for right in 0_u8..=255 {
                 let mut machine = Machine::new(b"", false, None, None, None, None);
                 machine.tape[..4].copy_from_slice(&[left, 1, 0, right]);
-                machine.execute_block(&parsed).unwrap();
+                machine.execute_block(&parsed, parsed.root).unwrap();
                 assert_eq!(
                     &machine.tape[..4],
                     &[
@@ -284,11 +281,8 @@ mod tests {
         source.extend_from_slice(b".>.>.>.");
         let parsed = parse_optimized(&source, None).unwrap();
         assert!(matches!(
-            parsed[4],
-            FastInstruction::Loop {
-                optimization: Some(LoopOptimization::Compare),
-                ..
-            }
+            parsed.instruction_optimization(&parsed[4]),
+            Some(LoopOptimization::Compare)
         ));
         let reference = parse(&source).unwrap();
         for left in 0..=255 {
@@ -480,11 +474,8 @@ mod tests {
             let folded = parse_optimized(source, Some(&map)).unwrap();
             let unfolded = parse_optimized_with_flags(source, Some(&map), true, false).unwrap();
             assert!(matches!(
-                folded[0],
-                FastInstruction::Loop {
-                    optimization: Some(LoopOptimization::Compare | LoopOptimization::CompareSlide),
-                    ..
-                }
+                folded.instruction_optimization(&folded[0]),
+                Some(LoopOptimization::Compare | LoopOptimization::CompareSlide)
             ));
             assert!(matches!(
                 unfolded[0],
@@ -507,8 +498,8 @@ mod tests {
                 };
                 fast.tape[..4].copy_from_slice(&cells);
                 slow.tape[..4].copy_from_slice(&cells);
-                fast.execute_block(&folded).unwrap();
-                slow.execute_block(&unfolded).unwrap();
+                fast.execute_block(&folded, folded.root).unwrap();
+                slow.execute_block(&unfolded, unfolded.root).unwrap();
                 assert_eq!(fast.tape, slow.tape);
                 let mut fast_counts = fast.profile.unwrap().sites[1].counters;
                 let mut slow_counts = slow.profile.unwrap().sites[1].counters;
@@ -560,7 +551,7 @@ mod tests {
         ] {
             let parsed = parse_optimized(source, None).unwrap();
             assert!(matches!(
-                parsed[0],
+                &parsed[0],
                 FastInstruction::Loop {
                     optimization: None,
                     ..
@@ -570,11 +561,8 @@ mod tests {
         for source in [b"@BFCRLE1;[>3[-<]<2-]".as_slice(), b"@BFCRLE2;[>3[-<]<2-]"] {
             let parsed = parse_optimized(source, None).unwrap();
             assert!(matches!(
-                parsed[0],
-                FastInstruction::Loop {
-                    optimization: Some(LoopOptimization::CompareSlide),
-                    ..
-                }
+                parsed.instruction_optimization(&parsed[0]),
+                Some(LoopOptimization::CompareSlide)
             ));
         }
         for source in [
@@ -583,11 +571,8 @@ mod tests {
         ] {
             let parsed = parse_optimized(source, None).unwrap();
             assert!(matches!(
-                parsed[0],
-                FastInstruction::Loop {
-                    optimization: Some(LoopOptimization::Compare),
-                    ..
-                }
+                parsed.instruction_optimization(&parsed[0]),
+                Some(LoopOptimization::Compare)
             ));
         }
     }

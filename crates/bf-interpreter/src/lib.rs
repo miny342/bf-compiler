@@ -278,14 +278,35 @@ struct Instruction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ResolvedProfileSite {
     id: ProfileSiteId,
-    slot: usize,
+    slot: u32,
 }
+
+const MIXED_PROFILE_SLOT_BIT: u32 = 1 << 31;
+const PROFILE_SLOT_MASK: u32 = !MIXED_PROFILE_SLOT_BIT;
 
 impl ResolvedProfileSite {
     const ROOT: Self = Self {
         id: ProfileSiteId(0),
         slot: 0,
     };
+
+    const fn mixed(self) -> bool {
+        self.slot & MIXED_PROFILE_SLOT_BIT != 0
+    }
+
+    const fn clean(self) -> Self {
+        Self {
+            id: self.id,
+            slot: self.slot & PROFILE_SLOT_MASK,
+        }
+    }
+
+    const fn with_mixed(self, mixed: bool) -> Self {
+        Self {
+            id: self.id,
+            slot: self.clean().slot | if mixed { MIXED_PROFILE_SLOT_BIT } else { 0 },
+        }
+    }
 }
 
 /// Runs a Brainfuck program with byte-oriented input and output.
@@ -445,38 +466,88 @@ fn parse(source: &[u8]) -> Result<Vec<Instruction>, Error> {
     Ok(instructions)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BodyRange {
+    start: u32,
+    len: u32,
+}
+
+impl BodyRange {
+    fn new(start: usize, len: usize) -> Self {
+        Self {
+            start: start
+                .try_into()
+                .expect("fast IR instruction count fits in u32"),
+            len: len.try_into().expect("fast IR block length fits in u32"),
+        }
+    }
+
+    fn slice<'a>(self, instructions: &'a [FastInstruction]) -> &'a [FastInstruction] {
+        let start = self.start as usize;
+        &instructions[start..start + self.len as usize]
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FastProgram {
+    instructions: Vec<FastInstruction>,
+    root: BodyRange,
+    optimizations: Vec<LoopOptimization>,
+}
+
+impl FastProgram {
+    fn as_slice(&self) -> &[FastInstruction] {
+        self.root.slice(&self.instructions)
+    }
+
+    fn optimization(&self, index: Option<u32>) -> Option<&LoopOptimization> {
+        index.and_then(|index| self.optimizations.get(index as usize))
+    }
+
+    #[cfg(test)]
+    fn instruction_optimization(&self, instruction: &FastInstruction) -> Option<&LoopOptimization> {
+        let FastInstruction::Loop { optimization, .. } = instruction else {
+            return None;
+        };
+        self.optimization(*optimization)
+    }
+}
+
+impl std::ops::Deref for FastProgram {
+    type Target = [FastInstruction];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum FastInstruction {
+    Unused,
     Countdown {
         site: ResolvedProfileSite,
-        mixed: bool,
         chain: Box<CountdownChain>,
     },
     Move {
         site: ResolvedProfileSite,
-        mixed: bool,
         amount: isize,
         source_offsets: SourceOffsets,
     },
     Add {
         site: ResolvedProfileSite,
-        mixed: bool,
         amount: u8,
         raw_count: u64,
     },
     Input {
         site: ResolvedProfileSite,
-        mixed: bool,
     },
     Output {
         site: ResolvedProfileSite,
-        mixed: bool,
     },
     Loop {
         site: ResolvedProfileSite,
-        mixed: bool,
-        body: Vec<FastInstruction>,
-        optimization: Option<LoopOptimization>,
+        body: BodyRange,
+        optimization: Option<u32>,
     },
 }
 
@@ -488,18 +559,20 @@ impl FastInstruction {
             | Self::Add { site, .. }
             | Self::Input { site, .. }
             | Self::Output { site, .. }
-            | Self::Loop { site, .. } => *site,
+            | Self::Loop { site, .. } => site.clean(),
+            Self::Unused => ResolvedProfileSite::ROOT,
         }
     }
 
     const fn mixed_provenance(&self) -> bool {
         match self {
-            Self::Countdown { mixed, .. }
-            | Self::Move { mixed, .. }
-            | Self::Add { mixed, .. }
-            | Self::Input { mixed, .. }
-            | Self::Output { mixed, .. }
-            | Self::Loop { mixed, .. } => *mixed,
+            Self::Countdown { site, .. }
+            | Self::Move { site, .. }
+            | Self::Add { site, .. }
+            | Self::Input { site, .. }
+            | Self::Output { site, .. }
+            | Self::Loop { site, .. } => site.mixed(),
+            Self::Unused => false,
         }
     }
 }
@@ -509,36 +582,35 @@ impl FastInstruction {
 #[derive(Debug, Clone)]
 struct CountdownChain {
     levels: Vec<CountdownLevel>,
-    leaf: Box<FastInstruction>,
+    leaf: u32,
 }
 
 #[derive(Debug, Clone)]
 struct CountdownLevel {
-    tail: Vec<FastInstruction>,
+    tail: BodyRange,
     /// Sum of raw decrement counts from the innermost level through this level.
     decrement_prefix: u64,
 }
 
-fn fold_countdown(instruction: FastInstruction) -> FastInstruction {
+fn fold_countdown(instruction: FastInstruction, arena: &mut [FastInstruction]) -> FastInstruction {
     let FastInstruction::Loop {
         site,
-        mixed,
         body,
         optimization: None,
     } = &instruction
     else {
         return instruction;
     };
+    let body_instructions = body.slice(arena);
     let [
         FastInstruction::Add {
             site: add_site,
             amount: 255,
             raw_count,
-            mixed: false,
         },
         child,
         ..,
-    ] = body.as_slice()
+    ] = body_instructions
     else {
         return instruction;
     };
@@ -551,24 +623,29 @@ fn fold_countdown(instruction: FastInstruction) -> FastInstruction {
         return instruction;
     }
     let site = *site;
-    let mixed = *mixed;
     let raw_count = *raw_count;
-    let FastInstruction::Loop { body, .. } = instruction else {
-        unreachable!()
-    };
-    let mut body = body.into_iter();
-    body.next();
-    let child = body.next().unwrap();
-    let mut chain = match child {
+    let child_index = body.start as usize + 1;
+    let can_extend = matches!(
+        &arena[child_index],
         FastInstruction::Countdown {
             site: child_site,
-            mixed: false,
-            chain,
-        } if child_site.id == site.id => chain,
-        child => Box::new(CountdownChain {
+            ..
+        } if !child_site.mixed() && child_site.id == site.id
+    );
+    let mut chain = if can_extend {
+        let FastInstruction::Countdown { chain, .. } =
+            std::mem::replace(&mut arena[child_index], FastInstruction::Unused)
+        else {
+            unreachable!()
+        };
+        chain
+    } else {
+        Box::new(CountdownChain {
             levels: Vec::new(),
-            leaf: Box::new(child),
-        }),
+            leaf: child_index
+                .try_into()
+                .expect("fast IR instruction count fits in u32"),
+        })
     };
     let decrement_prefix = chain
         .levels
@@ -576,10 +653,10 @@ fn fold_countdown(instruction: FastInstruction) -> FastInstruction {
         .map_or(0, |level| level.decrement_prefix)
         + raw_count;
     chain.levels.push(CountdownLevel {
-        tail: body.collect(),
+        tail: BodyRange::new(body.start as usize + 2, body.len as usize - 2),
         decrement_prefix,
     });
-    FastInstruction::Countdown { site, mixed, chain }
+    FastInstruction::Countdown { site, chain }
 }
 
 #[derive(Debug, Clone)]
@@ -611,59 +688,198 @@ enum LoopOptimization {
 struct SourceOffsetRange {
     start: usize,
     len: usize,
-    repeated: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+impl SourceOffsetRange {
+    const REPEATED_BIT: usize = 1usize << (usize::BITS - 1);
+
+    fn new(start: usize, len: usize, repeated: bool) -> Self {
+        assert!(len < Self::REPEATED_BIT);
+        Self {
+            start,
+            len: len | if repeated { Self::REPEATED_BIT } else { 0 },
+        }
+    }
+
+    const fn count(self) -> usize {
+        self.len & !Self::REPEATED_BIT
+    }
+
+    const fn repeated(self) -> bool {
+        self.len & Self::REPEATED_BIT != 0
+    }
+}
+
+#[derive(Debug, Clone)]
 struct SourceOffsets {
-    ranges: Vec<SourceOffsetRange>,
-    len: usize,
+    ranges: SourceOffsetRanges,
+}
+
+#[derive(Debug, Clone)]
+enum SourceOffsetRanges {
+    Empty,
+    Single(SourceOffsetRange),
+    Many(Box<[SourceOffsetRange]>),
+}
+
+impl Default for SourceOffsets {
+    fn default() -> Self {
+        Self {
+            ranges: SourceOffsetRanges::Empty,
+        }
+    }
 }
 
 impl SourceOffsets {
     fn push(&mut self, offset: usize) {
-        if let Some(last) = self.ranges.last_mut()
-            && !last.repeated
-            && last.start.checked_add(last.len) == Some(offset)
-        {
-            last.len += 1;
-        } else {
-            self.ranges.push(SourceOffsetRange {
-                start: offset,
-                len: 1,
-                repeated: false,
-            });
+        let range = SourceOffsetRange::new(offset, 1, false);
+        match &mut self.ranges {
+            SourceOffsetRanges::Empty => self.ranges = SourceOffsetRanges::Single(range),
+            SourceOffsetRanges::Single(last)
+                if !last.repeated() && last.start.checked_add(last.count()) == Some(offset) =>
+            {
+                last.len += 1;
+            }
+            SourceOffsetRanges::Single(last) => {
+                let previous = *last;
+                self.ranges = SourceOffsetRanges::Many(vec![previous, range].into_boxed_slice());
+            }
+            SourceOffsetRanges::Many(ranges) => {
+                if let Some(last) = ranges.last_mut()
+                    && !last.repeated()
+                    && last.start.checked_add(last.count()) == Some(offset)
+                {
+                    last.len += 1;
+                } else {
+                    let previous = std::mem::replace(&mut self.ranges, SourceOffsetRanges::Empty);
+                    let SourceOffsetRanges::Many(ranges) = previous else {
+                        unreachable!()
+                    };
+                    let mut ranges = ranges.into_vec();
+                    ranges.push(range);
+                    self.ranges = SourceOffsetRanges::Many(ranges.into_boxed_slice());
+                }
+            }
         }
-        self.len += 1;
     }
 
     fn push_repeated(&mut self, offset: usize, count: usize) {
-        self.ranges.push(SourceOffsetRange {
-            start: offset,
-            len: count,
-            repeated: true,
-        });
-        self.len += count;
+        let range = SourceOffsetRange::new(offset, count, true);
+        match &mut self.ranges {
+            SourceOffsetRanges::Empty => self.ranges = SourceOffsetRanges::Single(range),
+            SourceOffsetRanges::Single(previous) => {
+                let previous = *previous;
+                self.ranges = SourceOffsetRanges::Many(vec![previous, range].into_boxed_slice());
+            }
+            SourceOffsetRanges::Many(_) => {
+                let previous = std::mem::replace(&mut self.ranges, SourceOffsetRanges::Empty);
+                let SourceOffsetRanges::Many(ranges) = previous else {
+                    unreachable!()
+                };
+                let mut ranges = ranges.into_vec();
+                ranges.push(range);
+                self.ranges = SourceOffsetRanges::Many(ranges.into_boxed_slice());
+            }
+        }
     }
 
-    const fn len(&self) -> usize {
-        self.len
+    fn len(&self) -> usize {
+        match &self.ranges {
+            SourceOffsetRanges::Empty => 0,
+            SourceOffsetRanges::Single(range) => range.count(),
+            SourceOffsetRanges::Many(ranges) => ranges.iter().map(|range| range.count()).sum(),
+        }
+    }
+
+    #[cfg(test)]
+    fn range_count(&self) -> usize {
+        match &self.ranges {
+            SourceOffsetRanges::Empty => 0,
+            SourceOffsetRanges::Single(_) => 1,
+            SourceOffsetRanges::Many(ranges) => ranges.len(),
+        }
     }
 
     fn get(&self, mut index: usize) -> usize {
-        assert!(index < self.len);
-        for range in &self.ranges {
-            if index < range.len {
-                return range.start + if range.repeated { 0 } else { index };
+        assert!(index < self.len());
+        match &self.ranges {
+            SourceOffsetRanges::Empty => unreachable!(),
+            SourceOffsetRanges::Single(range) => {
+                range.start + if range.repeated() { 0 } else { index }
             }
-            index -= range.len;
+            SourceOffsetRanges::Many(ranges) => {
+                for range in ranges {
+                    if index < range.count() {
+                        return range.start + if range.repeated() { 0 } else { index };
+                    }
+                    index -= range.count();
+                }
+                unreachable!("validated source offset index has a containing range")
+            }
         }
-        unreachable!("validated source offset index has a containing range")
+    }
+}
+
+struct InstructionBuffer {
+    first: Option<FastInstruction>,
+    rest: Vec<FastInstruction>,
+}
+
+impl Default for InstructionBuffer {
+    fn default() -> Self {
+        Self {
+            first: None,
+            rest: Vec::new(),
+        }
+    }
+}
+
+impl InstructionBuffer {
+    fn len(&self) -> usize {
+        self.first.is_some() as usize + self.rest.len()
+    }
+
+    fn as_slice(&self) -> &[FastInstruction] {
+        if self.rest.is_empty() {
+            self.first.as_ref().map_or(&[], std::slice::from_ref)
+        } else {
+            &self.rest
+        }
+    }
+
+    fn last_mut(&mut self) -> Option<&mut FastInstruction> {
+        if let Some(last) = self.rest.last_mut() {
+            Some(last)
+        } else {
+            self.first.as_mut()
+        }
+    }
+
+    fn push(&mut self, instruction: FastInstruction) {
+        if self.rest.is_empty() {
+            if self.first.is_none() {
+                self.first = Some(instruction);
+                return;
+            }
+            let first = self.first.take().unwrap();
+            self.rest.push(first);
+        }
+        self.rest.push(instruction);
+    }
+
+    fn append_to(self, arena: &mut Vec<FastInstruction>) {
+        if self.rest.is_empty() {
+            if let Some(first) = self.first {
+                arena.push(first);
+            }
+        } else {
+            arena.extend(self.rest);
+        }
     }
 }
 
 struct FastBlock {
-    instructions: Vec<FastInstruction>,
+    instructions: InstructionBuffer,
     last_rle: Option<RleOp>,
     opening_offset: Option<usize>,
     opening_site: Option<ResolvedProfileSite>,
@@ -673,7 +889,7 @@ struct FastBlock {
 impl FastBlock {
     fn root() -> Self {
         Self {
-            instructions: Vec::new(),
+            instructions: InstructionBuffer::default(),
             last_rle: None,
             opening_offset: None,
             opening_site: None,
@@ -687,7 +903,7 @@ impl FastBlock {
         opening_ordinal: u64,
     ) -> Self {
         Self {
-            instructions: Vec::new(),
+            instructions: InstructionBuffer::default(),
             last_rle: None,
             opening_offset: Some(opening_offset),
             opening_site: Some(opening_site),
@@ -712,13 +928,14 @@ impl FastBlock {
         if self.last_rle == Some(op)
             && let Some(FastInstruction::Move {
                 site: current_site,
-                mixed,
                 amount: current,
                 source_offsets,
             }) = self.instructions.last_mut()
         {
-            *mixed |= current_site.id != site.id;
-            *current_site = lowest_common_ancestor(profile_map, *current_site, site);
+            let current_site_clean = current_site.clean();
+            let mixed = current_site.mixed() || current_site_clean.id != site.id;
+            *current_site =
+                lowest_common_ancestor(profile_map, current_site_clean, site).with_mixed(mixed);
             *current += amount;
             if compressed {
                 source_offsets.push_repeated(source_offset, count);
@@ -734,7 +951,6 @@ impl FastBlock {
             }
             self.instructions.push(FastInstruction::Move {
                 site,
-                mixed: false,
                 amount,
                 source_offsets,
             });
@@ -757,19 +973,19 @@ impl FastBlock {
         if self.last_rle == Some(op)
             && let Some(FastInstruction::Add {
                 site: current_site,
-                mixed,
                 amount: current,
                 raw_count,
             }) = self.instructions.last_mut()
         {
-            *mixed |= current_site.id != site.id;
-            *current_site = lowest_common_ancestor(profile_map, *current_site, site);
+            let current_site_clean = current_site.clean();
+            let mixed = current_site.mixed() || current_site_clean.id != site.id;
+            *current_site =
+                lowest_common_ancestor(profile_map, current_site_clean, site).with_mixed(mixed);
             *current = current.wrapping_add(amount);
             *raw_count += count as u64;
         } else {
             self.instructions.push(FastInstruction::Add {
                 site,
-                mixed: false,
                 amount,
                 raw_count: count as u64,
             });
@@ -783,11 +999,22 @@ impl FastBlock {
     }
 }
 
+fn append_fast_block(
+    arena: &mut Vec<FastInstruction>,
+    block: InstructionBuffer,
+    source_len: usize,
+) -> BodyRange {
+    if block.len() > arena.capacity().saturating_sub(arena.len()) {
+        let growth = (source_len / 20).max(block.len()).max(1);
+        arena.reserve_exact(growth);
+    }
+    let range = BodyRange::new(arena.len(), block.len());
+    block.append_to(arena);
+    range
+}
+
 #[cfg(test)]
-fn parse_optimized(
-    source: &[u8],
-    profile_map: Option<&ProfileMap>,
-) -> Result<Vec<FastInstruction>, Error> {
+fn parse_optimized(source: &[u8], profile_map: Option<&ProfileMap>) -> Result<FastProgram, Error> {
     parse_optimized_with_flags(source, profile_map, true, true)
 }
 
@@ -796,8 +1023,10 @@ fn parse_optimized_with_flags(
     profile_map: Option<&ProfileMap>,
     remote_transfer: bool,
     compare: bool,
-) -> Result<Vec<FastInstruction>, Error> {
+) -> Result<FastProgram, Error> {
     let mut blocks = vec![FastBlock::root()];
+    let mut arena = Vec::with_capacity(source.len().saturating_div(3));
+    let mut optimizations = Vec::new();
     let mut ordinal = 0_u64;
     let mut range_index = 0_usize;
     let range_slots = profile_map.map(profile_range_slots);
@@ -841,8 +1070,8 @@ fn parse_optimized_with_flags(
                 ),
                 b'+' => current.push_add(RleOp::Increment, site, profile_map, count),
                 b'-' => current.push_add(RleOp::Decrement, site, profile_map, count),
-                b'.' => current.push_non_rle(FastInstruction::Output { site, mixed: false }),
-                b',' => current.push_non_rle(FastInstruction::Input { site, mixed: false }),
+                b'.' => current.push_non_rle(FastInstruction::Output { site }),
+                b',' => current.push_non_rle(FastInstruction::Input { site }),
                 b'[' => {
                     current.last_rle = None;
                     blocks.push(FastBlock::nested(source_offset, site, ordinal - 1));
@@ -859,19 +1088,25 @@ fn parse_optimized_with_flags(
                     // sites when the idiom spans more than one profile range.
                     let single_range = profile_map
                         .is_none_or(|map| map.ranges[range_index].start <= block.opening_ordinal);
-                    let optimization = if compare && single_range && compare_loop::recognize(&body)
+                    let body_instructions = body.as_slice();
+                    let optimization = if compare
+                        && single_range
+                        && compare_loop::recognize(body_instructions, &arena)
                     {
                         Some(LoopOptimization::Compare)
-                    } else if compare && single_range && compare_loop::recognize_slide(&body) {
+                    } else if compare
+                        && single_range
+                        && compare_loop::recognize_slide(body_instructions, &arena)
+                    {
                         Some(LoopOptimization::CompareSlide)
                     } else {
-                        recognize_fast_loop(&body, remote_transfer)
+                        recognize_fast_loop(body_instructions, remote_transfer, &optimizations)
                     };
                     let mut loop_site = block.opening_site.unwrap();
                     let mut mixed = false;
                     if optimization.is_some() {
                         merge_provenance(&mut loop_site, &mut mixed, site, false, profile_map);
-                        for instruction in &body {
+                        for instruction in body_instructions {
                             merge_provenance(
                                 &mut loop_site,
                                 &mut mixed,
@@ -881,13 +1116,21 @@ fn parse_optimized_with_flags(
                             );
                         }
                     }
+                    let body_range = append_fast_block(&mut arena, body, source.len());
+                    let optimization = optimization.map(|optimization| {
+                        let index = optimizations.len();
+                        optimizations.push(optimization);
+                        index
+                            .try_into()
+                            .expect("loop optimization count fits in u32")
+                    });
                     blocks.last_mut().unwrap().push_non_rle(fold_countdown(
                         FastInstruction::Loop {
-                            site: loop_site,
-                            mixed,
-                            body,
+                            site: loop_site.with_mixed(mixed),
+                            body: body_range,
                             optimization,
                         },
+                        &mut arena,
                     ));
                 }
                 _ => {}
@@ -900,10 +1143,16 @@ fn parse_optimized_with_flags(
             offset: blocks[1].opening_offset.unwrap(),
         });
     }
-    Ok(blocks.pop().unwrap().instructions)
+    let root = blocks.pop().unwrap().instructions;
+    let root_range = append_fast_block(&mut arena, root, source.len());
+    Ok(FastProgram {
+        instructions: arena,
+        root: root_range,
+        optimizations,
+    })
 }
 
-fn profile_range_slots(map: &ProfileMap) -> Vec<usize> {
+fn profile_range_slots(map: &ProfileMap) -> Vec<u32> {
     map.ranges
         .iter()
         .map(|range| {
@@ -911,13 +1160,15 @@ fn profile_range_slots(map: &ProfileMap) -> Vec<usize> {
                 .iter()
                 .position(|site| site.id == range.site)
                 .expect("validated profile range references a known site")
+                .try_into()
+                .expect("profile site count fits in u32")
         })
         .collect()
 }
 
 fn resolved_profile_site(
     profile_map: Option<&ProfileMap>,
-    range_slots: Option<&[usize]>,
+    range_slots: Option<&[u32]>,
     range_index: &mut usize,
     ordinal: u64,
 ) -> ResolvedProfileSite {
@@ -975,7 +1226,9 @@ fn lowest_common_ancestor(
                 .sites
                 .iter()
                 .position(|metadata| metadata.id == site)
-                .expect("validated parent references a known site");
+                .expect("validated parent references a known site")
+                .try_into()
+                .expect("profile site count fits in u32");
             return ResolvedProfileSite { id: site, slot };
         }
         current = parent(site);
@@ -986,6 +1239,7 @@ fn lowest_common_ancestor(
 fn recognize_fast_loop(
     body: &[FastInstruction],
     remote_transfer: bool,
+    optimizations: &[LoopOptimization],
 ) -> Option<LoopOptimization> {
     if body.is_empty() {
         return None;
@@ -1050,8 +1304,9 @@ fn recognize_fast_loop(
             FastInstruction::Countdown { .. }
             | FastInstruction::Input { .. }
             | FastInstruction::Output { .. }
-            | FastInstruction::Loop { .. } => {
-                return (remote_transfer && remote_transfer::recognize(body))
+            | FastInstruction::Loop { .. }
+            | FastInstruction::Unused => {
+                return (remote_transfer && remote_transfer::recognize(body, optimizations))
                     .then_some(LoopOptimization::RemoteTransfer);
             }
         }
@@ -1103,7 +1358,7 @@ impl ProfileCollector {
     }
 
     fn site_mut(&mut self, site: ResolvedProfileSite) -> &mut SiteProfile {
-        &mut self.sites[site.slot]
+        &mut self.sites[site.clean().slot as usize]
     }
 }
 
@@ -1254,7 +1509,7 @@ impl<'a> Machine<'a> {
     }
 
     fn publish_sample_site(&mut self, site: ResolvedProfileSite) {
-        let slot = u32::try_from(site.slot).expect("profile site count fits in u32");
+        let slot = site.clean().slot;
         if self.published_sample_site != slot {
             if let Some(sampled_site) = &self.sampled_site {
                 sampled_site.store(slot, Ordering::Release);
@@ -1343,12 +1598,12 @@ impl<'a> Machine<'a> {
         }
     }
 
-    fn execute_block(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
+    fn execute_block(&mut self, program: &FastProgram, body: BodyRange) -> Result<(), Error> {
         match self.profile.as_ref().map(|profile| profile.mode) {
-            None => self.execute_block_light::<false>(instructions),
-            Some(ProfileMode::Sample { .. }) => self.execute_block_light::<true>(instructions),
+            None => self.execute_block_light::<false>(program, body),
+            Some(ProfileMode::Sample { .. }) => self.execute_block_light::<true>(program, body),
             Some(ProfileMode::Counters | ProfileMode::Exact) => {
-                self.execute_block_profiled(instructions)
+                self.execute_block_profiled(program, body)
             }
         }
     }
@@ -1360,8 +1615,10 @@ impl<'a> Machine<'a> {
 
     fn execute_block_light<const SAMPLE: bool>(
         &mut self,
-        instructions: &[FastInstruction],
+        program: &FastProgram,
+        body: BodyRange,
     ) -> Result<(), Error> {
+        let instructions = body.slice(&program.instructions);
         for instruction in instructions {
             self.observe_progress(instruction.site())?;
             if SAMPLE {
@@ -1373,7 +1630,7 @@ impl<'a> Machine<'a> {
             self.optimization.executed_native_operations += 1;
             match instruction {
                 FastInstruction::Countdown { site, chain, .. } => {
-                    self.execute_countdown::<false, SAMPLE>(*site, chain)?;
+                    self.execute_countdown::<false, SAMPLE>(program, *site, chain)?;
                 }
                 FastInstruction::Move {
                     amount,
@@ -1404,10 +1661,12 @@ impl<'a> Machine<'a> {
                 FastInstruction::Loop {
                     body, optimization, ..
                 } => self.execute_loop_light::<SAMPLE>(
+                    program,
                     instruction.site(),
-                    body,
-                    optimization.as_ref(),
+                    *body,
+                    program.optimization(*optimization),
                 )?,
+                FastInstruction::Unused => unreachable!("folded countdown body was executed"),
             }
         }
         Ok(())
@@ -1418,6 +1677,7 @@ impl<'a> Machine<'a> {
     /// at its actual runtime location, without assuming any compiler ABI.
     fn execute_countdown<const PROFILE: bool, const SAMPLE: bool>(
         &mut self,
+        program: &FastProgram,
         site: ResolvedProfileSite,
         chain: &CountdownChain,
     ) -> Result<Duration, Error> {
@@ -1449,7 +1709,8 @@ impl<'a> Machine<'a> {
             self.tape[self.pointer] -= entered as u8;
             if skipped == 0 {
                 nested_time += self.execute_countdown_block::<PROFILE, SAMPLE>(
-                    std::slice::from_ref(chain.leaf.as_ref()),
+                    program,
+                    BodyRange::new(chain.leaf as usize, 1),
                 )?;
             }
             let mut level = skipped;
@@ -1458,8 +1719,10 @@ impl<'a> Machine<'a> {
                 if level == chain.levels.len() {
                     return Ok(nested_time);
                 }
-                nested_time +=
-                    self.execute_countdown_block::<PROFILE, SAMPLE>(&chain.levels[level].tail)?;
+                nested_time += self.execute_countdown_block::<PROFILE, SAMPLE>(
+                    program,
+                    chain.levels[level].tail,
+                )?;
                 if SAMPLE {
                     self.publish_sample_site(site);
                 }
@@ -1489,7 +1752,8 @@ impl<'a> Machine<'a> {
 
     fn execute_countdown_block<const PROFILE: bool, const SAMPLE: bool>(
         &mut self,
-        body: &[FastInstruction],
+        program: &FastProgram,
+        body: BodyRange,
     ) -> Result<Duration, Error> {
         let exact = PROFILE && self.profile.as_ref().is_some_and(|profile| profile.exact);
         let started = exact.then(|| {
@@ -1497,9 +1761,9 @@ impl<'a> Machine<'a> {
             Instant::now()
         });
         if PROFILE {
-            self.execute_block_profiled(body)?;
+            self.execute_block_profiled(program, body)?;
         } else {
-            self.execute_block_light::<SAMPLE>(body)?;
+            self.execute_block_light::<SAMPLE>(program, body)?;
         }
         Ok(if let Some(started) = started {
             self.clock_reads += 1;
@@ -1511,30 +1775,36 @@ impl<'a> Machine<'a> {
 
     fn execute_loop_light<const SAMPLE: bool>(
         &mut self,
+        program: &FastProgram,
         site: ResolvedProfileSite,
-        body: &[FastInstruction],
+        body: BodyRange,
         optimization: Option<&LoopOptimization>,
     ) -> Result<(), Error> {
+        let body_instructions = body.slice(&program.instructions);
         match optimization {
             Some(LoopOptimization::CompareSlide) => {
                 if self.execute_compare_slide::<false>(site) {
                     Ok(())
                 } else {
-                    self.execute_generic_loop_light::<SAMPLE>(body)
+                    self.execute_generic_loop_light::<SAMPLE>(program, body)
                 }
             }
             Some(LoopOptimization::Compare) => {
                 if self.execute_compare_loop::<false>(site) {
                     Ok(())
                 } else {
-                    self.execute_generic_loop_light::<SAMPLE>(body)
+                    self.execute_generic_loop_light::<SAMPLE>(program, body)
                 }
             }
             Some(LoopOptimization::RemoteTransfer) => {
-                if self.execute_remote_transfer::<false>(site, body)? {
+                if self.execute_remote_transfer::<false>(
+                    site,
+                    body_instructions,
+                    &program.optimizations,
+                )? {
                     Ok(())
                 } else {
-                    self.execute_generic_loop_light::<SAMPLE>(body)
+                    self.execute_generic_loop_light::<SAMPLE>(program, body)
                 }
             }
             Some(LoopOptimization::Clear {
@@ -1595,7 +1865,7 @@ impl<'a> Machine<'a> {
                 if iterations != 0
                     && (!self.offset_is_valid(*min_offset) || !self.offset_is_valid(*max_offset))
                 {
-                    return self.execute_generic_loop_light::<SAMPLE>(body);
+                    return self.execute_generic_loop_light::<SAMPLE>(program, body);
                 }
 
                 self.optimization.transfer_loops += 1;
@@ -1625,23 +1895,29 @@ impl<'a> Machine<'a> {
                 }
                 Ok(())
             }
-            None => self.execute_generic_loop_light::<SAMPLE>(body),
+            None => self.execute_generic_loop_light::<SAMPLE>(program, body),
         }
     }
 
     fn execute_generic_loop_light<const SAMPLE: bool>(
         &mut self,
-        body: &[FastInstruction],
+        program: &FastProgram,
+        body: BodyRange,
     ) -> Result<(), Error> {
         self.add_counts_unprofiled(1, 1);
         while self.tape[self.pointer] != 0 {
-            self.execute_block_light::<SAMPLE>(body)?;
+            self.execute_block_light::<SAMPLE>(program, body)?;
             self.add_counts_unprofiled(1, 1);
         }
         Ok(())
     }
 
-    fn execute_block_profiled(&mut self, instructions: &[FastInstruction]) -> Result<(), Error> {
+    fn execute_block_profiled(
+        &mut self,
+        program: &FastProgram,
+        body: BodyRange,
+    ) -> Result<(), Error> {
+        let instructions = body.slice(&program.instructions);
         for instruction in instructions {
             let site = instruction.site();
             self.observe_progress(site)?;
@@ -1669,7 +1945,7 @@ impl<'a> Machine<'a> {
             }
             let nested_time = match instruction {
                 FastInstruction::Countdown { chain, .. } => {
-                    self.execute_countdown::<true, false>(site, chain)?
+                    self.execute_countdown::<true, false>(program, site, chain)?
                 }
                 FastInstruction::Move {
                     amount,
@@ -1722,8 +1998,9 @@ impl<'a> Machine<'a> {
                     if let Some(profile) = &mut self.profile {
                         profile.site_mut(site).counters.loop_entries += 1;
                     }
-                    self.execute_loop(site, body, optimization.as_ref())?
+                    self.execute_loop(program, site, *body, program.optimization(*optimization))?
                 }
+                FastInstruction::Unused => unreachable!("folded countdown body was executed"),
             };
             if let Some(started) = started {
                 let elapsed = started.elapsed();
@@ -1738,30 +2015,36 @@ impl<'a> Machine<'a> {
 
     fn execute_loop(
         &mut self,
+        program: &FastProgram,
         site: ResolvedProfileSite,
-        body: &[FastInstruction],
+        body: BodyRange,
         optimization: Option<&LoopOptimization>,
     ) -> Result<Duration, Error> {
+        let body_instructions = body.slice(&program.instructions);
         match optimization {
             Some(LoopOptimization::CompareSlide) => {
                 if self.execute_compare_slide::<true>(site) {
                     Ok(Duration::ZERO)
                 } else {
-                    self.execute_generic_loop(site, body)
+                    self.execute_generic_loop(program, site, body)
                 }
             }
             Some(LoopOptimization::Compare) => {
                 if self.execute_compare_loop::<true>(site) {
                     Ok(Duration::ZERO)
                 } else {
-                    self.execute_generic_loop(site, body)
+                    self.execute_generic_loop(program, site, body)
                 }
             }
             Some(LoopOptimization::RemoteTransfer) => {
-                if self.execute_remote_transfer::<true>(site, body)? {
+                if self.execute_remote_transfer::<true>(
+                    site,
+                    body_instructions,
+                    &program.optimizations,
+                )? {
                     Ok(Duration::ZERO)
                 } else {
-                    self.execute_generic_loop(site, body)
+                    self.execute_generic_loop(program, site, body)
                 }
             }
             Some(LoopOptimization::Clear {
@@ -1837,7 +2120,7 @@ impl<'a> Machine<'a> {
                 if iterations != 0
                     && (!self.offset_is_valid(*min_offset) || !self.offset_is_valid(*max_offset))
                 {
-                    return self.execute_generic_loop(site, body);
+                    return self.execute_generic_loop(program, site, body);
                 }
 
                 self.optimization.transfer_loops += 1;
@@ -1880,14 +2163,15 @@ impl<'a> Machine<'a> {
                 }
                 Ok(Duration::ZERO)
             }
-            None => self.execute_generic_loop(site, body),
+            None => self.execute_generic_loop(program, site, body),
         }
     }
 
     fn execute_generic_loop(
         &mut self,
+        program: &FastProgram,
         site: ResolvedProfileSite,
-        body: &[FastInstruction],
+        body: BodyRange,
     ) -> Result<Duration, Error> {
         self.add_counts(site, 1, 1);
         let mut nested_time = Duration::ZERO;
@@ -1899,7 +2183,7 @@ impl<'a> Machine<'a> {
                 self.clock_reads += 1;
                 Instant::now()
             });
-            self.execute_block(body)?;
+            self.execute_block(program, body)?;
             if let Some(body_started) = body_started {
                 nested_time += body_started.elapsed();
                 self.clock_reads += 1;
@@ -1992,7 +2276,7 @@ fn clear_iterations_factor(delta: u8) -> u8 {
 }
 
 fn execute(
-    instructions: &[FastInstruction],
+    program: &FastProgram,
     input: &[u8],
     grow_tape: bool,
     profile_options: Option<&ProfileOptions>,
@@ -2012,7 +2296,7 @@ fn execute(
         sampled_counts,
         progress,
     );
-    let execution = machine.execute_block(instructions);
+    let execution = machine.execute_block(program, program.root);
     if let Some(sampled_site) = &machine.sampled_site {
         sampled_site.store(INACTIVE_PROFILE_SITE, Ordering::Release);
     }
@@ -2478,7 +2762,7 @@ mod tests {
             panic!()
         };
         assert_eq!(*amount, 1_000_000_000);
-        assert_eq!(source_offsets.ranges.len(), 1);
+        assert_eq!(source_offsets.range_count(), 1);
         assert_eq!(source_offsets.get(999_999_999), offset);
     }
 
@@ -2802,7 +3086,7 @@ mod tests {
         };
         assert_eq!(*amount, 6);
         assert_eq!(source_offsets.len(), 6);
-        assert_eq!(source_offsets.ranges.len(), 2);
+        assert_eq!(source_offsets.range_count(), 2);
         assert_eq!(source_offsets.get(0), 0);
         assert_eq!(source_offsets.get(2), 2);
         assert_eq!(source_offsets.get(3), 12);
