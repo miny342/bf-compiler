@@ -453,12 +453,20 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
     }
 
     fn lower_global_initializers(&mut self) -> Result<(), ContinuationLoweringError> {
+        // The BF tape starts at zero. Until an explicit initializer has run,
+        // default globals can use that initial state directly. After that
+        // point an earlier initializer may have written a later global, so its
+        // declaration must restore the default zero before evaluating it.
+        let mut initializer_seen = false;
         for global in &self.program.globals {
             let previous_source = self.current_source;
             self.current_source = self.source_span_at(global.offset);
-            let result = self.lower_global_initializer(global);
+            let result = self.lower_global_initializer(global, initializer_seen);
             self.current_source = previous_source;
             result?;
+            if global.initializer.is_some() {
+                initializer_seen = true;
+            }
         }
         Ok(())
     }
@@ -466,14 +474,17 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
     fn lower_global_initializer(
         &mut self,
         global: &hir::HirGlobal,
+        initializer_seen: bool,
     ) -> Result<(), ContinuationLoweringError> {
         let id = ContinuationGlobalId::new(global.id.index());
         if self.program.types.is_scalar(global.ty) {
             let destination = Address::Global(id);
-            self.emit(FrameInstruction::Set {
-                dst: destination,
-                value: 0,
-            });
+            if initializer_seen {
+                self.emit(FrameInstruction::Set {
+                    dst: destination,
+                    value: 0,
+                });
+            }
             if let Some(initializer) = &global.initializer {
                 let value = self.evaluate_scalar_temporary(initializer)?;
                 self.move_cell(value, destination);
@@ -485,7 +496,9 @@ impl<'a, 'ids> FunctionLowerer<'a, 'ids> {
                 offset: 0,
                 cells,
             };
-            self.clear_aggregate(destination);
+            if initializer_seen {
+                self.clear_aggregate(destination);
+            }
             if let Some(initializer) = &global.initializer {
                 let value = self.evaluate_aggregate(initializer)?;
                 self.copy_aggregate(value, destination);
@@ -1920,6 +1933,41 @@ mod tests {
                 .iter()
                 .any(|aggregate| aggregate.cells() == 3)
         );
+    }
+
+    fn global_zero_set_count(program: &ContinuationProgram) -> usize {
+        program
+            .continuations()
+            .iter()
+            .flat_map(|continuation| continuation.body())
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    FrameInstruction::Set {
+                        dst: Address::Global(_)
+                            | Address::ArrayElement {
+                                array: AggregateRegion::Global(_),
+                                ..
+                            },
+                        value: 0,
+                    }
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn global_defaults_reuse_zero_tape_before_first_initializer() {
+        let all_defaults = lower_unoptimized("cell[4] arena; cell scalar; void main() {}");
+        assert_eq!(global_zero_set_count(&all_defaults), 0);
+
+        let explicit_then_default = lower_unoptimized(
+            "cell[4] arena; cell before; cell initialized = 1; cell after; void main() {}",
+        );
+        // The explicit initializer clears its destination as part of moving
+        // the value, and the later default declaration must still clear its
+        // destination because an earlier initializer may have written it.
+        assert_eq!(global_zero_set_count(&explicit_then_default), 2);
     }
 
     #[test]
