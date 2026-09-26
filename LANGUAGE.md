@@ -639,7 +639,8 @@ buffer = transform(buffer);
 node = node.update();
 ```
 
-実装ABI、再帰frame、aggregate return outboxは[ABI.md](ABI.md)に定義する。
+実装ABIの共通規約は[ABI.md](ABI.md)、再帰frameやaggregate return outboxの物理配置は
+[ABI-rust.md](ABI-rust.md)と[ABI-selfhost.md](ABI-selfhost.md)に定義する。
 
 ## Block macro
 
@@ -978,8 +979,9 @@ macro、`abort`を使用できる。引数と添字の評価順、短絡評価�
 typed HIR、Continuation IR、activation固有outboxで保持する。
 
 globalは宣言順に初期化し、local/global aggregateの動的projectionには16-bit logical offsetの
-aggregate portalを使用する。[ABI.md](ABI.md)のbackendは`D = 16`のchunk geometryのみを
-サポートする。第13段階には着手しており、`selfhost/stage2/compiler/`のbootstrap compilerが
+aggregate portalを使用する。[Rust backend](ABI-rust.md)は`D = 16`のchunk geometryのみを
+サポートする。[selfhost BF backend](ABI-selfhost.md)は別のuniform frame配置を使う。
+第13段階には着手しており、`selfhost/stage2/compiler/`のbootstrap compilerが
 初期実装第1〜12段階のsubsetをBF上でコンパイルできる。全version 1を入力として自身を再生成する
 完全なself-host compilerは未実装である。packed AST/IR arenaは第13段階の容量回帰として
 4,096 cellから16,384 cellへ拡張した。さらに固定13-cell nodeをkind別3〜13-cell recordへ変更し、

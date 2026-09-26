@@ -59,7 +59,8 @@ low-level API:
 sidecar mapを作る。このannotationは新しい意味IRではなく、同じBF命令に出自を付けたvariantである。
 
 scalar関数、再帰、frame-relativeなローカル変数には、typed HIRとContinuation IRを使用する。
-chunked frame stack、call/return、pointer位置の規約は[ABI.md](ABI.md)に定義する。現在のsource
+Rust backendのchunked frame stack、call/return、pointer位置の規約は[ABI-rust.md](ABI-rust.md)、
+selfhost backendと共通する実行モデルは[ABI.md](ABI.md)に定義する。現在のsource
 frontendは、名前解決・型検査済みHIRから関数ごとのframe slotとContinuationを生成し、ABI backendへ
 渡す。低水準APIとして、静的`CellId`を使用する従来のCell IRとbackendも独立して残すが、これは
 source frontendまたは`bfc` CLIの途中に挟まる層ではない。
@@ -562,7 +563,7 @@ BF IRの当面の責務はBrainfuckの構造を保持した中間表現と最終
 
 現在のstruct、固定長array、多次元arrayは、localならalignedな`FrameAggregateId`、globalなら
 static `GlobalId`のaggregate regionへ配置する。定数offsetのsubobjectはregion内の
-`Address::ArrayElement`として直接扱い、動的offsetのsubobjectは[ABI.md](ABI.md)のaggregate portalへ
+`Address::ArrayElement`として直接扱い、動的offsetのsubobjectは[ABI-rust.md](ABI-rust.md)のaggregate portalへ
 loweringする。version 0の`Array`という型名とterminatorは、公開Continuation IRの互換APIとして残る。
 
 ### 定数projection

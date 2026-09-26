@@ -279,7 +279,8 @@ inline化、比較命令の復元も同様に今回のproduction変更には含�
 大容量BFを生成・実行する前にCPU・メモリ・空き容量を確認し、同時実行を抑える。
 BFとmapは同時生成する。再現scriptは`scripts/`で追跡し、生成物は追跡しない。
 自分の変更を検証してcommitを続け、push/mergeは行わない。
-既存設計は`ABI.md`、`BF_OPTIMIZATION_PLAN.md`、`BF_OPTIMIZATION_NOTES.md`、
+既存設計は`ABI.md`（共通規約）、`ABI-rust.md` / `ABI-selfhost.md`（backend別の物理配置）、
+`BF_OPTIMIZATION_PLAN.md`、`BF_OPTIMIZATION_NOTES.md`、
 `BF_PROFILING_DESIGN.md`を参照し、古い未実装表記より現コードを優先する。
 
 ## 実験1：phase別の回数・遷移・portal要求の計測

@@ -479,7 +479,9 @@ fast IR認識、またはABI構造を再検討する。
 - template契約をRust固有のclosureや型だけで表現しない。
 - self-host compilerで必要になるscratch数と状態遷移を明文化する。
 - Rust版で安定したtemplateにはBFC側の対応予定または非対応理由を記録する。
-- ABI versionを変更した場合は`ABI.md`とBFC側の定数・layoutを同じ変更で更新する。
+- 共通する実行規約を変更した場合は[ABI.md](ABI.md)と両backendを更新する。
+  物理ABIの変更は、対象backendの[ABI-rust.md](ABI-rust.md)または[ABI-selfhost.md](ABI-selfhost.md)と
+  その実装を同じ変更で更新する。両backendの定数・layoutの一致は要求しない。
 
 ## 実装単位
 

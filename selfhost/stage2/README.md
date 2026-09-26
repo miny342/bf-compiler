@@ -4,6 +4,9 @@
 まずRust版コンパイラでBFC製コンパイラをBrainfuckへ変換し、そのBrainfuckプログラムで
 初期実装第1〜12段階のBFCをBrainfuckへ変換する。
 
+生成BFの物理配置・call/return・portal規約は[ABI-selfhost.md](../../ABI-selfhost.md)に定義する。
+Rust製backendとの共通点・違いと、CIR経由でどちらのABIになるかは[ABI.md](../../ABI.md)を参照。
+
 ## ファイル構成
 
 コンパイラ本体は役割ごとに分割している。
@@ -246,6 +249,7 @@ BFでは16-bit continuation ID、CIRでは別途採番する16-bit関数IDへ変
 | lexer・scope・macro | identifier 64 byte、配列次元/semantic scope/macro展開16段、macro scope32段、展開中のmacro引数64個。固定長bufferに対応するチェックを維持 |
 
 stage2のBF backendはRust側のD=16 chunk ABIとは別方式であり、D=8/D=16切替は持たない。
+headerのfield順序とアドレス式は[ABI-selfhost.md](../../ABI-selfhost.md)を参照。
 `FRAME_DATA_BASE = 16`は管理領域の幅で、frame全体を16 cellに固定する指定ではない。
 `--unlimited-tape`はこれらstage2内の表現幅や固定長bufferを拡張しない。
 現方式のframe/offset上限を広げるには、チェックの削除だけでなくIRとcodegenの表現変更が必要になる。
@@ -332,6 +336,8 @@ Brainfuck VM上で動かす回帰は、引き続き`verify-stage2-selfhost.sh`�
 
 production selfhostでは、selfhost frontendがcompact binary CIRを出力し、Rust ABI backendへ
 渡せる。`cir` entryだけがserializerを含み、targetの`main` entryには含めない。
+この経路の最終BFは[ABI-rust.md](../../ABI-rust.md)の配置になる。selfhostのlogical storageを
+adapterで変換してからRust backendで配置し直すため、selfhost BFの物理配置は引き継がない。
 
 ```console
 scripts/concat-stage2-compiler.sh cir > stage2-cir-compiler.bfc
