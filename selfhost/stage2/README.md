@@ -250,6 +250,29 @@ stage2のBF backendはRust側のD=16 chunk ABIとは別方式であり、D=8/D=1
 `--unlimited-tape`はこれらstage2内の表現幅や固定長bufferを拡張しない。
 現方式のframe/offset上限を広げるには、チェックの削除だけでなくIRとcodegenの表現変更が必要になる。
 
+256 cell以上のglobal動的アクセスは、BF backendで共有portal accessorへの要求とresumeへ分割する。
+load/store/add/subtractの4継続をID空間の先頭に予約してから、user継続・resumeを含めてpage幅を均衡化する。
+resumeは元の継続の直後に置くため、既存の関数entryとprofileの関数範囲を維持する。
+profile上の`portal0` / `portal1` / `portal2` / `portal3`は、この4種類の共有アクセサである。
+
+portalが必要なprogramのglobal領域は、論理256 cellごとに16 cellの管理領域を前置する。
+論理アドレス・型layout・CIRは変更せず、BFの定数globalアクセスも同じ物理配置へ変換する。
+最終pageのpaddingを除く追加領域は6.25%。function frameとzero anchorの契約は従来どおり。
+要求はbase pageの管理領域へ移し、dispatcherのcontextをそのpageへ切り替える。
+アクセサはpage番号をnibble分解し、16 page単位と1 page単位で要求packetを搬送する。
+選択page内の256 case countdownは操作ごとに一度だけ出力し、全要素を列挙しない。
+終了時はbase pageへ戻り、site固有のresumeが値をcaller frameへ回収する。
+配列先頭がpage境界とずれている場合のcarry、部分page、範囲外loadのzero/writeの無操作も扱う。
+この間user functionを実行しないため、page管理領域は非再入の一時領域として共有できる。
+255 cell以下とlocal配列には従来のinline countdownを使う。
+
+境界・再帰・隣接globalとのalias・配列長に依存しない出力サイズは次で検証できる。
+
+```sh
+python3 scripts/verify-selfhost-portals.py \
+  --compiler target/release/bfc --interpreter target/release/bf-interpreter
+```
+
 最終BF出力はbufferを持たず、その場で通常BFまたはBFCRLEへ書く。
 `compressed` entryは反復命令の回数だけを短縮し、命令間の統合・相殺やloopの書換えはしない。
 定数生成時の短い加減算の選択は維持する。full16での出力最適化の実行費用を受け、

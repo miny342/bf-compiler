@@ -9,6 +9,143 @@ BF IR peephole最適化とcontinuation dispatcherの二段countdownは採用済�
 lowering手法は未採用であり、実装時には生成BFの長さ、実行step、追加cell数を現在のloweringと
 比較してから選ぶ。
 
+## stage2の大配列アクセスを共有portalへ変更（2026-09-26）
+
+`logs/full-selfhost-20260926-154417/tmp.tmp.bf`は253,648,093 byteだった。
+DBG2 marker間の圧縮BFを関数別に集計すると、`arena_cell_read`が150,019,148 byte、
+`arena_cell_write`が97,254,719 byteで、この2関数だけで全体の97.49%を占める。
+marker自体は90,322 byte。profileの静的命令数は5,506,610,210,996であり、
+全runを通常BFへ展開すれば約5.51 TBになる。
+
+従来のglobal array backendは各アクセスについて全要素のcaseを展開し、各caseに
+frameとglobalの往復を埋め込んでいた。arenaは65,280 cell × 16 bankなので、read/writeが
+それぞれ約104万要素の処理を持つ。実行profileでarena readの時間比率が小さくても、
+自己コンパイルでこのコードを生成する費用は大きい。
+
+`10_portal_codegen.bfc`にBF専用の変換を追加した。
+
+- 256 cell以上のglobal動的アクセスをrequest terminatorとresumeへ分割する。
+  resumeを元の継続の直後へ挿入し、function entryや既存のbranch先は保持する。
+- load/store/add/subtractの共有継続を4つ先頭に予約する。追加後にIDを振り直し、
+  既存のpage幅均衡化を適用する。追加後も65,535継続制限のoverflow検査を通す。
+- portalを使うprogramのglobal物理配置を16-cell header + 256-cell payloadのpageへ変更する。
+  論理globalアドレスとCIRは維持し、定数globalアクセスも同じ物理位置へ写す。
+  24-bit物理位置のoverflowは既存のwide演算で拒否する。
+- 添字・値・復帰PCをbase pageへ渡してdispatcherのcontextを切り替える。
+  page番号をnibble分解して16 page単位と1 page単位で移動する。
+  256要素のpayload countdownは操作ごとに一度だけ生成する。
+  baseの下位byteによるcarryは1 page側のdigitへ加えるため、page 256への到達もwrapしない。
+- 要求packetの往復はBF上で実行し、user functionはその間実行しない。
+  元のframeはactiveのまま維持し、site固有resumeからzero anchor経由で戻る。
+  protocolの宛先fieldは搬送前にclearし、base headerはresumeでclearする。
+  配列境界外のloadはzero、store/add/subtractは無操作という従来の挙動を維持する。
+- 添字の境界とbase offsetのcarryは定数との比較なので、汎用`emit_frame_less`を使わず
+  `[-[-...`のbounded countdownで判定する。比較元は消費し、結果以外のlive fieldを変更しない。
+  初期版の汎用比較は小入力のnative operationを約27〜30%増やしていたため置換した。
+
+255 cell以下とlocal配列は従来のinline countdownを使う。
+portal不要のprogramは従来のglobal配置のままである。
+追加のglobal領域は6.25%と最終pageのpaddingで、function frameのABIは変更しない。
+profileの`portal0`〜`portal3`は順にload/store/add/subtractの共有コードを表す。
+
+page headerの0〜6はfunction frameと同じactive/PC/next-PC/return-PC配置で、
+base pageでのみdispatcherに使用する。7は値、8はpage内添字、9はvalidity guardと
+copy用temporary、10はpayload countdownのbranch flag。11は入力page byteで、
+分解後の1-page/16-page counterが12/13、復路用のcounterが14/15となる。
+14は分解前だけbase offsetのcarryを保持する。往路でcarried fieldを移動先へ渡し、
+復路ではload結果と残った復路counterだけを戻す。入力counterと往路counterは消費する。
+caller側の3/4はrequest生成中だけ比較用temporaryとして使い、context切替前にclearする。
+
+### サイズと検証
+
+更新済み217,867-byteのcompiler sourceを`--run-ir --disable-function-inline --no-ir-transitions`
+で自己コンパイルした結果は次のとおり。変更前後でcompiler source自体も異なる。
+
+| 指標 | 変更前 | 変更後 | 削減率 |
+|---|---:|---:|---:|
+| stage2圧縮BF bytes | 253,648,093 | 3,801,257 | 98.50% |
+| 展開後の静的BF命令数 | 5,506,610,210,996 | 3,641,070,792 | 99.93% |
+| stage2 → stage3 execute | 4,358.188 s | 862.665 s | 80.21% |
+| native operations | 1,048,761,754,686 | 206,306,304,743 | 80.33% |
+| progressで観測した最大RSS | 5,325,420 KiB | 158,820 KiB | 97.02% |
+
+stage2 → stage3は72分38秒から14分23秒へ短縮し、前回の完走ログ比で5.05倍になった。
+同じrelease interpreterと1 ms samplingを使い、parse時間はexecuteに含めない。
+stage1 → stage2のBF実行による計測は行っていない。
+stage2とstage3は3,801,257 byteで完全一致し、SHA-256はいずれも
+`a9af02309af961ee5187fdbff18709d6d5523ad217367eed19bfb7a9b44b62e5`。
+入力完了の最初のsnapshotは8分から10分へ、本格的なBF出力の最初のsnapshotは11分から14分へ
+移ったが、後半の巨大コード生成がなくなり総時間は大きく減った。
+変更後は13分のsnapshotまで出力9 byteなので、コード出力開始は13〜14分の間である。
+比較値とhashは`comparison.json`、静的な関数別サイズは`static-size.json`に保存した。
+
+生成BFの縮小とraw実行命令数の減少は同じではない。packet搬送によりraw実行命令数は
+約4.93×10^15から約1.32×10^16へ増えた。ここでの速度改善はrepository interpreterの
+transfer/scan/countdown最適化を含む測定であり、1文字ずつ動かすBF interpreterの速度倍率ではない。
+
+`scripts/verify-selfhost-portals.py`で全256 low-byte値、全255 page、16-page jump境界、
+unalignedなstruct内配列、page 256へのcarry、部分page、範囲外access、複数global領域、
+再帰、270関数によるdispatch page境界を検証する。Rust IRの実行結果または独立した期待byte列と照合する。
+1/16/255-pageの同じaccess siteの生成サイズは53,521 / 53,611 / 55,045 byteで、
+要素数に比例して増えない。通常BFと圧縮BFを展開した命令列の一致、および通常BFでの実行も確認する。
+定数境界比較は全65,536組のbyte値と境界値について、独立した`value < limit`の期待値と照合した。
+既存の18 exampleと3 profile fixture、内部BFC testも通過した。
+同scriptに`--selfhost-compiler logs/stage3-portals-20260926/stage2.bf`を渡すと、
+各fixtureをBF版compilerでもコンパイルし、IR経由との出力byte一致を検証する。
+
+共有accessorへの往復には追加dispatchが必要である。小入力をコンパイルするnative operation数は
+helloが12,637,360 → 13,165,617、stage8_aggregatesが154,369,205 → 164,793,484、
+stage11_dynamic_projectionが120,494,234 → 127,687,980となった。
+これらは約4〜7%増で、生成BFは変更前とbyte一致する。
+値は`small-benchmark.json`に保存した。wall timeは自己コンパイルと並行した単回測定なので、
+小入力の速度倍率としては使わない。
+自己コンパイル全体の速度は上表の完走時間で評価する。
+
+完走profileではcountdownが26.7%、frame compareが4.0%になった。
+`arena_cell_read`本体が29.7%、共有load accessorの`portal0`が13.7%で、
+次の実行時間の改善対象はarenaアクセスとその呼び出し費用になる。
+これは生成されるarena accessorのサイズ爆発が解消された後のprofileである。
+
+更新済みsource、stage2、stage3、profile、集計は`logs/stage3-portals-20260926/`に保存した。
+再実行は次のとおり。初期の汎用比較版は途中で中断し、同directoryの`initial/`に分けてある。
+
+```sh
+run_dir=logs/stage3-portals-20260926
+target/release/bf-interpreter --unlimited-tape --accept-embedded-profile \
+  --profile-format json --profile-output "$run_dir/profile.json" \
+  --progress-interval 60s "$run_dir/stage2.bf" \
+  < "$run_dir/compiler.bfc" > "$run_dir/stage3.bf" 2> "$run_dir/stage3.metrics"
+```
+
+### Rust生成とselfhost生成で圧縮前後の大小が逆転する理由
+
+同じ217,867-byteのcompiler sourceをRustでも生成して比較した。
+展開後のサイズは、profile markerを除きRLEの反復回数を合計したBF命令数である。
+
+| 生成方法 | 圧縮BF bytes | 展開後のBF命令数 |
+|---|---:|---:|
+| Rust・通常設定 | 10,662,269 | 785,811,676 |
+| Rust・`--disable-function-inline` | 6,748,832 | 714,729,727 |
+| selfhost・stage2/3 | 3,801,257 | 3,641,070,792 |
+
+Rustの`continuation_lowering.rs::lower_global_initializer`はglobalを明示的にzero初期化する。
+約104万cellのarenaを含む起動時の`abi.frame.set`領域だけで4,264,584圧縮byteを占める。
+`[-]>[-]>...`というcellごとのclear列は、単一命令の反復を表す現在のRLEでは縮まない。
+selfhostの`09_continuation_ir.bfc::lower_global_initializers`は先行するinitializerがない間、
+初期tapeのzeroを利用してclearを省く。この差が圧縮後のRust側の大きさに寄与している。
+inline無効化も約3.91 MB減らすので、inlineの影響もあるがそれだけでは説明できない。
+
+一方、selfhostには65,536 cell以上の移動runが3,413箇所あり、展開後の3,553,470,454命令、
+全体の97.6%を占める。長距離移動は回数表記なら短く、圧縮後のサイズには現れにくい。
+Rustの`static_layout.rs`はscalarと小さいaggregateをstack anchor近くに集めるが、
+selfhostの論理global配置は宣言順が基本で、portalの物理配置変換も並び順を維持する。
+この配置差もselfhostの長距離移動の原因となる。
+両者を最短の16進RLEで表してもRustは10,312,974 byte、selfhostは3,651,140 byteであり、
+10進/16進表記やmarkerの差は主因ではない。
+
+以上はサイズの分析であり、Rustの既知zero初期化省略やselfhostのglobal再配置は未実装。
+測定用BFと集計scriptは`tmp/stage-size-analysis/`に保存した。
+
 ## stage2 → stage3 のcountdown改善（2026-09-26）
 
 対象は`logs/full-selfhost-20260926-130528/tmp.tmp.bf`をBF interpreterで動かし、

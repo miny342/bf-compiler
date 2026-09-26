@@ -21,6 +21,7 @@ void emit_profile_header() {
     compiler_output!('@'); compiler_output!('B'); compiler_output!('F');
     compiler_output!('C'); compiler_output!('D'); compiler_output!('B');
     compiler_output!('G'); compiler_output!('2'); compiler_output!(';');
+    emit_portal_profile_headers();
     NodeId function = first_function;
     while (!node_is_null(function)) {
         NodeId entry = continuation_dispatch_id(node_a(node_c(function)));

@@ -1,0 +1,435 @@
+// BF-only lowering for large global dynamic regions. Logical addresses and CIR
+// stay packed. Physical globals use [16 protocol cells | 256 payload cells].
+// Four shared accessors are reserved before user continuations. A request
+// switches the dispatcher context to its base page; its site-specific resume
+// transports the result back to the still-active caller frame.
+const cell TERM_PORTAL = 8;
+const cell TERM_PORTAL_ACCESSOR = 9;
+const cell IR_PORTAL_RESUME = 29;
+cell stage12_portals;
+NodeId first_portal_accessor;
+
+cell needs_array_portal(NodeId instruction) {
+    cell kind = node_tag(instruction);
+    return kind >= IR_ARRAY_LOAD && kind <= IR_ARRAY_SUBTRACT
+        && arena_read(instruction, FIELD_B_PAGE) == RESOLVED_GLOBAL_DYNAMIC
+        && arena_read(instruction, FIELD_C_SLOT) != 0;
+}
+
+// Allocate a resume immediately after its request, preserving function ranges.
+// IDs are assigned again only after all splices and accessor reservation.
+void split_portal_instruction(NodeId continuation, NodeId previous, NodeId instruction) {
+    NodeId resume = allocate_cells(CONTINUATION_CELLS);
+    cell field;
+    while (field < FIELD_DISPATCH_LOW) {
+        arena_write(resume, field, arena_read(continuation, field));
+        field += 1;
+    }
+    node_set_next(continuation, resume);
+    if (node_equals(last_continuation, continuation)) {
+        last_continuation = resume;
+    }
+    NodeId restore = allocate_node(NODE_INSTRUCTION);
+    node_set_tag(restore, IR_PORTAL_RESUME);
+    node_set_a(restore, instruction);
+    node_set_next(restore, node_next(instruction));
+    node_set_a(resume, restore);
+    node_set_next(instruction, null_node());
+    if (node_is_null(previous)) {
+        node_set_a(continuation, null_node());
+    } else {
+        node_set_next(previous, null_node());
+    }
+    node_set_tag(continuation, TERM_PORTAL);
+    node_set_c(continuation, instruction);
+    node_set_b(continuation, resume);
+}
+
+void prepare_array_portals() {
+    stage12_portals = 0;
+    first_portal_accessor = null_node();
+    NodeId continuation = first_continuation;
+    while (!node_is_null(continuation)) {
+        NodeId instruction = node_a(continuation);
+        NodeId previous;
+        while (!node_is_null(instruction)) {
+            if (needs_array_portal(instruction)) {
+                if (arena_read(instruction, FIELD_C_BANK) != 0) {
+                    fail('H', 'Q');
+                }
+                split_portal_instruction(continuation, previous, instruction);
+                stage12_portals = 1;
+                instruction = null_node();
+            } else {
+                previous = instruction;
+                instruction = node_next(instruction);
+            }
+        }
+        continuation = node_next(continuation);
+    }
+    if (!stage12_portals) {
+        return;
+    }
+    NodeId tail;
+    cell kind = IR_ARRAY_LOAD;
+    while (kind <= IR_ARRAY_SUBTRACT) {
+        NodeId accessor = allocate_cells(CONTINUATION_CELLS);
+        arena_write(accessor, FIELD_KIND, NODE_CONTINUATION);
+        node_set_tag(accessor, TERM_PORTAL_ACCESSOR);
+        node_set_value(accessor, kind);
+        if (node_is_null(tail)) {
+            first_portal_accessor = accessor;
+        } else {
+            node_set_next(tail, accessor);
+        }
+        tail = accessor;
+        kind += 1;
+    }
+    node_set_next(tail, first_continuation);
+    first_continuation = first_portal_accessor;
+    NodeId id;
+    continuation = first_continuation;
+    while (!node_is_null(continuation)) {
+        id = next_continuation_dispatch_id(id);
+        set_continuation_dispatch_id(continuation, id);
+        continuation = node_next(continuation);
+    }
+}
+
+WideValue physical_page_origin(WideValue address) {
+    WideValue overhead;
+    overhead.low = address.mid;
+    overhead.mid = address.high;
+    cell shifts = 4;
+    while (shifts != 0) {
+        overhead = wide_add(overhead, overhead);
+        shifts -= 1;
+    }
+    address.low = 0;
+    return wide_add(address, overhead);
+}
+
+WideValue physical_static_cells() {
+    if (!stage12_portals) {
+        return stage7_static_cells;
+    }
+    WideValue rounded = stage7_static_cells;
+    if (rounded.low != 0) {
+        rounded = wide_add(rounded, wide_from_cell(0 - rounded.low));
+    }
+    return physical_page_origin(rounded);
+}
+
+WideValue physical_global_distance(WideValue address) {
+    if (!stage12_portals) {
+        return wide_subtract(stage7_static_cells, address);
+    }
+    WideValue physical = wide_add(physical_page_origin(address), wide_from_cell(16));
+    physical = wide_add(physical, wide_from_cell(address.low));
+    return wide_subtract(physical_static_cells(), physical);
+}
+
+WideValue portal_origin_distance(NodeId instruction) {
+    return wide_subtract(physical_static_cells(),
+        physical_page_origin(instruction_address(instruction)));
+}
+
+void emit_portal_profile_headers() {
+    if (!stage12_portals) {
+        return;
+    }
+    NodeId accessor = first_portal_accessor;
+    cell kind;
+    while (kind != 4) {
+        NodeId id = continuation_dispatch_id(accessor);
+        compiler_output!('@'); compiler_output!('F');
+        emit_hex_byte!(id.page, 1); emit_hex_byte!(id.slot, 1);
+        compiler_output!(':');
+        // Synthetic function names "portal0" .. "portal3".
+        cell letter = 'p'; emit_hex_byte!(letter, 1);
+        letter = 'o'; emit_hex_byte!(letter, 1);
+        letter = 'r'; emit_hex_byte!(letter, 1);
+        letter = 't'; emit_hex_byte!(letter, 1);
+        letter = 'a'; emit_hex_byte!(letter, 1);
+        letter = 'l'; emit_hex_byte!(letter, 1);
+        letter = '0' + kind; emit_hex_byte!(letter, 1); compiler_output!(';');
+        accessor = node_next(accessor);
+        kind += 1;
+    }
+}
+
+// Destructively stage one caller field into a zeroed base-page field.
+cell emit_portal_stage(cell position, cell source, cell target, WideValue distance) {
+    position = emit_loop_open(position, source);
+    compiler_output!('-');
+    position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
+    position = emit_add_constant(position, target, 1);
+    position = emit_move_to(position, 0);
+    position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
+    return emit_loop_close(position, source);
+}
+
+// Consume source and set result to source < limit. The adjacent [-[-... descent
+// is folded by the interpreter, avoiding a general byte comparison per access.
+cell emit_portal_less_constant(cell position, cell source, cell result, cell limit) {
+    position = emit_constant(position, result, 1);
+    position = emit_move_to(position, source);
+    cell remaining = limit;
+    while (remaining != 0) {
+        compiler_output!('['); compiler_output!('-');
+        remaining -= 1;
+    }
+    position = emit_clear(position, source);
+    position = emit_clear(position, result);
+    position = emit_move_to(position, source);
+    remaining = limit;
+    while (remaining != 0) {
+        compiler_output!(']');
+        remaining -= 1;
+    }
+    return position;
+}
+
+// Preserve the old bounded-access contract: invalid loads return zero and
+// invalid writes do nothing. Temporaries 3/4 are not live PCs until cycle end.
+cell emit_portal_validity(cell position, NodeId instruction) {
+    cell low = physical_frame_slot(arena_read(instruction, FIELD_NAME_PAGE));
+    cell high = physical_frame_slot(arena_read(instruction, FIELD_NAME_SLOT));
+    cell length_low = arena_read(instruction, FIELD_C_PAGE);
+    cell length_high = arena_read(instruction, FIELD_C_SLOT);
+    position = emit_frame_copy(position, high, 3);
+    position = emit_portal_less_constant(position, 3, 14, length_high);
+    if (length_low != 0) {
+        position = emit_frame_copy(position, high, 13);
+        position = emit_add_constant(position, 13, 0 - length_high);
+        position = emit_frame_not(position, 13);
+        position = emit_loop_open(position, 13);
+        compiler_output!('-');
+        position = emit_frame_copy(position, low, 3);
+        position = emit_portal_less_constant(position, 3, 14, length_low);
+        position = emit_loop_close(position, 13);
+    }
+    return position;
+}
+
+cell emit_portal_request(cell position, NodeId continuation) {
+    NodeId instruction = node_c(continuation);
+    cell kind = node_tag(instruction);
+    NodeId accessor = first_portal_accessor;
+    cell count = kind - IR_ARRAY_LOAD;
+    while (count != 0) {
+        accessor = node_next(accessor);
+        count -= 1;
+    }
+    NodeId entry_id = continuation_dispatch_id(accessor);
+    NodeId resume_id = continuation_dispatch_id(node_b(continuation));
+    WideValue distance = portal_origin_distance(instruction);
+    position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
+    cell field;
+    while (field != 16) {
+        position = emit_clear(position, field);
+        field += 1;
+    }
+    position = emit_constant(position, FRAME_ACTIVE, 1);
+    position = emit_constant(position, FRAME_NEXT_PC_LOW, entry_id.slot);
+    position = emit_constant(position, FRAME_NEXT_PC_HIGH, entry_id.page);
+    position = emit_constant(position, FRAME_RETURN_PC_LOW, resume_id.slot);
+    position = emit_constant(position, FRAME_RETURN_PC_HIGH, resume_id.page);
+    position = emit_move_to(position, 0);
+    position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
+    position = emit_portal_validity(position, instruction);
+    position = emit_portal_stage(position, 14, 9, distance);
+    if (kind != IR_ARRAY_LOAD) {
+        position = emit_portal_stage(position, physical_frame_slot(node_value(instruction)), 7, distance);
+    }
+    cell low = physical_frame_slot(arena_read(instruction, FIELD_NAME_PAGE));
+    cell high = physical_frame_slot(arena_read(instruction, FIELD_NAME_SLOT));
+    position = emit_portal_stage(position, high, 11, distance);
+    WideValue base = instruction_address(instruction);
+    if (base.low != 0) {
+        position = emit_add_constant(position, low, base.low);
+        position = emit_frame_copy(position, low, 4);
+        position = emit_portal_less_constant(position, 4, 3, base.low);
+        position = emit_portal_stage(position, 3, 14, distance);
+    }
+    position = emit_portal_stage(position, low, 8, distance);
+    position = emit_clear(position, 3);
+    position = emit_clear(position, 4);
+    return emit_current_to_global_distance(position, distance, stage8_frame_cells);
+}
+
+cell emit_portal_resume(cell position, NodeId instruction) {
+    WideValue distance = portal_origin_distance(instruction);
+    if (node_tag(instruction) == IR_ARRAY_LOAD) {
+        // Clear the caller destination before transporting the loaded byte.
+        position = emit_move_to(position, 0);
+        position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
+        position = emit_clear(position, physical_frame_slot(node_value(instruction)));
+        position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
+        position = emit_loop_open(position, 7);
+        compiler_output!('-');
+        position = emit_move_to(position, 0);
+        position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
+        position = emit_add_constant(position, physical_frame_slot(node_value(instruction)), 1);
+        position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
+        position = emit_loop_close(position, 7);
+    }
+    cell field;
+    while (field != 16) {
+        position = emit_clear(position, field);
+        field += 1;
+    }
+    position = emit_move_to(position, 0);
+    return emit_global_to_current_distance(position, distance, stage8_frame_cells);
+}
+
+// Consume the page byte with bounded nibble decomposition. Field 14 holds the
+// carry from an unaligned region base, and is added after decomposition.
+cell emit_portal_split_level(cell position, cell level, cell nibble) {
+    position = emit_loop_open(position, 11);
+    compiler_output!('-');
+    if (nibble == 16) {
+        position = emit_add_constant(position, 12, 0 - 15);
+        position = emit_add_constant(position, 13, 1);
+        nibble = 0;
+    } else {
+        position = emit_add_constant(position, 12, 1);
+    }
+    // At most 255 nested decrements; after reaching zero every enclosing loop
+    // exits. Payload transport never occurs during nibble decomposition.
+    if (level != 255) {
+        position = emit_portal_split_level(position, level + 1, nibble + 1);
+    }
+    return emit_loop_close(position, 11);
+}
+
+// Move a field between page headers. Destination fields can retain unrelated
+// request state from previous accesses, so clear them before each transport.
+cell emit_portal_move_field(cell position, cell field, WideValue stride, cell reverse) {
+    position = emit_move_to(position, field);
+    if (reverse) { emit_repeat_wide('<', stride); }
+    else { emit_repeat_wide('>', stride); }
+    compiler_output!('['); compiler_output!('-'); compiler_output!(']');
+    if (reverse) { emit_repeat_wide('>', stride); }
+    else { emit_repeat_wide('<', stride); }
+    compiler_output!('['); compiler_output!('-');
+    if (reverse) { emit_repeat_wide('<', stride); }
+    else { emit_repeat_wide('>', stride); }
+    compiler_output!('+');
+    if (reverse) { emit_repeat_wide('>', stride); }
+    else { emit_repeat_wide('<', stride); }
+    compiler_output!(']');
+    return field;
+}
+
+cell emit_portal_page_digit(cell position, cell counter, WideValue stride, cell kind, cell reverse) {
+    position = emit_loop_open(position, counter);
+    compiler_output!('-');
+    if (!reverse) {
+        position = emit_portal_move_field(position, 8, stride, 0);
+        if (kind != IR_ARRAY_LOAD) {
+            position = emit_portal_move_field(position, 7, stride, 0);
+        }
+        position = emit_portal_move_field(position, 12, stride, 0);
+        if (counter == 13) {
+            position = emit_portal_move_field(position, 13, stride, 0);
+        }
+        position = emit_portal_move_field(position, 14, stride, 0);
+        position = emit_portal_move_field(position, 15, stride, 0);
+    } else {
+        if (kind == IR_ARRAY_LOAD) {
+            position = emit_portal_move_field(position, 7, stride, 1);
+        }
+        position = emit_portal_move_field(position, counter, stride, 1);
+        if (counter == 14) {
+            position = emit_portal_move_field(position, 15, stride, 1);
+        }
+    }
+    position = emit_move_to(position, counter);
+    if (reverse) { emit_repeat_wide('<', stride); }
+    else { emit_repeat_wide('>', stride); }
+    compiler_output!(']');
+    return counter;
+}
+
+cell emit_portal_payload_case(cell position, cell kind, cell element) {
+    position = emit_loop_open(position, 10);
+    compiler_output!('-');
+    position = emit_move_to(position, 0);
+    WideValue offset = wide_add(wide_from_cell(element), wide_from_cell(16));
+    if (kind == IR_ARRAY_LOAD) {
+        position = emit_clear(position, 7);
+        position = emit_clear(position, 9);
+        position = emit_move_to(position, 0);
+        emit_repeat_wide('>', offset);
+        compiler_output!('['); compiler_output!('-');
+        emit_repeat_wide('<', offset);
+        position = emit_add_constant(0, 7, 1);
+        position = emit_add_constant(position, 9, 1);
+        position = emit_move_to(position, 0);
+        emit_repeat_wide('>', offset);
+        compiler_output!(']');
+        emit_repeat_wide('<', offset);
+        position = emit_loop_open(0, 9);
+        compiler_output!('-');
+        position = emit_move_to(position, 0);
+        emit_repeat_wide('>', offset);
+        compiler_output!('+');
+        emit_repeat_wide('<', offset);
+        position = emit_loop_close(0, 9);
+    } else {
+        if (kind == IR_ARRAY_STORE) {
+            emit_repeat_wide('>', offset);
+            compiler_output!('['); compiler_output!('-'); compiler_output!(']');
+            emit_repeat_wide('<', offset);
+        }
+        position = emit_loop_open(0, 7);
+        compiler_output!('-');
+        position = emit_move_to(position, 0);
+        emit_repeat_wide('>', offset);
+        if (kind == IR_ARRAY_SUBTRACT) { compiler_output!('-'); }
+        else { compiler_output!('+'); }
+        emit_repeat_wide('<', offset);
+        position = emit_loop_close(0, 7);
+    }
+    return emit_loop_close(position, 10);
+}
+
+cell emit_portal_payload_level(cell position, cell kind, cell element) {
+    position = emit_loop_open(position, 8);
+    if (element == 255) {
+        position = emit_clear(position, 8);
+        position = emit_clear(position, 10);
+    } else {
+        compiler_output!('-');
+        position = emit_portal_payload_level(position, kind, element + 1);
+    }
+    position = emit_loop_close(position, 8);
+    return emit_portal_payload_case(position, kind, element);
+}
+
+cell emit_portal_accessor(cell position, cell kind) {
+    // Validity guard stays at the base page. All page traversal returns here.
+    position = emit_loop_open(position, 9);
+    compiler_output!('-');
+    position = emit_clear(position, 12);
+    position = emit_clear(position, 13);
+    position = emit_portal_split_level(position, 1, 1);
+    position = emit_transfer(position, 14, 12, 0);
+    position = emit_frame_copy(position, 12, 14);
+    position = emit_frame_copy(position, 13, 15);
+    WideValue stride;
+    stride.low = 16; stride.mid = 1;
+    WideValue sixteen;
+    sixteen.mid = 17;
+    position = emit_portal_page_digit(position, 13, sixteen, kind, 0);
+    position = emit_portal_page_digit(position, 12, stride, kind, 0);
+    position = emit_constant(position, 10, 1);
+    position = emit_portal_payload_level(position, kind, 0);
+    position = emit_portal_page_digit(position, 14, stride, kind, 1);
+    position = emit_portal_page_digit(position, 15, sixteen, kind, 1);
+    position = emit_loop_close(position, 9);
+    position = emit_transfer(position, 5, 3, 0);
+    position = emit_transfer(position, 6, 4, 0);
+    return emit_move_to(position, 0);
+}
