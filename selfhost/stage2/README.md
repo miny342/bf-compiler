@@ -219,9 +219,16 @@ frameへmaterializeできる239 cell以下の値だけに対応する。旧第4�
 既存の`BFC_STAGE12_ERROR`によるエラー検出はそのまま利用できる。
 
 Continuationにはarena上の`NodeId`とは別に1始まりの密な16-bit dispatch IDを割り当てる。
+BF出力前に、継続数`N > 256`ならpage幅を`ceil(sqrt(N + 1))`へ均衡化し、
+dispatch IDをpage/slotへ再符号化する。0は予約し、IDの昇順と関数境界は維持する。
+profile headerも再符号化後のIDを使うため、異なる版のprofileは関数名で比較する。
+CIR出力はこのBF専用の再符号化を行わない。
 ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的countdownでdispatchし、
 caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
 dispatch cycle末までは`Pc`を0に保つ。
+dispatcherとarray portalのcountdownでは段の間に原点への往復を挟まず、`[-[-...`を生成する。
+これによりrepository interpreterのCountdown最適化が適用される。選択後のcaseから戻るときも、
+追跡済みのpointer位置から次のguardへ直接移動する。
 
 ### 整数幅とABIの制限
 

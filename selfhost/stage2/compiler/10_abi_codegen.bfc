@@ -24,6 +24,50 @@ cell stage8_frame_cells;
 cell stage8_outbox_base;
 cell stage8_outbox_cells;
 
+// Zero represents width 256. Keep small programs unchanged; for larger ones
+// choose ceil(sqrt(count + 1)) so both PC bytes and both countdowns fit.
+cell dispatch_page_width(NodeId count) {
+    if (count.page == 0 || (count.page == 1 && count.slot == 0)) {
+        return 0;
+    }
+    cell width = 16;
+    WideValue square;
+    square.mid = 1;
+    WideValue step = wide_from_cell(33);
+    while (square.mid < count.page
+        || (square.mid == count.page && square.low <= count.slot)) {
+        width += 1;
+        if (width == 0) {
+            return 0;
+        }
+        square = wide_add(square, step);
+        step = wide_add(step, wide_from_cell(2));
+    }
+    return width;
+}
+
+// Run once after lowering, before the BF profile header. Rewrite only the
+// backend's dispatch fields, keeping NodeId references and CIR unchanged.
+// IDs remain nonzero and increasing, including across function boundaries.
+void balance_dispatch_ids() {
+    cell width = dispatch_page_width(continuation_dispatch_id(last_continuation));
+    if (width == 0) {
+        return;
+    }
+    NodeId continuation = first_continuation;
+    NodeId id;
+    id.slot = 1;
+    while (!node_is_null(continuation)) {
+        set_continuation_dispatch_id(continuation, id);
+        continuation = node_next(continuation);
+        id.slot += 1;
+        if (id.slot == width) {
+            id.slot = 0;
+            id.page += 1;
+        }
+    }
+}
+
 cell physical_frame_slot(cell slot) {
     return FRAME_DATA_BASE + slot;
 }
@@ -496,7 +540,6 @@ cell emit_array_countdown_case(
         position, kind, data, base, element, storage, frame_cells
     );
     position = emit_loop_close(position, branch);
-    position = emit_move_to(position, 0);
     return position;
 }
 
@@ -520,7 +563,6 @@ cell emit_array_countdown_level(
     } else {
         position = emit_move_to(position, index_slot);
         compiler_output!('-');
-        position = emit_move_to(position, 0);
         position = emit_array_countdown_level(
             position,
             kind,
@@ -535,7 +577,6 @@ cell emit_array_countdown_level(
         );
     }
     position = emit_loop_close(position, index_slot);
-    position = emit_move_to(position, 0);
     position = emit_array_countdown_case(
         position,
         kind,
@@ -564,7 +605,6 @@ cell emit_array_page_countdown_case(
     position = emit_loop_open(position, FRAME_SCRATCH_3);
     position = emit_move_to(position, FRAME_SCRATCH_3);
     compiler_output!('-');
-    position = emit_move_to(position, 0);
     WideValue page_offset;
     page_offset.mid = page;
     cell remaining = 0xff;
@@ -585,7 +625,6 @@ cell emit_array_page_countdown_case(
         frame_cells
     );
     position = emit_loop_close(position, FRAME_SCRATCH_3);
-    position = emit_move_to(position, 0);
     return position;
 }
 
@@ -611,7 +650,6 @@ cell emit_array_page_countdown_level(
     } else {
         position = emit_move_to(position, high_slot);
         compiler_output!('-');
-        position = emit_move_to(position, 0);
         position = emit_array_page_countdown_level(
             position,
             kind,
@@ -628,7 +666,6 @@ cell emit_array_page_countdown_level(
         );
     }
     position = emit_loop_close(position, high_slot);
-    position = emit_move_to(position, 0);
     position = emit_array_page_countdown_case(
         position,
         kind,
@@ -968,7 +1005,6 @@ cell emit_countdown_case(cell position, NodeId continuation) {
     position = emit_dispatch_body(position, continuation);
     emit_profile_category!(1);
     position = emit_loop_close(position, FRAME_BRANCH);
-    position = emit_move_to(position, 0);
     return position;
 }
 
@@ -982,12 +1018,12 @@ cell emit_low_countdown_level(
     } else {
         position = emit_move_to(position, FRAME_PC_LOW);
         compiler_output!('-');
-        position = emit_move_to(position, 0);
+        // Keep adjacent decrements nested as [-[-... so the interpreter can
+        // fold the descent. Returning to the origin here inserts <> per level.
         NodeId next = node_next(continuation);
         position = emit_low_countdown_level(position, next, remaining - 1);
     }
     position = emit_loop_close(position, FRAME_PC_LOW);
-    position = emit_move_to(position, 0);
     return emit_countdown_case(position, continuation);
 }
 
@@ -1029,10 +1065,8 @@ cell emit_page_countdown_case(
     position = emit_loop_open(position, FRAME_BRANCH);
     position = emit_move_to(position, FRAME_BRANCH);
     compiler_output!('-');
-    position = emit_move_to(position, 0);
     position = emit_dispatch_page(position, first, after);
     position = emit_loop_close(position, FRAME_BRANCH);
-    position = emit_move_to(position, 0);
     return position;
 }
 
@@ -1047,16 +1081,14 @@ cell emit_page_countdown_level(
     } else {
         position = emit_move_to(position, FRAME_PC_HIGH);
         compiler_output!('-');
-        position = emit_move_to(position, 0);
         position = emit_page_countdown_level(position, after, remaining - 1);
     }
     position = emit_loop_close(position, FRAME_PC_HIGH);
-    position = emit_move_to(position, 0);
     return emit_page_countdown_case(position, first, after);
 }
 
-// continuationのdispatch IDは1から密に割り当てるため、low byteと
-// high byteの両方を比較scanなしのcountdownにできる。
+// Page numbers and the low bytes within each page are consecutive, including
+// after balancing, so both levels can use countdown without equality scans.
 cell emit_dispatch_countdown(cell position, NodeId first, NodeId last) {
     NodeId first_id = continuation_dispatch_id(first);
     NodeId last_id = continuation_dispatch_id(last);
@@ -1126,6 +1158,7 @@ void compile_program_stage12() {
     expand_ast_macros();
     analyze_ast_program();
     lower_ast_program();
+    balance_dispatch_ids();
     if (PROFILE_BF_OUTPUT) {
         emit_profile_header();
     }

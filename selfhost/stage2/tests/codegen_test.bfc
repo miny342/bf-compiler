@@ -15,3 +15,54 @@ void test_codegen() {
         && test_capture[6] == ']', 'y');
     expect_test(capture_is_brainfuck(), 'z');
 }
+
+void test_dispatch_encoding() {
+    NodeId count;
+    count.slot = 255;
+    expect_test(dispatch_page_width(count) == 0, 'D');
+    count.page = 1;
+    count.slot = 0;
+    expect_test(dispatch_page_width(count) == 0, 'D');
+    count.slot = 1;
+    expect_test(dispatch_page_width(count) == 17, 'D');
+    count.slot = 32;
+    expect_test(dispatch_page_width(count) == 17, 'D');
+    count.slot = 33;
+    expect_test(dispatch_page_width(count) == 18, 'D');
+    count.page = 254;
+    count.slot = 0;
+    expect_test(dispatch_page_width(count) == 255, 'D');
+    count.slot = 1;
+    expect_test(dispatch_page_width(count) == 0, 'D');
+    count.page = 255;
+    count.slot = 255;
+    expect_test(dispatch_page_width(count) == 0, 'D');
+
+    reset_ast_arena();
+    first_continuation = null_node();
+    last_continuation = null_node();
+    cell remaining = 255;
+    NodeId allocated;
+    while (remaining != 0) {
+        allocated = new_continuation();
+        remaining -= 1;
+    }
+    allocated = new_continuation();
+    allocated = new_continuation();
+    // 257 entries use width 17. Verify every ID, including zero low bytes,
+    // and ensure the null PC stays reserved.
+    balance_dispatch_ids();
+    NodeId continuation = first_continuation;
+    NodeId expected;
+    expected.slot = 1;
+    while (!node_is_null(continuation)) {
+        expect_test(node_equals(continuation_dispatch_id(continuation), expected), 'D');
+        continuation = node_next(continuation);
+        expected.slot += 1;
+        if (expected.slot == 17) {
+            expected.slot = 0;
+            expected.page += 1;
+        }
+    }
+    expect_test(expected.page == 15 && expected.slot == 3, 'D');
+}

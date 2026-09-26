@@ -113,13 +113,32 @@ def main():
             return paths, reports
 
         for example in sorted((ROOT / "selfhost/stage2/examples").glob("*.bfc")):
-            check(example.stem, example.read_bytes(), b"\x03\x02\x01")
+            # Keep every dynamic index in bounds when checking against Rust IR.
+            data = (b"\x02\x01\x02\x02" if example.stem == "stage11_dynamic_projection"
+                    else b"\x03\x02\x01")
+            expected = run([compiler, "--run-ir", str(example)], data).stdout
+            check(example.stem, example.read_bytes(), data, expected)
 
         page_source = (b"void main(){cell n=input();" + b"if(n){n-=1;}" * 140 + b"output(n);}")
         _, page_reports = check("dispatch-pages", page_source, b"\xff", bytes([115]))
         assert any(s["kind"] == "continuation" and int(s["attributes"]["continuation_id"]) >= 256
                    and s["counters"]["fast_operations"] > 0
                    for s in page_reports["counters"]["profile"]["sites"])
+
+        # Balanced PCs must survive calls/returns across pages, recursion and
+        # low-byte zero entries while keeping DBG2 function attribution valid.
+        recursive_source = ("".join(
+            f"cell f{i}(cell n){{if(n==0){{return {i % 256};}}"
+            f"return f{(i + 1) % 300}(n-1);}}" for i in range(300))
+            + "void main(){output(f0(255));output(f255(1));output(f299(2));}").encode()
+        _, recursive_reports = check("dispatch-calls", recursive_source,
+                                     expected=bytes((255, 0, 1)))
+        recursive_sites = recursive_reports["counters"]["profile"]["sites"]
+        executed_parents = {s["parent"] for s in recursive_sites
+                            if s["kind"] == "continuation" and s["counters"]["fast_operations"] > 0}
+        executed_functions = {s["label"] for s in recursive_sites
+                              if s["kind"] == "function" and s["id"] in executed_parents}
+        assert {"f0", "f255", "f256", "f299", "main"} <= executed_functions
 
         hot_source = b"""
 cell cold(cell n) { while (n != 0) { n -= 1; } return n; }

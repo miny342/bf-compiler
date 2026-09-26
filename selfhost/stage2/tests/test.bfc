@@ -120,6 +120,7 @@ void main() {
     test_compact_node_sizes();
     test_arena_page_boundary();
     test_continuation_dispatch_ids();
+    test_dispatch_encoding();
     test_ast_parser();
     test_stage6_arrays();
     test_stage7_globals();

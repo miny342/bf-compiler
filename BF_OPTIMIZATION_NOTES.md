@@ -9,6 +9,100 @@ BF IR peephole最適化とcontinuation dispatcherの二段countdownは採用済�
 lowering手法は未採用であり、実装時には生成BFの長さ、実行step、追加cell数を現在のloweringと
 比較してから選ぶ。
 
+## stage2 → stage3 のcountdown改善（2026-09-26）
+
+対象は`logs/full-selfhost-20260926-130528/tmp.tmp.bf`をBF interpreterで動かし、
+同directoryの`stage2-compiler.bfc`を再コンパイルする処理。
+stage1 → stage2のBF実行時間は測らず、新しいbackendの生成物は`--run-ir`で用意した。
+
+### 中断ログからの従来版の完走時間推計
+
+`tmp.metrics`の最後は実行4,140.002秒（69分）、出力74,569,124 byte。
+直近5/10/20/30分の出力速度は32,492 / 32,421 / 32,415 / 32,404 byte/sでほぼ一定だった。
+同じコンパイラソースの生成済みBFのサイズ277,758,822 byteを完走時の出力サイズと仮定すると、
+残りは約6,253〜6,270秒（1時間44分）、合計約2時間53分となる。
+出力が本格的に始まったのは31分のsnapshotであるため、69分全体の平均出力速度では外挿しない。
+これは後半の負荷と出力サイズが同程度という仮定を置く推計であり、完走の実測値ではない。
+算出値は`logs/stage3-dispatch-20260926/baseline-estimate.json`に保存した。
+
+### 原因と変更
+
+Rust interpreterの`fold_countdown`は`[-[-...`の隣接した減算をまとめる。
+従来のselfhost backendは段ごとにpointerを原点へ戻していたため、実際のBFが
+low byteでは`[-<>[-<>...`、high byteでは`[-<2>2[-<2>2...`となり、この最適化に入らなかった。
+Rust backendではBF IRの移動統合によりこの往復が残らない。
+
+`selfhost/stage2/compiler/10_abi_codegen.bfc`で、dispatcherとarray portalの両方について、
+段間の不要な往復を除去した。戻り側も既知のpointer位置から次のguardへ直接移動する。
+case本体でcontextが移動する既存のcall/return契約と、cycle末まで`Pc=0`を保つ契約は維持する。
+interpreter自体への変更やABI固有の特別扱いは追加していない。
+
+さらにRustの`DispatchEncoding`と同様に、継続数`N > 256`ではpage幅を
+`ceil(sqrt(N + 1))`にする。対象の5,482継続では256から75へ変わる。
+BF出力直前に既存のdispatch fieldを再符号化し、追加arena cellやruntime scratchは使わない。
+IDは非zero・昇順を維持し、profile headerも再符号化後に生成する。CIR出力には適用しない。
+65,025〜65,535継続では幅256になり、元の符号化をそのまま使う。
+Rust側にあるhidden portal優先配置は、このselfhost ABIには移植していない。
+
+### 固定ソースでの比較
+
+変更前の198,578 byteのcompiler sourceを両backendへの共通入力にして、
+コンパイラ本体のソース変更と生成BFの改善を区別した。
+各入力をbaseline → 改善版の順に3回ずつ交互にコンパイルし、1 ms sampling付きJSONの
+execute時間の中央値を比較した。巨大BFの読み込み・parse時間は含めない。
+すべての生成BFは変更前とbyte単位で一致し、最大pointerも一致した。
+
+| コンパイルする入力 | 従来(s) | 改善後(s) | 倍率 | native operations（従来 → 改善後） |
+|---|---:|---:|---:|---:|
+| hello | 0.1374 | 0.0580 | 2.37 | 33,531,682 → 12,639,306 |
+| stage8_aggregates | 1.6995 | 0.6481 | 2.62 | 414,068,345 → 154,357,527 |
+| stage11_dynamic_projection | 1.3269 | 0.5230 | 2.54 | 329,809,278 → 121,435,390 |
+
+compiler BFは277,758,822 → 253,642,596 byte（8.68%減）。dispatcherだけの往復除去では
+helloの単発測定が0.1382 → 0.0775秒、page均衡化まで加えると0.0651秒、
+array portalの往復除去も加えると0.0582秒だった。これら途中版の数値は各1回なので参考値。
+最終版の測定値は`logs/stage3-dispatch-20260926/benchmark.json`、artifactのサイズとSHA-256は
+同directoryの`artifacts.json`に保存した。
+
+同じ固定ソース版compilerへ元の198,578 byteのソース全体を入力した比較では、
+実行300秒時点の入力消費が74,299 → 145,158 byte（1.95倍）になった。
+両方とも出力はheaderの9 byteであり、この時点ではBF生成phaseに到達していない。
+改善版の上位sampleは`arena_cell_read`の91,895、`abi.dispatch.countdown`の79,257で、
+countdownは最大の単一siteではなくなった。これは異なる入力位置での累積snapshotなので、
+全実行の比率や完走の高速化率には換算しない。
+改善版は5分で意図的にSIGINT中断しており、stage2 → stage3の完走時間は未測定。
+経過は`fixed-source-progress.metrics`、比較値は`progress-comparison.json`に保存した。
+
+全18 exampleをRust IR実行の出力と照合し、markerなし・無視・sampling・countersでの一致を検証した。
+既存のpage境界、未選択関数に加えて、300関数の相互再帰とページをまたぐcall/returnの回帰を追加した。
+内部BFC testは`--run-ir --disable-function-inline`で`ok`。
+page幅は0〜65,535の全入力を独立した整数平方根計算とも照合した。
+更新済みcompilerをBFとして実行し、helloと300関数の入力から得るBFが`--run-ir`とbyte一致することも確認した。
+動的projectionのexampleは既存scriptの入力が範囲外だったため、添字を有効な範囲に修正して照合している。
+
+### 更新済みstage2の再実行
+
+更新済みソースと、それ自身を入力に`--run-ir`で生成したstage2は
+`logs/stage3-dispatch-20260926/compiler.bfc`と`stage2.bf`に保存した。
+このstage2は253,648,093 byteで、上表の固定ソース版とは別artifactである。
+stage2 → stage3を実行するコマンドは次のとおり。
+
+```sh
+run_dir=logs/stage3-dispatch-20260926
+target/release/bf-interpreter --unlimited-tape --accept-embedded-profile \
+  --profile-format json --profile-output "$run_dir/profile.json" \
+  --progress-interval 60s "$run_dir/stage2.bf" \
+  < "$run_dir/compiler.bfc" > "$run_dir/stage3.bf" 2> "$run_dir/stage3.metrics"
+```
+
+stage2を再生成するときも`metrics.sh`は不要である。
+
+```sh
+scripts/concat-stage2-compiler.sh profile > "$run_dir/compiler.bfc"
+target/release/bfc --run-ir --disable-function-inline --no-ir-transitions \
+  "$run_dir/compiler.bfc" < "$run_dir/compiler.bfc" > "$run_dir/stage2.bf"
+```
+
 ## BFCRLE v2 の十六進run count
 
 2026-09-21: selfhostの`compressed` entryは`@BFCRLE2;`と小文字の十六進run countを出力する。
