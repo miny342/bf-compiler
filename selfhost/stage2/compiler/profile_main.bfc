@@ -1,6 +1,6 @@
-// Same compiler and expanded BF commands as main; only the output encoding differs.
+// Compressed selfhost output with lightweight continuation/ABI profile comments.
 const cell COMPRESSED_BF_OUTPUT = 1;
-const cell PROFILE_BF_OUTPUT = 0;
+const cell PROFILE_BF_OUTPUT = 1;
 
 void read_character() {
     current_char = input();

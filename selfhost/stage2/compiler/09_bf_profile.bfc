@@ -1,0 +1,48 @@
+// BFCDBG2 records contain no BF commands. IDs and name bytes use hexadecimal.
+// P0: continuation body, P1: shared dispatcher, P2: compare, P3: call, P4: return.
+macro emit_profile_category(category) {
+    if (PROFILE_BF_OUTPUT) {
+        compiler_output!('@'); compiler_output!('P');
+        compiler_output!('0' + category); compiler_output!(';');
+    }
+}
+
+macro emit_profile_continuation(continuation) {
+    if (PROFILE_BF_OUTPUT) {
+        NodeId id = continuation_dispatch_id(continuation);
+        compiler_output!('@'); compiler_output!('C');
+        emit_hex_byte!(id.page, 1);
+        emit_hex_byte!(id.slot, 1);
+        compiler_output!(';');
+    }
+}
+
+void emit_profile_header() {
+    compiler_output!('@'); compiler_output!('B'); compiler_output!('F');
+    compiler_output!('C'); compiler_output!('D'); compiler_output!('B');
+    compiler_output!('G'); compiler_output!('2'); compiler_output!(';');
+    NodeId function = first_function;
+    while (!node_is_null(function)) {
+        NodeId entry = continuation_dispatch_id(node_a(node_c(function)));
+        compiler_output!('@'); compiler_output!('F');
+        emit_hex_byte!(entry.page, 1);
+        emit_hex_byte!(entry.slot, 1);
+        compiler_output!(':');
+        NodeId name = node_name(function);
+        NodeId byte = node_a(name);
+        cell remaining = node_value(name);
+        while (remaining != 0) {
+            cell character = arena_cell_read(byte);
+            emit_hex_byte!(character, 1);
+            remaining -= 1;
+            if (remaining != 0) {
+                byte = arena_advance(byte, 1);
+            }
+        }
+        compiler_output!(';');
+        function = node_next(function);
+    }
+    compiler_output!('@'); compiler_output!('E'); compiler_output!('N');
+    compiler_output!('D'); compiler_output!('D'); compiler_output!('B');
+    compiler_output!('G'); compiler_output!(';');
+}

@@ -1,4 +1,4 @@
-//! Shared version 1 schema and validation for BFC Brainfuck profile maps.
+//! Shared schemas and validation for BFC Brainfuck profile maps.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error as StdError;
@@ -6,13 +6,17 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+mod compact;
 pub mod rle;
 
-/// The required marker in every version 1 profile-map artifact.
+/// The required marker in every profile-map artifact.
 pub const PROFILE_MAP_FORMAT: &str = "bfc-bf-profile-map";
 
-/// The profile-map schema version implemented by this crate.
+/// The legacy profile-map schema version emitted by the Rust compiler.
 pub const PROFILE_MAP_VERSION: u32 = 1;
+
+/// Compact embedded profiles identify the encoded artifact, without expanding runs.
+pub const ENCODED_PROFILE_MAP_VERSION: u32 = 2;
 
 /// An artifact-local identifier for a profile site. Site zero is the root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -89,11 +93,28 @@ impl<'de> Deserialize<'de> for Fnv1a64 {
     }
 }
 
-/// Identity of the command-only Brainfuck instruction stream.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BfHashKind {
+    #[default]
+    ExpandedBf,
+    EncodedSource,
+}
+
+impl BfHashKind {
+    fn is_expanded(&self) -> bool {
+        *self == Self::ExpandedBf
+    }
+}
+
+/// Expanded instruction count and a hash whose domain is explicitly identified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BfIdentity {
     pub instruction_count: u64,
     pub fnv1a64: Fnv1a64,
+    /// Omitted in legacy v1 maps, which hash the expanded command stream.
+    #[serde(default, skip_serializing_if = "BfHashKind::is_expanded")]
+    pub hash_kind: BfHashKind,
 }
 
 /// Versioned sidecar profile metadata for a Brainfuck artifact.
@@ -306,13 +327,20 @@ impl ProfileMap {
                 found: self.format.clone(),
             });
         }
-        if self.version != PROFILE_MAP_VERSION {
+        if !matches!(
+            (self.version, self.bf.hash_kind),
+            (PROFILE_MAP_VERSION, BfHashKind::ExpandedBf)
+                | (ENCODED_PROFILE_MAP_VERSION, BfHashKind::EncodedSource)
+        ) {
             return Err(ProfileMapError::UnsupportedVersion {
                 found: self.version,
             });
         }
-        let actual =
-            try_bf_identity(source).map_err(|e| ProfileMapError::InvalidEncoding(e.to_string()))?;
+        let actual = match self.bf.hash_kind {
+            BfHashKind::ExpandedBf => try_bf_identity(source),
+            BfHashKind::EncodedSource => try_encoded_identity(source),
+        }
+        .map_err(|e| ProfileMapError::InvalidEncoding(e.to_string()))?;
         if self.bf != actual {
             return Err(ProfileMapError::IdentityMismatch {
                 expected: self.bf,
@@ -320,6 +348,10 @@ impl ProfileMap {
             });
         }
 
+        self.validate_structure()
+    }
+
+    fn validate_structure(&self) -> Result<(), ProfileMapError> {
         let mut files = HashSet::new();
         for file in &self.files {
             if !files.insert(file.id) {
@@ -457,6 +489,24 @@ pub fn try_bf_identity(source: &[u8]) -> Result<BfIdentity, rle::RleError> {
     Ok(BfIdentity {
         instruction_count,
         fnv1a64: Fnv1a64(hash),
+        hash_kind: BfHashKind::ExpandedBf,
+    })
+}
+
+/// O(encoded bytes + runs), independent of the expanded instruction count.
+pub fn try_encoded_identity(source: &[u8]) -> Result<BfIdentity, rle::RleError> {
+    let mut instruction_count = 0;
+    for run in rle::Runs::new(source) {
+        instruction_count += run?.count as u64;
+    }
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in source {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Ok(BfIdentity {
+        instruction_count,
+        fnv1a64: Fnv1a64(hash),
+        hash_kind: BfHashKind::EncodedSource,
     })
 }
 
@@ -538,6 +588,12 @@ pub fn embed_profile_markers(
     source: &str,
     map: &ProfileMap,
 ) -> Result<String, EmbeddedProfileError> {
+    // This encoder writes DBG1 and preserves its expanded-stream identity.
+    if map.version != PROFILE_MAP_VERSION {
+        return Err(EmbeddedProfileError::Map(
+            ProfileMapError::UnsupportedVersion { found: map.version },
+        ));
+    }
     map.validate_for_source(source.as_bytes())
         .map_err(EmbeddedProfileError::Map)?;
     let compressed = rle::compressed(source.as_bytes());
@@ -599,9 +655,15 @@ pub fn embed_profile_markers(
     Ok(output)
 }
 
-/// Decode embedded v1 markers. `Ok(None)` means no header: `@P` remains an
+/// Decode embedded v1/v2 markers. `Ok(None)` means no header: `@P` remains an
 /// ordinary comment in that case.
 pub fn embedded_profile_map(source: &[u8]) -> Result<Option<ProfileMap>, EmbeddedProfileError> {
+    if let Some(header) = source
+        .windows(compact::HEADER.len())
+        .position(|s| s == compact::HEADER)
+    {
+        return compact::decode(source, header).map(Some);
+    }
     // Validate counts before walking marker ranges, including cumulative overflow.
     for run in rle::Runs::new(source) {
         run.map_err(|_| EmbeddedProfileError::MalformedMarker)?;
@@ -799,6 +861,7 @@ mod tests {
         let map = valid_map(b"+");
         let json = map.to_json_pretty().unwrap();
         assert!(json.contains("\"fnv1a64\": \"af63"));
+        assert!(!json.contains("hash_kind"));
         assert_eq!(ProfileMap::from_json(&json).unwrap(), map);
         assert!(ProfileMap::from_json(r#"{"fnv1a64":"AF63BD4C8601B7DF"}"#).is_err());
     }

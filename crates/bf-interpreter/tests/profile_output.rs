@@ -82,3 +82,46 @@ fn profile_output_does_not_overwrite_canonical_input_path() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("must not overwrite"));
     assert_eq!(fs::read(&program).expect("read program"), b"+");
 }
+
+#[test]
+fn compact_profile_defaults_to_sampling_and_reports_function_sizes() {
+    let directory = TemporaryDirectory::new();
+    let program = directory.path().join("program.bf");
+    let report = directory.path().join("profile.json");
+    fs::write(
+        &program,
+        b"@BFCRLE2;@BFCDBG2;@F0001:6d61696e;@ENDDBG;@C0001;+10.",
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_bf-interpreter"))
+        .args([
+            "--no-progress",
+            "--accept-embedded-profile",
+            "--profile-format",
+            "json",
+            "--profile-output",
+        ])
+        .arg(&report)
+        .arg(&program)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, [16]);
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(report["version"], 2);
+    assert_eq!(report["artifact"]["hash_kind"], "encoded_source");
+    assert_eq!(report["artifact"]["instruction_count"], 17);
+    assert_eq!(report["profile"]["sampling_interval_ns"], 1_000_000);
+    let sites = report["profile"]["sites"].as_array().unwrap();
+    let function = sites.iter().find(|s| s["kind"] == "function").unwrap();
+    assert_eq!(function["label"], "main");
+    assert_eq!(function["static_bf_instructions"], 0);
+    assert_eq!(function["inclusive_static_bf_instructions"], 17);
+    let continuation = sites.iter().find(|s| s["kind"] == "continuation").unwrap();
+    assert_eq!(continuation["static_bf_instructions"], 17);
+    assert_eq!(continuation["parent"], function["id"]);
+}

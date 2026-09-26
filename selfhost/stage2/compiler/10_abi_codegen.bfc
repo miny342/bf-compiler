@@ -712,6 +712,11 @@ cell emit_array_instruction(cell position, NodeId instruction) {
 
 cell emit_ir_instruction(cell position, NodeId instruction) {
     cell kind = node_tag(instruction);
+    if (PROFILE_BF_OUTPUT) {
+        if (kind >= IR_LESS && kind <= IR_NOT_EQUAL) {
+            emit_profile_category!(2);
+        }
+    }
     cell destination = physical_frame_slot(node_value(instruction));
     cell source = physical_frame_slot(instruction_source(instruction));
     if (kind == IR_SET) {
@@ -795,6 +800,11 @@ cell emit_ir_instruction(cell position, NodeId instruction) {
         fail('H', 'R');
     }
     position = emit_move_to(position, 0);
+    if (PROFILE_BF_OUTPUT) {
+        if (kind >= IR_LESS && kind <= IR_NOT_EQUAL) {
+            emit_profile_category!(0);
+        }
+    }
     return position;
 }
 
@@ -923,8 +933,10 @@ cell emit_continuation_terminator(cell position, NodeId continuation) {
         position = emit_constant(position, FRAME_NEXT_PC_HIGH, then_id.page);
         position = emit_loop_close(position, condition);
     } else if (kind == TERM_CALL) {
+        emit_profile_category!(3);
         position = emit_call_terminator(position, continuation);
     } else if (kind == TERM_RETURN || kind == TERM_RETURN_ARRAY) {
+        emit_profile_category!(4);
         position = emit_return_terminator(position, continuation);
     } else if (kind == TERM_HALT) {
         position = emit_clear(position, FRAME_ACTIVE);
@@ -952,7 +964,9 @@ cell emit_countdown_case(cell position, NodeId continuation) {
     position = emit_move_to(position, FRAME_BRANCH);
     compiler_output!('-');
     position = emit_move_to(position, 0);
+    emit_profile_continuation!(continuation);
     position = emit_dispatch_body(position, continuation);
+    emit_profile_category!(1);
     position = emit_loop_close(position, FRAME_BRANCH);
     position = emit_move_to(position, 0);
     return position;
@@ -1098,6 +1112,7 @@ cell emit_continuation_program(cell position) {
 
     NodeId first = first_continuation;
     NodeId last = last_continuation;
+    emit_profile_category!(1);
     position = emit_dispatch_countdown(position, first, last);
     position = emit_transfer(position, FRAME_NEXT_PC_LOW, FRAME_PC_LOW, 0);
     position = emit_transfer(position, FRAME_NEXT_PC_HIGH, FRAME_PC_HIGH, 0);
@@ -1111,6 +1126,9 @@ void compile_program_stage12() {
     expand_ast_macros();
     analyze_ast_program();
     lower_ast_program();
+    if (PROFILE_BF_OUTPUT) {
+        emit_profile_header();
+    }
     cell position;
     position = emit_continuation_program(position);
 }

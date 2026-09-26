@@ -1153,17 +1153,18 @@ fn parse_optimized_with_flags(
 }
 
 fn profile_range_slots(map: &ProfileMap) -> Vec<u32> {
-    map.ranges
+    let slots: std::collections::HashMap<_, _> = map
+        .sites
         .iter()
-        .map(|range| {
-            map.sites
-                .iter()
-                .position(|site| site.id == range.site)
-                .expect("validated profile range references a known site")
-                .try_into()
-                .expect("profile site count fits in u32")
+        .enumerate()
+        .map(|(slot, site)| {
+            (
+                site.id,
+                u32::try_from(slot).expect("profile site count fits in u32"),
+            )
         })
-        .collect()
+        .collect();
+    map.ranges.iter().map(|range| slots[&range.site]).collect()
 }
 
 fn resolved_profile_site(
@@ -2642,6 +2643,86 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn compact_profiles_preserve_optimizations_and_skip_unselected_bodies() {
+        let source = b"@BFCRLE2;@BFCDBG2;@F0001:686f74;@F0002:636f6c64;@ENDDBG;\
+            @P1;+@C0001;+3@P2;[->+<]@P0;>.@P1;>[@C0002;+.@P1;]";
+        let map = bf_profiling::embedded_profile_map(source).unwrap().unwrap();
+        let baseline = run_with_stats(source, b"").unwrap();
+        assert_eq!(baseline.output, [4]);
+        for mode in [
+            ProfileMode::Counters,
+            ProfileMode::Exact,
+            ProfileMode::Sample {
+                interval: Duration::from_millis(1),
+            },
+        ] {
+            let result = run_with_options(
+                source,
+                b"",
+                RunOptions {
+                    profile: Some(ProfileOptions {
+                        map: map.clone(),
+                        mode,
+                    }),
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.output, baseline.output);
+            assert_eq!(result.stats, baseline.stats);
+            let profile = result.profile.unwrap();
+            let cold = map
+                .sites
+                .iter()
+                .find(|s| s.stable_key == "function.1.continuation.2")
+                .unwrap();
+            assert_eq!(
+                profile
+                    .sites
+                    .iter()
+                    .find(|s| s.site == cold.id)
+                    .unwrap()
+                    .counters
+                    .fast_operations,
+                0
+            );
+            if mode == ProfileMode::Counters {
+                let compare = map
+                    .sites
+                    .iter()
+                    .find(|s| s.stable_key == "abi.frame.compare")
+                    .unwrap();
+                assert_eq!(
+                    profile
+                        .sites
+                        .iter()
+                        .find(|s| s.site == compare.id)
+                        .unwrap()
+                        .counters
+                        .transfer_loops,
+                    1
+                );
+            }
+        }
+        let source = b"@BFCRLE2;@BFCDBG2;@ENDDBG;@C0001;+10000000000";
+        let map = bf_profiling::embedded_profile_map(source).unwrap().unwrap();
+        let result = run_with_options(
+            source,
+            b"",
+            RunOptions {
+                profile: Some(ProfileOptions {
+                    map,
+                    mode: ProfileMode::Counters,
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.stats.executed_instructions, 1 << 40);
+        assert_eq!(result.stats.optimization.executed_native_operations, 1);
     }
 
     #[test]

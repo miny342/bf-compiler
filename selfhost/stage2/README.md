@@ -22,6 +22,7 @@
 - `compiler/07_macro_expansion.bfc`: block macroの検証、衛生的AST複製、nested展開
 - `compiler/08_semantic.bfc`: nominal型layout、function収集、名前解決、型検査
 - `compiler/09_continuation_ir.bfc`: typed ASTからContinuation IRへのlowering
+- `compiler/09_bf_profile.bfc`: 軽量BFCDBG2の関数名・continuation・ABIマーカー
 - `compiler/10_abi_codegen.bfc`: static global、array portal、uniform frame、aggregate outbox ABI
 - `compiler/main.bfc`: production標準入出力とentry point
 
@@ -51,7 +52,7 @@ RemoteTransferを使わないBF処理系向けに、値の分解で往復のBF�
 この指定はRustが生成するBFにだけ適用し、stage2コンパイラ自身のbackendや
 配列offset/windowのbase-16移動には影響しない。
 コンパイラ実行のprofile mapと、生成されたプログラムのmapは別物である。
-セルフホスト版はinline-profile markerを生成せず、既存のprofile形式を変更しない。
+`main`/`compressed`はprofile markerを生成しない。生成BFを計測するときは、以下の`profile` entryを使う。
 入力は引き続きBFCソースであり、BFCRLEをBFCとして再入力するものではない。
 `main`で通常BFを、`cir`でbinary CIRを出す経路も引き続き使用できる。
 
@@ -61,6 +62,81 @@ RemoteTransferを使わないBF処理系向けに、値の分解で往復のBF�
 到達可能性に関与しないため除外する。`test` entryだけは旧回帰を維持するためこれらも連結する。
 `cir` entryではBF primitive・serializer・ABI backendも除外し、使わないBF出力処理を
 コンパイラ自身の入力に含めない。
+
+### selfhostが生成するBFの軽量profile
+
+`profile` entryはBFCRLE2圧縮とBFCDBG2コメントを一緒に出力する。
+Rustの`--run-ir`でBFC製コンパイラを実行しても、BFを生成するのはselfhost backendである。
+Rust製backendのprofile mapや行番号情報は必要ない。
+
+```sh
+run_dir=$(mktemp -d ./tmp/selfhost-profile.XXXXXX)
+scripts/concat-stage2-compiler.sh profile > "$run_dir/compiler.bfc"
+target/release/bfc --run-ir --disable-function-inline "$run_dir/compiler.bfc" \
+  < selfhost/stage2/examples/stage5_functions.bfc > "$run_dir/program.bf"
+target/release/bf-interpreter --accept-embedded-profile \
+  --profile-format json --profile-output "$run_dir/profile.json" \
+  --progress-interval 10s "$run_dir/program.bf" < /dev/null
+python3 scripts/summarize-selfhost-profile.py --report "$run_dir/profile.json" \
+  --output "$run_dir/summary.txt"
+```
+
+`--disable-function-inline`は繰り返し検証時のRust側lowering時間を抑える指定で、selfhost backendの
+生成命令列には影響しない。
+コンパイラ自体をBFとして動かす場合も、同じ`compiler.bfc`をRustの`--compressed-bf`
+でコンパイルし、そのBFへ対象ソースを入力すればよい。巨大なコンパイラ/対象には
+従来どおり`--unlimited-tape`を付ける。
+
+BFCDBG2では既定で1 ms samplingを使う。`--profile-mode counters`/`exact`も指定できるが、
+まずsamplingで候補を探し、小さい入力で詳細counterを取る。
+sampleの時間はRust interpreter上の推定時間であり、展開BF命令数の多さとは異なる。
+JSONの各siteには`static_bf_instructions`（直接帰属する静的命令数）と
+`inclusive_static_bf_instructions`（子も含む静的命令数）を載せる。
+関数/continuationのinclusive時間は生成コードの階層を集計した値で、calleeの実行時間を含む
+call-stack profileではない。IDはartifact内だけで有効で、異なるcompiler版では関数名も確認する。
+
+periodic/SIGINT時の`bf-progress-hot`には関数名も表示する。中断時はstderrのsnapshotを利用する。
+通常の最終JSONは完走時だけ保存されるため、途中の上位を全実行の比率とは扱わない。
+
+形式は以下の通り。すべてBF命令を含まないコメントで、opt-inなしでも命令列は変わらない。
+
+| record | 意味 |
+|---|---|
+| `@BFCDBG2;` | optional BFCRLE header直後のprofile header |
+| `@Fhhhh:hex_utf8_name;` | 関数entryの16-bit continuation IDと関数名。関数ごとに一度 |
+| `@ENDDBG;` | 関数定義の終わり。関数定義は省略可能 |
+| `@Chhhh;` | continuationの本体へ切り替え。IDは非ゼロの4桁16進 |
+| `@P0;` | 現在のcontinuation本体へ戻す。contextがなければroot |
+| `@P1;` | 共通dispatcher/countdown。continuation contextも解除 |
+| `@P2;` | 現在のcontinuation配下のcompare |
+| `@P3;` | 現在のcontinuation配下のcall |
+| `@P4;` | 現在のcontinuation配下のreturn |
+
+関数entryはID空間を区切る。BF上のcase出力順には依存しない。caseのguardと選択処理は
+dispatcher、本体とterminatorはcontinuationへ帰属させ、未選択caseを実行したとは数えない。
+最適化で複数siteが統合された命令は従来どおり共通祖先へ帰属し、
+`mixed_provenance_native_operations`で確認できる。`profile_block_executions`はcontinuation呼出回数ではない。
+
+BFCDBG2から作る内部map/reportはversion 2で、`hash_kind: "encoded_source"`のFNV-1aを使う。
+命令数は展開後の値だが、hashはコメントと圧縮headerを含むファイルの全byteを対象とする。
+これにより読み込み/検証は圧縮byte数とrun数に比例し、長いrunを展開しない。
+従来のsidecar/DBG1はversion 1、`expanded_bf`のidentityを維持する。両者のhashは比較できない。
+
+検証は次のコマンドで行う。全exampleの生成命令列・実行結果・最適化counter、未選択関数、
+256をまたぐcontinuation ID、既定samplingを確認する。オプションで実行overheadと、
+BF上で動くコンパイラとの一致も調べる。`--output-dir <新しいdirectory>`で生成物とJSONを保存できる。
+
+```sh
+python3 scripts/verify-selfhost-profile.py \
+  --compiler target/release/bfc --interpreter target/release/bf-interpreter \
+  --benchmark --bf-bootstrap
+```
+
+2026-09-26の小規模検証では、hot loopのexecute中央値（5回）は計測なし0.504秒、sampling付き
+0.550秒（約9.0%増）だった。BF上でのコンパイル自体のexecute中央値（3回）は、markerなし/ありで
+helloが0.02931/0.02979秒、stage5_functionsが0.17440/0.17693秒（約1.5〜1.6%増）。
+全18 exampleと追加fixtureで生成命令列・実行結果・最適化counterを確認した。
+これは小さい入力での結果であり、full selfhostのoverheadを示すものではない。
 
 ## BFCで記述した内部テスト
 

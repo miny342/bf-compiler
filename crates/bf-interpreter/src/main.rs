@@ -148,9 +148,17 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
-    let profile = profile_map.map(|map| ProfileOptions {
-        map,
-        mode: options.profile_mode.unwrap_or(ProfileMode::Counters),
+    let profile = profile_map.map(|map| {
+        let mode = options.profile_mode.unwrap_or_else(|| {
+            if map.bf.hash_kind == bf_profiling::BfHashKind::EncodedSource {
+                ProfileMode::Sample {
+                    interval: Duration::from_millis(1),
+                }
+            } else {
+                ProfileMode::Counters
+            }
+        });
+        ProfileOptions { map, mode }
     });
     let report_map = profile.as_ref().map(|profile| profile.map.clone());
     let progress = if options.progress_enabled {
@@ -500,7 +508,7 @@ fn print_progress(snapshot: &ProgressSnapshot, map: Option<&ProfileMap>) {
         let metadata = map.and_then(|map| map.sites.iter().find(|site| site.id == hot.site));
         let context = profile_context(map, hot.site).unwrap_or("none");
         eprintln!(
-            "bf-progress-hot rank={} site={} key={} context={} samples={} fast_operations={} raw_bf_instructions={} pointer_distance={}",
+            "bf-progress-hot rank={} site={} key={} context={} samples={} fast_operations={} raw_bf_instructions={} pointer_distance={} function={:?}",
             rank + 1,
             hot.site.0,
             metadata.map_or("unknown", |site| site.stable_key.as_str()),
@@ -509,6 +517,7 @@ fn print_progress(snapshot: &ProgressSnapshot, map: Option<&ProfileMap>) {
             hot.counters.fast_operations,
             hot.counters.raw_bf_instructions,
             hot.counters.pointer_distance,
+            profile_function_name(map, hot.site).unwrap_or("none"),
         );
     }
 }
@@ -523,6 +532,22 @@ fn profile_context(map: Option<&ProfileMap>, site: bf_interpreter::ProfileSiteId
             || metadata.stable_key.starts_with("abi.portal.router.global.")
         {
             return Some(metadata.stable_key.as_str());
+        }
+        current = metadata.parent;
+    }
+    None
+}
+
+fn profile_function_name(
+    map: Option<&ProfileMap>,
+    site: bf_interpreter::ProfileSiteId,
+) -> Option<&str> {
+    let map = map?;
+    let mut current = Some(site);
+    while let Some(id) = current {
+        let metadata = map.sites.iter().find(|metadata| metadata.id == id)?;
+        if metadata.kind == "function" {
+            return Some(&metadata.label);
         }
         current = metadata.parent;
     }
@@ -575,6 +600,7 @@ fn render_text_report(
     let mut output = String::new();
     output.push_str("profile artifact\n");
     output.push_str(&format!("mode={mode}\n"));
+    output.push_str(&format!("hash_kind={:?}\n", map.bf.hash_kind));
     output.push_str(&format!("source_read_ns={}\n", cli.source_read.as_nanos()));
     output.push_str(&format!(
         "profile_map_read_ns={}\n",
@@ -638,6 +664,7 @@ fn render_json_report(
 ) -> Result<String, serde_json::Error> {
     let timings = result.timings.unwrap_or_default();
     let inclusive = inclusive_durations(profile, map);
+    let static_counts = static_instruction_counts(map);
     let attributed_duration_ns = profile
         .sites
         .iter()
@@ -660,6 +687,8 @@ fn render_json_report(
                 "label": metadata.label,
                 "source": metadata.source,
                 "attributes": metadata.attributes,
+                "static_bf_instructions": static_counts[&site.site.0].0,
+                "inclusive_static_bf_instructions": static_counts[&site.site.0].1,
                 "exclusive_duration_ns": duration_json(site.exclusive_time),
                 "inclusive_duration_ns": duration_json(inclusive[&site.site.0]),
                 "wall_percent": duration_percent(
@@ -679,13 +708,14 @@ fn render_json_report(
         .collect::<Vec<_>>();
     let report = json!({
         "format": "bfc-bf-profile-report",
-        "version": 1,
+        "version": if map.bf.hash_kind == bf_profiling::BfHashKind::EncodedSource { 2 } else { 1 },
         "interpreter": {
             "package_version": env!("CARGO_PKG_VERSION"),
         },
         "artifact": {
             "instruction_count": map.bf.instruction_count,
             "fnv1a64": format!("{:016x}", map.bf.fnv1a64.0),
+            "hash_kind": map.bf.hash_kind,
             "files": map.files,
         },
         "phase_timings_ns": {
@@ -731,6 +761,21 @@ fn render_json_report(
         json.push('\n');
         json
     })
+}
+
+fn static_instruction_counts(map: &ProfileMap) -> BTreeMap<u32, (u64, u64)> {
+    let parents: BTreeMap<_, _> = map.sites.iter().map(|s| (s.id, s.parent)).collect();
+    let mut result: BTreeMap<_, _> = map.sites.iter().map(|s| (s.id.0, (0, 0))).collect();
+    for range in &map.ranges {
+        let count = range.end - range.start;
+        result.get_mut(&range.site.0).unwrap().0 += count;
+        let mut current = Some(range.site);
+        while let Some(id) = current {
+            result.get_mut(&id.0).unwrap().1 += count;
+            current = parents[&id];
+        }
+    }
+    result
 }
 
 fn inclusive_durations(profile: &ProfileResult, map: &ProfileMap) -> BTreeMap<u32, Duration> {
@@ -786,7 +831,7 @@ fn render_site_children(
             ""
         };
         output.push_str(&format!(
-            "{}{} [{}] inclusive_ns={} exclusive_ns={} percent={percent:.2} attributed_percent={attributed_percent:.2} samples={} fast={} raw={} rle={} entries={}{}\n",
+            "{}{} [{}] inclusive_ns={} exclusive_ns={} percent={percent:.2} attributed_percent={attributed_percent:.2} samples={} fast={} raw={} rle={} entries={}{} label={:?}\n",
             "  ".repeat(depth),
             metadata.stable_key,
             metadata.kind,
@@ -798,6 +843,7 @@ fn render_site_children(
             site.counters.rle_instructions,
             site.profile_block_executions,
             confidence,
+            metadata.label,
         ));
         render_site_children(
             Some(metadata.id),

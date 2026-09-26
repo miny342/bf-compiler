@@ -148,8 +148,12 @@ def main():
     source_rows = aggregate_sources(args.report, report, sites)
     names = {}
     source_path = next(iter(source_file_paths(args.report, report).values()), None)
-    if args.ir.exists():
+    if report.get("version", 1) == 1 and args.ir.exists():
         names = dict(re.findall(r"^FUNCTION (\d+) (\S+)", args.ir.read_text(), re.M))
+    for site in sites:
+        match = re.fullmatch(r"function\.(\d+)", site["stable_key"])
+        if site["kind"] == "function" and match and site.get("attributes", {}).get("name"):
+            names[match[1]] = site["attributes"]["name"]
 
     lines = []
     write = lines.append
@@ -167,6 +171,7 @@ def main():
     write(f"Output write: {report['phase_timings_ns']['output_write'] / 1e9:.3f} seconds")
     write(f"Artifact instructions: {report['artifact']['instruction_count']}")
     write(f"Artifact FNV-1a: {report['artifact']['fnv1a64']}")
+    write(f"Hash kind: {report['artifact'].get('hash_kind', 'expanded_bf')}")
     write(f"Sampling interval: {report['profile']['sampling_interval_ns'] / 1e6:.3f} ms")
     write(f"Total samples: {report['profile']['total_samples']}")
     write(f"Profile sites: {len(sites)}")

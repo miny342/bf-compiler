@@ -1,6 +1,7 @@
 // productionのmain.bfcと差し替えるtest entry。
 
 const cell COMPRESSED_BF_OUTPUT = 0;
+const cell PROFILE_BF_OUTPUT = 0;
 
 void read_character() {
     current_char = 0;
