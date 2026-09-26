@@ -75,6 +75,11 @@ void read_character() {
             current_char = stage13_wide_layout_test_source[test_input_position];
             test_input_position += 1;
         }
+    } else if (test_input_kind == 15) {
+        if (test_input_position < len(stage7_global_layout_test_source)) {
+            current_char = stage7_global_layout_test_source[test_input_position];
+            test_input_position += 1;
+        }
     }
 }
 
@@ -124,6 +129,7 @@ void main() {
     test_ast_parser();
     test_stage6_arrays();
     test_stage7_globals();
+    test_stage7_global_layout();
     test_stage8_aggregates();
     test_stage9_types();
     test_stage10_compile_time();

@@ -1,4 +1,5 @@
 cell[] stage7_global_test_source = "cell total=1;cell[4] shared;cell bump(cell value){total+=value;return total;}void main(){cell[4] local;cell index=input();shared[index]=bump(2);local[index]=shared[index];output(local[index]);}";
+cell[] stage7_global_layout_test_source = "struct Pair{cell left;cell right;}cell first;cell[32] large;Pair small;cell[4] small_array;cell[64] token_buffer;cell last;void main(){}";
 
 void test_stage7_globals() {
     reset_test_input(8);
@@ -15,8 +16,8 @@ void test_stage7_globals() {
     analyze_ast_program();
     expect_test(stage7_static_cells.low == 5
         && stage7_static_cells.mid == 0 && stage7_static_cells.high == 0
-        && arena_read(scalar_global, FIELD_C_PAGE) == 0
-        && arena_read(array_global, FIELD_C_PAGE) == 1, 'N');
+        && arena_read(array_global, FIELD_C_PAGE) == 0
+        && arena_read(scalar_global, FIELD_C_PAGE) == 4, 'N');
 
     NodeId main = node_next(first_function);
     NodeId local = node_a(node_b(main));
@@ -42,4 +43,29 @@ void test_stage7_globals() {
         instruction = node_next(instruction);
     }
     expect_test(saw_initializer_store && saw_explicit_zero, 'F');
+}
+
+void test_stage7_global_layout() {
+    reset_test_input(15);
+    parse_ast_program();
+
+    NodeId first = first_global;
+    NodeId large = node_next(first);
+    NodeId small = node_next(large);
+    NodeId small_array = node_next(small);
+    NodeId token_buffer = node_next(small_array);
+    NodeId last = node_next(token_buffer);
+
+    analyze_ast_program();
+    // Large aggregate first; the hot 64-cell token buffer remains at the
+    // large-region tail; small aggregates follow in reverse declaration
+    // order; scalars remain declaration-ordered at the anchor side.
+    expect_test(stage7_static_cells.low == 104
+        && stage7_static_cells.mid == 0 && stage7_static_cells.high == 0
+        && arena_read(large, FIELD_C_PAGE) == 0
+        && arena_read(token_buffer, FIELD_C_PAGE) == 32
+        && arena_read(small_array, FIELD_C_PAGE) == 96
+        && arena_read(small, FIELD_C_PAGE) == 100
+        && arena_read(first, FIELD_C_PAGE) == 102
+        && arena_read(last, FIELD_C_PAGE) == 103, 'G');
 }

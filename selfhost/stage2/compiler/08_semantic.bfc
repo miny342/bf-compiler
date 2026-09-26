@@ -115,6 +115,102 @@ void set_global_cells(NodeId global, WideValue cells) {
     arena_write(global, FIELD_DISPATCH_HIGH, cells.high);
 }
 
+// Match the Rust static layout's one-payload-chunk cutoff. The selfhost
+// backend keeps logical global cells packed, so this changes only the order
+// in which bases are assigned; physical portal expansion remains in the ABI
+// codegen.
+cell global_is_small_aggregate(NodeId global) {
+    if (!type_is_aggregate(node_b(global))) {
+        return 0;
+    }
+    WideValue cells = global_cells(global);
+    return cells.high == 0 && cells.mid == 0 && cells.low <= 16;
+}
+
+cell global_matches_layout_group(NodeId global, cell group) {
+    cell aggregate = type_is_aggregate(node_b(global));
+    if (group == 2) {
+        return !aggregate;
+    }
+    cell small = aggregate && global_is_small_aggregate(global);
+    if (group == 0) {
+        return aggregate && !small;
+    }
+    return small;
+}
+
+cell global_is_hot_token_buffer(NodeId global) {
+    WideValue cells = global_cells(global);
+    return cells.low == MAX_NAME && cells.mid == 0 && cells.high == 0;
+}
+
+// Small aggregates use reverse declaration order like StaticLayout. Large
+// aggregates retain declaration order so hot selfhost workspaces stay near
+// their existing neighbors; portal traversal is decided later from the
+// logical addresses.
+void layout_global_group(cell group) {
+    if (group == 0) {
+        NodeId global = first_global;
+        while (!node_is_null(global)) {
+            if (global_matches_layout_group(global, group)
+                && !global_is_hot_token_buffer(global)) {
+                set_global_base(global, stage7_static_cells);
+                stage7_static_cells = wide_add(
+                    stage7_static_cells, global_cells(global)
+                );
+            }
+            global = node_next(global);
+        }
+        global = first_global;
+        while (!node_is_null(global)) {
+            if (global_matches_layout_group(global, group)
+                && global_is_hot_token_buffer(global)) {
+                set_global_base(global, stage7_static_cells);
+                stage7_static_cells = wide_add(
+                    stage7_static_cells, global_cells(global)
+                );
+            }
+            global = node_next(global);
+        }
+        return;
+    }
+    if (group == 2) {
+        NodeId global = first_global;
+        while (!node_is_null(global)) {
+            if (global_matches_layout_group(global, group)) {
+                set_global_base(global, stage7_static_cells);
+                stage7_static_cells = wide_add(
+                    stage7_static_cells, global_cells(global)
+                );
+            }
+            global = node_next(global);
+        }
+        return;
+    }
+    NodeId boundary;
+    cell done;
+    while (!done) {
+        NodeId candidate;
+        NodeId global = first_global;
+        while (!node_is_null(global)
+            && (node_is_null(boundary) || !node_equals(global, boundary))) {
+            if (global_matches_layout_group(global, group)) {
+                candidate = global;
+            }
+            global = node_next(global);
+        }
+        if (node_is_null(candidate)) {
+            done = 1;
+        } else {
+            set_global_base(candidate, stage7_static_cells);
+            stage7_static_cells = wide_add(
+                stage7_static_cells, global_cells(candidate)
+            );
+            boundary = candidate;
+        }
+    }
+}
+
 struct ConstantValue {
     cell known;
     cell value;
@@ -949,10 +1045,14 @@ void collect_file_declarations() {
         WideValue cells = type_cells(ty);
         node_set_tag(global, type_is_aggregate(ty));
         set_global_cells(global, cells);
-        set_global_base(global, stage7_static_cells);
-        stage7_static_cells = wide_add(stage7_static_cells, cells);
         global = node_next(global);
     }
+
+    // Keep large regions at the low-address end, then put small aggregates
+    // and scalars next to the stack anchor.
+    layout_global_group(0);
+    layout_global_group(1);
+    layout_global_group(2);
 
     main_function = null_node();
     NodeId function = first_function;
