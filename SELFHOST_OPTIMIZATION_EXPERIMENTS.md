@@ -334,7 +334,7 @@ phaseは入力読み込み中・読み込み後・出力中から始め、可能
 3. 別案として、`arena_advance` 自体を反復から桁上がり付き加算へ変更。
 
 IRには既に `FrameInstruction::Loop` と `Branch` がある。
-一方、Rustの `continuation_lowering.rs::lower_while` は通常のsource whileを条件・本体・終了に分ける。
+一方、Rustの `frontend/lowering/mod.rs::lower_while` は通常のsource whileを条件・本体・終了に分ける。
 BFC製frontendの `09_continuation_ir.bfc` も同様に分割する。
 HIRで分割を避けるか、Continuation CFGから局所構造を復元するかを比較し、適用される入力経路を明記する。
 HIRだけの変更はCIR入力経路には効かない。
@@ -359,7 +359,7 @@ HIRだけの変更はCIR入力経路には効かない。
 
 ## 実験3：頻度に基づくPC符号配置
 
-現 `abi_codegen.rs::DispatchEncoding` は密なIDを概ね平方根幅のpageへ配置し、
+現 `backend/codegen/mod.rs::DispatchEncoding` は密なIDを概ね平方根幅のpageへ配置し、
 hidden portal IDを優先し、一部pageのlow順を反転する。通常continuationの動的頻度は使っていない。
 
 現dispatcherは毎回先頭から選択するため、頻出continuationを隣に置くだけでは安くならない。

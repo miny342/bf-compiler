@@ -30,7 +30,7 @@ selfhost ABIになる。反対に、BFC製frontendからCIRを受け取ってRus
 Rust ABIになる。コンパイラ自身を動かす方式と、そのコンパイラが生成するprogramのABIは別である。
 
 CIRは論理的なframe slot、global address、continuation等を渡すための中間形式である。
-Rust側の[selfhost_cir_adapter.rs](crates/bf-compiler/src/selfhost_cir_adapter.rs)はこれをRustの
+Rust側の[CIR入力adapter](crates/bf-compiler/src/cir/input/lowering.rs)はこれをRustの
 Continuation IRへ変換し、Rust backendが改めて物理配置を作る。selfhostの物理テープを保持したり、
 二種類のBFを接続したりする仕組みではない。IRの詳細は[IR.md](IR.md)を参照。
 Rust backendを使う経路同士でも、frontendや最適化が異なればslot数やregionの分け方が変わり得る。

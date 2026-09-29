@@ -1,7 +1,7 @@
 # 生存解析によるframe領域の再利用
 
 Rust版compilerのsource frontendでは、全関数をvirtual Continuation IRへloweringし、CIR inlineとgraph cleanupの後で関数ごとに
-`frame_allocation::allocate`を実行する。HIRのlocal名・型はこの時点では必要ない。
+`cir::frame_allocation::allocate`を実行する。HIRのlocal名・型はこの時点では必要ない。
 `FrameSlot`をvirtual register、frame aggregateを分割しないvirtual regionとして扱う。
 
 ## 解析と割り当て

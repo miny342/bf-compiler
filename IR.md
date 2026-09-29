@@ -5,6 +5,7 @@
 
 以下では、実装に存在するものを「現行」、まだ存在しないpassやIRを「提案」と明記する。
 型名と公開範囲は現在のRust実装を基準とする。設計候補を、実装済みであるかのようには記述しない。
+ファイル配置と入口は [bf-compilerのコード構成](crates/bf-compiler/README.md) を参照。
 
 既定有効の CFG region emission と実 BF dispatcher 訪問数の比較は
 [CIR_REGION_EMISSION.md](CIR_REGION_EMISSION.md) を参照。yielding control は通常 CFG に統一し、
@@ -50,7 +51,7 @@ low-level API:
 | AST | `ast::AstProgram` / `parser::parse` | sourceに近い構文、名前、macro | 括弧など一部の表記差 |
 | expanded AST | `macro_expansion::expand` | 展開済みblock、fresh local identity | macro呼出し |
 | typed HIR | `hir::HirProgram` / `semantic::analyze` | 解決済みID、nominal型、layout、評価順序、構造化制御フロー | 名前探索、method call糖衣、`len`などのcompile-time構文 |
-| Continuation IR | `ContinuationProgram` / `continuation_lowering::lower_hir` | frame-relative storage、基本block相当のcontinuation、call/return/portal境界 | sourceのnominal型、local名、式木 |
+| Continuation IR | `ContinuationProgram` / `frontend::lowering::lower_hir_with_options` | frame-relative storage、基本block相当のcontinuation、call/return/portal境界 | sourceのnominal型、local名、式木 |
 | BF IR | `BfProgram`または`AnnotatedBfProgram` / ABI backend | 相対pointer移動、cell加算、I/O、BF loop、任意のprofile provenance | function、frame、continuationという意味 |
 | BF source | `String` / `to_source` | `><+-.,[]`列 | IR node境界とprovenance |
 
@@ -205,7 +206,7 @@ source localとtemporaryを区別せず、同時に必要な値が同じ領域�
 
 ### 局所的な算術fusion
 
-`frame_fusion`はsourceのframe割当て前、およびbinary CIRをFrame命令へ変換した後に適用する。
+`cir::arithmetic_fusion`はsourceのframe割当て前、およびbinary CIRをFrame命令へ変換した後に適用する。
 同一の直列領域内でコピーと値の更新を追跡し、`a < b`（結果反転も可）に続く
 `a - b`が同じ入力snapshotを使う場合、`SubWithBorrow`へ融合する。
 関数名、ソース言語の型追加、intrinsic、binary CIRの新opcodeには依存しない。
@@ -244,8 +245,8 @@ HIRからのloweringは、sourceの`if`、`while`、短絡論理演算、call、
 source frontendでは、再帰 SCC を除く Call を allocation 前の CIR で clone／splice する。
 試験 allocation と B1 layout で frame cost を確認し、global を使う caller の frame 増加を抑える。
 main と global initializer から到達しない関数は lowering／inline 後の reachability で除去する。
-全 reachable 関数を virtual slot の Continuation に lowering し、`continuation_pipeline` が
-CFG cleanup／local reconstruction の後で関数ごとに `frame_fusion` と `frame_allocation` を実行する。
+全 reachable 関数を virtual slot の Continuation に lowering し、`cir::pipeline` が
+CFG cleanup／local reconstruction の後で関数ごとに `cir::arithmetic_fusion` と `cir::frame_allocation` を実行する。
 最後は空の Goto の threading だけを行い、再利用後の descriptor と命令列を
 `ContinuationProgram` constructorで検証する。これはsource frontend内のpassであり、公開APIで手動構築した
 Continuation IRや`--cir-input`のalias-preserving flat frameには自動適用しない。

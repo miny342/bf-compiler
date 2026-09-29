@@ -18,10 +18,10 @@ viewer の読み取り処理は削除した。旧 variant を使う Rust API 利
 
 `Terminator` に内部用の boundary 分類、通常／resume edge の列挙、successor remap、
 callee reference を集約した。既存 optimizer と local reconstruction も edge API を使う。
-operand remap は `continuation_operands`、read/write/clobber は `continuation_effects` に集約し、
+operand remap は `cir::operands`、read/write/clobber は `cir::effects` に集約し、
 allocation／CIR inline／virtual cleanup で共用する。
 
-`continuation_regions.rs` は function entry とすべての hard resume target を再入 root とする。
+`backend/regions.rs` は function entry とすべての hard resume target を再入 root とする。
 通常 edge のみをたどり、hard terminal または exit で止める。共有 successor の body は
 複製可能だが、同じ terminal は領域内で一度だけ出力する。semantic block 自体は変更しない。
 通常 edge からも到達する resume target は直接実行でき、その dispatcher entry も保持する。
@@ -212,7 +212,7 @@ profile site lookup と lowering の分岐、HIR inline の Option／cost 走査
 ## Allocation 前の program pipeline
 
 2026-09-23。`lower_hir_unallocated` で全 reachable 関数を virtual storage のまま生成し、
-`continuation_pipeline::finish` で CFG cleanup／local reconstruction → 関数ごとの frame fusion
+`cir::pipeline::finish` で CFG cleanup／local reconstruction → 関数ごとの frame fusion
 → frame allocation → 保守的な empty Goto cleanup の順に処理するよう変更した。
 公開 CIR optimization API は allocated CIR に対しても従来どおり使用できる。
 本段階で上記 fixture の dispatcher 訪問・frame・raw／RLE 命令数はすべて維持した。

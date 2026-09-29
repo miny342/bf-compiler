@@ -28,8 +28,8 @@ source の既定経路は frame cost に基づく自動 CIR inline を使用す�
 - callee 命令の source span を保持し、合成した初期化・引数・result コピーは call site に対応付ける。
   frame fusion は block 全体へ先頭の span を付け直す処理をやめ、元命令の index から span を引き継ぐ。
 
-`continuation_operands` に operand remap を集約し、allocator と inliner で共用する。
-`continuation_effects` が read／write／clobber、動的部分書き込み、Call result、I/O を分類し、
+`cir::operands` に operand remap を集約し、allocator と inliner で共用する。
+`cir::effects` が read／write／clobber、動的部分書き込み、Call result、I/O を分類し、
 allocator・frame fusion・virtual cleanup で共用する。
 
 検証中に、既存 Call backend が aggregate parameter と重なる scalar parameter を
@@ -45,7 +45,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`abi_codegen/inline_probe.rs` は HIR inline をバイパスし、同一 unallocated CIR の inline 前後を
+`backend/codegen/inline_probe.rs` は HIR inline をバイパスし、同一 unallocated CIR の inline 前後を
 CIR VM と B0／B1 の生成 BF で実行する。期待出力、入力消費、残存 hard operation の実行数、
 profile 有無の BF／raw／RLE カウンタを比較する。下表は **B1 を共通に使用した inline 前→後**。
 訪問数・BF bytes・raw／RLE は全 program。frame は対象 caller の値。

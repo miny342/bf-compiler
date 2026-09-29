@@ -18,9 +18,9 @@ page-local portalを持つ。sourceのmethod call、macro、文字列、`len`は
 
 以下は既定の動的frame方式を対象にする。`--experimental-static-frames`の例外は末尾で説明する。
 version 0の配列規約は互換APIと基本構造の説明として残し、大きなaggregateにはversion 1の式を使う。
-具体的な配置の実装は[frame_layout.rs](crates/bf-compiler/src/frame_layout.rs)、
-[static_layout.rs](crates/bf-compiler/src/static_layout.rs)、
-呼出し・搬送・dispatchは[abi_codegen.rs](crates/bf-compiler/src/abi_codegen.rs)にある。
+具体的な配置の実装は[frame_layout.rs](crates/bf-compiler/src/backend/frame_layout.rs)、
+[static_layout.rs](crates/bf-compiler/src/backend/static_layout.rs)、
+呼出し・搬送・dispatchは[backend/codegen](crates/bf-compiler/src/backend/codegen/mod.rs)にある。
 
 ## 目的
 
@@ -1165,7 +1165,7 @@ version 1実装は少なくとも次を`D = 16`で検証する。
 ## 実験的static frame
 
 `--experimental-static-frames`（`AbiCodegenOptions::static_frames`）は既定で無効である。
-[static_frames.rs](crates/bf-compiler/src/abi_codegen/static_frames.rs)が、再帰call cycleに属さない関数の
+[static_frames.rs](crates/bf-compiler/src/backend/codegen/static_frames.rs)が、再帰call cycleに属さない関数の
 frameを関数ごとの固定storageとしてanchorより左へ予約する。再帰関数は動的chunk stackを使い続ける。
 
 固定frameも`FrameLayout`のchunk、aggregate、outbox、context配置を使うが、activationの物理baseが
@@ -1181,5 +1181,5 @@ portalごとのpayload配置は保つ。selfhost backendのuniform frame方式�
 ## 実装との照合
 
 配置の基本回帰は`frame_layout.rs`と`static_layout.rs`のunit test、call/returnとglobal routerを
-含む生成BFの回帰は`abi_codegen.rs`のtestにある。上の数式の対象はlayoutに残ったstorageであり、
+含む生成BFの回帰は`backend/codegen/mod.rs`のtestにある。上の数式の対象はlayoutに残ったstorageであり、
 IR上でscalar化・inline化・slot再利用されたsource変数に独立の領域が必ず残るという意味ではない。

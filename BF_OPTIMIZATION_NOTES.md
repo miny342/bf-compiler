@@ -128,7 +128,7 @@ target/release/bf-interpreter --unlimited-tape --accept-embedded-profile \
 | Rust・`--disable-function-inline` | 6,748,832 | 714,729,727 |
 | selfhost・stage2/3 | 3,801,257 | 3,641,070,792 |
 
-Rustの`continuation_lowering.rs::lower_global_initializer`はglobalを明示的にzero初期化する。
+Rustの`frontend/lowering/mod.rs::lower_global_initializer`はglobalを明示的にzero初期化する。
 約104万cellのarenaを含む起動時の`abi.frame.set`領域だけで4,264,584圧縮byteを占める。
 `[-]>[-]>...`というcellごとのclear列は、単一命令の反復を表す現在のRLEでは縮まない。
 selfhostの`09_continuation_ir.bfc::lower_global_initializers`は先行するinitializerがない間、
@@ -1332,7 +1332,7 @@ CIR inlineのframe cost判定では候補ごとにCFG cleanup・local reconstruc
 全blockのindexとincoming countを再構築し、先頭から候補を探していた。その際、結合できないblockの
 bodyも複製していたため、inline試行と最後の全program cleanupで大きな費用になっていた。
 
-`continuation_structure`でincoming countとpredecessorを差分更新し、変更したblockと影響を受ける
+`cir::structure`でincoming countとpredecessorを差分更新し、変更したblockと影響を受ける
 predecessorだけをworklistへ戻す。worklistは元のblock順で処理し、従来の結合順・scratch割り当てを
 維持する。bodyの複製は結合が決まってから行う。同じtargetへの二つのbranch edgeは別々に数え、
 function entryとCall/portal resumeの参照も引き続き保護する。inlineの採否条件や展開budgetは変えない。
