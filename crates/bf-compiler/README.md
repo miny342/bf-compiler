@@ -21,6 +21,12 @@ BFCソースと外部バイナリCIRを受け取り、Brainfuckへコンパイ�
 [src/lib.rs](src/lib.rs) が公開APIを再公開し、[src/main.rs](src/main.rs) がCLIを起動する。
 モジュールの階層は内部構成であり、利用側は従来どおり `bf_compiler::lower_source` などを使う。
 
+BF生成は `backend/codegen/mod.rs` を入口に、`planning.rs`（配置とportal計画）、
+`dispatch.rs`（実行ブロック選択）、`instructions.rs`（命令と局所制御）、
+`control.rs`（call/return）、`portal.rs`（動的配列アクセス）、
+`transport.rs`（アドレスと値搬送）、`provenance.rs`（出自情報）に分かれる。
+各モジュールは同じemitterの状態を使い、pointer位置とcontextの規約を共有する。
+
 ## 処理の流れ
 
 通常のソース入力は次の順で処理する。

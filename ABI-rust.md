@@ -1181,5 +1181,5 @@ portalごとのpayload配置は保つ。selfhost backendのuniform frame方式�
 ## 実装との照合
 
 配置の基本回帰は`frame_layout.rs`と`static_layout.rs`のunit test、call/returnとglobal routerを
-含む生成BFの回帰は`backend/codegen/mod.rs`のtestにある。上の数式の対象はlayoutに残ったstorageであり、
+含む生成BFの回帰は`backend/codegen/tests.rs`にある。上の数式の対象はlayoutに残ったstorageであり、
 IR上でscalar化・inline化・slot再利用されたsource変数に独立の領域が必ず残るという意味ではない。

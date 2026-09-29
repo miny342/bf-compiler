@@ -359,7 +359,7 @@ HIRだけの変更はCIR入力経路には効かない。
 
 ## 実験3：頻度に基づくPC符号配置
 
-現 `backend/codegen/mod.rs::DispatchEncoding` は密なIDを概ね平方根幅のpageへ配置し、
+現 `backend/codegen/dispatch.rs::DispatchEncoding` は密なIDを概ね平方根幅のpageへ配置し、
 hidden portal IDを優先し、一部pageのlow順を反転する。通常continuationの動的頻度は使っていない。
 
 現dispatcherは毎回先頭から選択するため、頻出continuationを隣に置くだけでは安くならない。
