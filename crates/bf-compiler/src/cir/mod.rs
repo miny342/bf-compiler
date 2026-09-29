@@ -1,5 +1,6 @@
 //! Continuation IR, graph transformations, storage allocation, and direct execution.
 
+pub(crate) mod analysis;
 pub(crate) mod arithmetic_fusion;
 pub(crate) mod effects;
 pub(crate) mod frame_allocation;

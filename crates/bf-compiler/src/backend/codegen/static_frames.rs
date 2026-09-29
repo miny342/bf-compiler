@@ -39,7 +39,7 @@ impl StaticFramePlan {
         storage: &mut StaticLayout,
         check_capacity: bool,
     ) -> Result<Self, AbiCodegenError> {
-        let recursive = crate::cir::inline::recursive_functions(program);
+        let recursive = crate::cir::analysis::call_graph::recursive_functions(program);
         let static_start = storage.anchor_head();
         let config = storage.config();
         let mut contexts = HashMap::new();

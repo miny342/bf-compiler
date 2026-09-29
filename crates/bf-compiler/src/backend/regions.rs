@@ -7,10 +7,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::backend::codegen::maximum_branch_depth;
 use crate::cir::ir::{
-    BoundaryKind, Continuation, ContinuationId, ContinuationProgram, EdgeKind, FunctionId,
-    Terminator,
+    BoundaryKind, Continuation, ContinuationId, ContinuationProgram, EdgeKind, FrameInstruction,
+    FunctionId, Terminator,
 };
 
 const MAX_TERMINALS: usize = 255;
@@ -181,4 +180,25 @@ impl Builder<'_> {
             temporaries,
         ))
     }
+}
+
+pub(crate) fn maximum_branch_depth(instructions: &[FrameInstruction]) -> usize {
+    instructions
+        .iter()
+        .map(|instruction| match instruction {
+            FrameInstruction::Loop { body, .. } => maximum_branch_depth(body),
+            FrameInstruction::Branch {
+                then_body,
+                else_body,
+                ..
+            } if else_body.is_empty() => maximum_branch_depth(then_body),
+            FrameInstruction::Branch {
+                then_body,
+                else_body,
+                ..
+            } => 1 + maximum_branch_depth(then_body).max(maximum_branch_depth(else_body)),
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0)
 }

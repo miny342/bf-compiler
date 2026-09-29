@@ -26,18 +26,21 @@ use crate::{
 mod control;
 mod dispatch;
 mod instructions;
-mod planning;
 mod portal;
+mod portal_plan;
 mod provenance;
 mod region_emission;
 mod static_frames;
 mod transport;
-use dispatch::DispatchEncoding;
-use planning::*;
-pub(crate) use planning::{
-    estimated_frame_chunks, estimated_frame_chunks_with_route, has_global_portal,
-    maximum_branch_depth,
+use crate::backend::layout_plan::{
+    FunctionLayout, GLOBAL_ROUTE_NIBBLE_CELLS, build_layouts_with_regions,
 };
+#[cfg(test)]
+use crate::backend::layout_plan::{build_layouts, estimated_frame_chunks};
+#[cfg(test)]
+use crate::backend::regions::maximum_branch_depth;
+use dispatch::DispatchEncoding;
+use portal_plan::*;
 use static_frames::{StaticFramePlan, StaticResume};
 
 #[cfg(test)]
@@ -349,7 +352,6 @@ impl From<StaticLayoutError> for AbiCodegenError {
     }
 }
 
-const GLOBAL_ROUTE_NIBBLE_CELLS: usize = 16;
 const ROUTE_OFFSET_LOW: usize = 0;
 const ROUTE_OFFSET_HIGH: usize = 1;
 const ROUTE_VALUE: usize = 2;

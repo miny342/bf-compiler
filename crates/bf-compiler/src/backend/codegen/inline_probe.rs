@@ -36,7 +36,8 @@ fn compare(
 ) -> (ContinuationProgram, InlineStats) {
     let (inlined, stats) = inline_selected(program, selected).unwrap();
     let (automatic, _) = crate::cir::inline::inline_automatic(program, Default::default()).unwrap();
-    let (automatic, _) = crate::cir::pipeline::finish(&automatic, Default::default()).unwrap();
+    let (automatic, _) =
+        crate::cir::pipeline::optimize_and_allocate(&automatic, Default::default()).unwrap();
     assert_eq!(
         measure(&automatic, input, true).output,
         expected,
@@ -54,8 +55,10 @@ fn compare(
         .unwrap();
         assert_eq!(output, expected, "virtual graph semantics");
     }
-    let (before, _) = crate::cir::pipeline::finish(program, Default::default()).unwrap();
-    let (after, _) = crate::cir::pipeline::finish(&inlined, Default::default()).unwrap();
+    let (before, _) =
+        crate::cir::pipeline::optimize_and_allocate(program, Default::default()).unwrap();
+    let (after, _) =
+        crate::cir::pipeline::optimize_and_allocate(&inlined, Default::default()).unwrap();
     let old = measure(&before, input, true);
     let new = measure(&after, input, true);
     assert_eq!(old.output, expected);
@@ -694,7 +697,8 @@ fn automatic_cir_inline_covers_former_hir_cheap_cases() {
         let plain = source(text);
         let (auto, stats) =
             crate::cir::inline::inline_automatic(&plain, Default::default()).unwrap();
-        let (auto, _) = crate::cir::pipeline::finish(&auto, Default::default()).unwrap();
+        let (auto, _) =
+            crate::cir::pipeline::optimize_and_allocate(&auto, Default::default()).unwrap();
         let after = measure(&auto, input, true);
         assert_eq!(after.output, expected, "{label}");
         assert_eq!(after.semantic.calls, 0, "{label}");
@@ -728,8 +732,10 @@ fn automatic_inline_limits_transitive_global_frame_growth() {
             "{prefix} void leaf() {{ {locals} touch(); {outputs} }} void main() {{ cell saved=input(); leaf(); output(saved); }}"
         ));
         let (auto, stats) = crate::cir::inline::inline_automatic(&p, Default::default()).unwrap();
-        let (before, _) = crate::cir::pipeline::finish(&p, Default::default()).unwrap();
-        let (after, _) = crate::cir::pipeline::finish(&auto, Default::default()).unwrap();
+        let (before, _) =
+            crate::cir::pipeline::optimize_and_allocate(&p, Default::default()).unwrap();
+        let (after, _) =
+            crate::cir::pipeline::optimize_and_allocate(&auto, Default::default()).unwrap();
         let before_frames = estimated_frame_chunks(&before).unwrap();
         let after_frames = estimated_frame_chunks(&after).unwrap();
         if global {

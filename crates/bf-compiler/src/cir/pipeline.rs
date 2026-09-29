@@ -5,7 +5,11 @@ use crate::{
     ContinuationProgram, optimize_continuations_with_options,
 };
 
-pub(crate) fn finish(
+/// Optimize a virtual graph and assign physical slots without inlining calls.
+/// Also used by inline cost trials; it must not recursively select inline sites.
+/// After allocation, cleanup may thread edges but cannot duplicate instructions
+/// whose original virtual identities have been merged into reused slots.
+pub(crate) fn optimize_and_allocate(
     program: &ContinuationProgram,
     options: ContinuationOptimizationOptions,
 ) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationIrError> {

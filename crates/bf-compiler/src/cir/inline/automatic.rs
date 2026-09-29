@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::ContinuationOptimizationOptions;
+use crate::cir::analysis::call_graph::callee_ranks;
 use crate::cir::effects::{self, Effect};
 
 fn visit_body(body: &[I], visit: &mut impl FnMut(Effect)) {
@@ -77,37 +78,6 @@ fn global_users(program: &ContinuationProgram) -> HashSet<FunctionId> {
     }
 }
 
-fn ranks(program: &ContinuationProgram) -> HashMap<FunctionId, usize> {
-    let mut edges = HashMap::<FunctionId, Vec<FunctionId>>::new();
-    for c in program.continuations() {
-        if let Some(callee) = c.terminator().callee() {
-            edges.entry(c.function()).or_default().push(callee);
-        }
-    }
-    let mut visited = HashSet::new();
-    let mut rank = HashMap::new();
-    for f in program.functions() {
-        let mut pending = vec![(f.id(), false)];
-        while let Some((id, expanded)) = pending.pop() {
-            if expanded {
-                let next = rank.len();
-                rank.insert(id, next);
-            } else if visited.insert(id) {
-                pending.push((id, true));
-                pending.extend(
-                    edges
-                        .get(&id)
-                        .into_iter()
-                        .flatten()
-                        .rev()
-                        .map(|&callee| (callee, false)),
-                );
-            }
-        }
-    }
-    rank
-}
-
 fn weight<'a>(nodes: impl Iterator<Item = &'a Continuation>) -> usize {
     nodes.fold(0usize, |sum, c| {
         let mut count = 1usize;
@@ -138,8 +108,8 @@ fn allocated_costs(
     options: ContinuationOptimizationOptions,
 ) -> Result<HashMap<FunctionId, usize>, String> {
     let (allocated, _) =
-        crate::cir::pipeline::finish(program, options).map_err(|e| e.to_string())?;
-    crate::backend::codegen::estimated_frame_chunks(&allocated).map_err(|e| e.to_string())
+        crate::cir::pipeline::optimize_and_allocate(program, options).map_err(|e| e.to_string())?;
+    crate::backend::layout_plan::estimated_frame_chunks(&allocated).map_err(|e| e.to_string())
 }
 
 fn caller_cost(
@@ -154,10 +124,10 @@ fn caller_cost(
     let projection = graph.clone().materialize_caller(original, caller)?;
     let projection =
         crate::cir::virtual_cleanup::cleanup(&projection).map_err(|e| e.to_string())?;
-    let (allocated, _) =
-        crate::cir::pipeline::finish(&projection, options).map_err(|e| e.to_string())?;
+    let (allocated, _) = crate::cir::pipeline::optimize_and_allocate(&projection, options)
+        .map_err(|e| e.to_string())?;
     let costs =
-        crate::backend::codegen::estimated_frame_chunks_with_route(&allocated, global_portal)
+        crate::backend::layout_plan::estimated_frame_chunks_with_route(&allocated, global_portal)
             .map_err(|e| e.to_string())?;
     Ok((costs[&caller], projection))
 }
@@ -189,7 +159,7 @@ fn inline_with_budget(
     };
     let global = global_users(&cleaned);
     let recursive = recursive_functions(&cleaned);
-    let ranks = ranks(&cleaned);
+    let ranks = callee_ranks(&cleaned);
     let mut spent = 0usize;
     let mut graph = Graph::normalize(&cleaned)?;
     let mut skipped = HashSet::new();
@@ -237,7 +207,7 @@ fn inline_with_budget(
             &cleaned,
             caller,
             options,
-            crate::backend::codegen::has_global_portal(&cleaned),
+            crate::backend::layout_plan::has_global_portal(&cleaned),
         ) else {
             stats.frame_limit_calls_preserved += 1;
             continue;

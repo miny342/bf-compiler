@@ -21,7 +21,7 @@ BFCソースと外部バイナリCIRを受け取り、Brainfuckへコンパイ�
 [src/lib.rs](src/lib.rs) が公開APIを再公開し、[src/main.rs](src/main.rs) がCLIを起動する。
 モジュールの階層は内部構成であり、利用側は従来どおり `bf_compiler::lower_source` などを使う。
 
-BF生成は `backend/codegen/mod.rs` を入口に、`planning.rs`（配置とportal計画）、
+BF生成は `backend/codegen/mod.rs` を入口に、`portal_plan.rs`（portal計画）、
 `dispatch.rs`（実行ブロック選択）、`instructions.rs`（命令と局所制御）、
 `control.rs`（call/return）、`portal.rs`（動的配列アクセス）、
 `transport.rs`（アドレスと値搬送）、`provenance.rs`（出自情報）に分かれる。
@@ -47,8 +47,14 @@ BFCソース
 ```
 
 割り当て前後は同じ `ContinuationProgram` 型を使うが、スロット再利用後に適用できる変換は異なる。
-パスの順序は [cir/pipeline.rs](src/cir/pipeline.rs) と
-[frontend/lowering/mod.rs](src/frontend/lowering/mod.rs) にある。
+ソース入力全体の処理順は [frontend/pipeline.rs](src/frontend/pipeline.rs) に集約している。
+[cir/pipeline.rs](src/cir/pipeline.rs) の `optimize_and_allocate` は、仮想CIRの最適化から
+スロット割り当てまでを受け持ち、インライン候補の試行評価からも利用する。
+`frontend/lowering/` はHIRから仮想CIRへの変換のみを担当する。
+
+共通の呼び出しグラフ解析（再帰判定・callee順序）は [cir/analysis/](src/cir/analysis/mod.rs)、
+フレーム配置とコスト見積もりは [backend/layout_plan.rs](src/backend/layout_plan.rs) に置く。
+インライン化の採否判定とBF生成はこの配置計算を共有し、BF emitter内部には依存しない。
 
 `--cir-input` は [cir/input/format.rs](src/cir/input/format.rs) で外部形式を読み、
 [cir/input/lowering.rs](src/cir/input/lowering.rs) で内部IRへ変換する。

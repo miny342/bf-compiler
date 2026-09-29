@@ -13,7 +13,6 @@ use crate::cir::ir::{
     GlobalDescriptor, GlobalId as ContinuationGlobalId, LogicalOffset, ParameterLocation,
     SourceFileDescriptor, SourceSpan, Terminator, ValueOperand, ValueType,
 };
-use crate::cir::optimizer::{ContinuationOptimizationOptions, ContinuationOptimizationStats};
 use crate::frontend::hir::{
     self, ArrayIndex, AssignmentOperator, BinaryOperator, HirExpression, HirExpressionKind,
     HirFunction, HirPlace, HirProgram, HirStatement, HirStatementKind, Projection, TypeId,
@@ -73,28 +72,6 @@ impl From<ContinuationIrError> for ContinuationLoweringError {
 struct LoweredFunction {
     id: ContinuationFunctionId,
     entry: ContinuationId,
-}
-
-pub(crate) fn lower_hir_with_options(
-    program: &HirProgram,
-    options: ContinuationOptimizationOptions,
-) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationLoweringError> {
-    lower_hir_with_inline_options(program, options, options.inline_functions)
-}
-
-pub(crate) fn lower_hir_with_inline_options(
-    program: &HirProgram,
-    options: ContinuationOptimizationOptions,
-    automatic_inline: bool,
-) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationLoweringError> {
-    let lowered = lower_hir_unallocated(program)?;
-    let (lowered, _) = if automatic_inline {
-        crate::cir::inline::inline_automatic(&lowered, options)
-    } else {
-        crate::cir::inline::inline_selected(&lowered, &[])
-    }
-    .map_err(|detail| invalid_hir(None, detail))?;
-    crate::cir::pipeline::finish(&lowered, options).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -1848,9 +1825,15 @@ mod tests {
     fn lower(source: &str) -> ContinuationProgram {
         let ast = parser::parse(lexer::lex(source).unwrap()).unwrap();
         let hir = semantic::analyze(&ast).unwrap();
-        lower_hir_with_inline_options(&hir, Default::default(), false)
-            .unwrap()
-            .0
+        crate::frontend::pipeline::lower_hir(
+            &hir,
+            crate::ContinuationOptimizationOptions {
+                inline_functions: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .0
     }
 
     fn contains_branch(instructions: &[FrameInstruction]) -> bool {

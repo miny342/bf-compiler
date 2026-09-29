@@ -51,7 +51,7 @@ low-level API:
 | AST | `ast::AstProgram` / `parser::parse` | sourceに近い構文、名前、macro | 括弧など一部の表記差 |
 | expanded AST | `macro_expansion::expand` | 展開済みblock、fresh local identity | macro呼出し |
 | typed HIR | `hir::HirProgram` / `semantic::analyze` | 解決済みID、nominal型、layout、評価順序、構造化制御フロー | 名前探索、method call糖衣、`len`などのcompile-time構文 |
-| Continuation IR | `ContinuationProgram` / `frontend::lowering::lower_hir_with_options` | frame-relative storage、基本block相当のcontinuation、call/return/portal境界 | sourceのnominal型、local名、式木 |
+| Continuation IR | `ContinuationProgram` / `frontend::pipeline::lower_hir` | frame-relative storage、基本block相当のcontinuation、call/return/portal境界 | sourceのnominal型、local名、式木 |
 | BF IR | `BfProgram`または`AnnotatedBfProgram` / ABI backend | 相対pointer移動、cell加算、I/O、BF loop、任意のprofile provenance | function、frame、continuationという意味 |
 | BF source | `String` / `to_source` | `><+-.,[]`列 | IR node境界とprovenance |
 

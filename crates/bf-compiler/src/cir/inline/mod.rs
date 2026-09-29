@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 mod automatic;
 pub(crate) use automatic::inline_automatic;
 
+use crate::cir::analysis::call_graph::recursive_functions;
 use crate::cir::operands::{map_body, map_operand, map_region, map_terminator};
 use crate::{
     Address, AggregateRegion, Continuation, ContinuationId, ContinuationProgram,
@@ -652,34 +653,9 @@ fn copy_value(body: &mut Vec<I>, src: ValueOperand, dst: ValueOperand, cells: us
     }
 }
 
-pub(crate) fn recursive_functions(program: &ContinuationProgram) -> HashSet<FunctionId> {
-    let mut edges = HashMap::<FunctionId, Vec<FunctionId>>::new();
-    for c in program.continuations() {
-        if let Some(callee) = c.terminator().callee() {
-            edges.entry(c.function()).or_default().push(callee);
-        }
-    }
-    program
-        .functions()
-        .iter()
-        .filter_map(|f| {
-            let mut visited = HashSet::new();
-            let mut pending = edges.get(&f.id()).cloned().unwrap_or_default();
-            while let Some(id) = pending.pop() {
-                if id == f.id() {
-                    return Some(id);
-                }
-                if visited.insert(id) {
-                    pending.extend(edges.get(&id).into_iter().flatten().copied());
-                }
-            }
-            None
-        })
-        .collect()
-}
-
 /// Internal explicit selection during migration. Recursive SCCs always retain
 /// their calls. The caller must supply unallocated storage, never physical slots.
+#[cfg(test)]
 pub(crate) fn inline_selected(
     program: &ContinuationProgram,
     selected: &[FunctionId],

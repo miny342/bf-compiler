@@ -6,12 +6,14 @@ pub(crate) mod lexer;
 pub(crate) mod lowering;
 pub(crate) mod macro_expansion;
 pub(crate) mod parser;
+pub(crate) mod pipeline;
 pub(crate) mod reachability;
 pub(crate) mod semantic;
 
 use std::error::Error;
 use std::fmt;
 
+use self::pipeline::lower_tokens;
 use crate::cir::optimizer::{ContinuationOptimizationOptions, ContinuationOptimizationStats};
 use crate::frontend::hir::HirSourceFile;
 use crate::frontend::lexer::{Token, TokenKind};
@@ -249,19 +251,6 @@ pub fn lower_sources_with_options(
         })
         .collect();
     lower_tokens(tokens, options, source_files).map_err(|error| annotate_error(error, &ranges))
-}
-
-fn lower_tokens(
-    tokens: Vec<Token>,
-    options: ContinuationOptimizationOptions,
-    source_files: Vec<HirSourceFile>,
-) -> Result<(ContinuationProgram, ContinuationOptimizationStats), FrontendError> {
-    let ast = parser::parse(tokens)?;
-    let ast = crate::frontend::macro_expansion::expand(ast)?;
-    let mut hir = semantic::analyze(&ast)?;
-    hir.source_files = source_files;
-    crate::frontend::lowering::lower_hir_with_options(&hir, options)
-        .map_err(|error| FrontendError::without_offset(error.to_string()))
 }
 
 fn annotate_error(error: FrontendError, ranges: &[(SourceFile<'_>, usize)]) -> FrontendError {
