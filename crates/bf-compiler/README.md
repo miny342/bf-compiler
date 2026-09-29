@@ -11,7 +11,7 @@ BFCソースと外部バイナリCIRを受け取り、Brainfuckへコンパイ�
 | [src/frontend/lowering/](src/frontend/lowering/mod.rs) | 型付きHIRから仮想スロットを持つContinuation IRへの変換。 |
 | [src/cir/](src/cir/mod.rs) | Continuation IRの定義・検証、共通解析、インライン化、制御フロー整理、記憶領域の割り当て。 |
 | [src/cir/input/](src/cir/input/mod.rs) | 外部バイナリCIRの形式と検証、内部Continuation IRへの変換。 |
-| [src/cir/vm.rs](src/cir/vm.rs) | IRの直接実行、実行統計。CLIの `--run-ir` に対応。 |
+| [src/cir/vm/](src/cir/vm/mod.rs) | IRの直接実行。実行統計・phase集計は `metrics.rs`。CLIの `--run-ir` に対応。 |
 | [src/backend/](src/backend/mod.rs) | フレームとグローバル領域の物理配置、BF出力計画。 |
 | [src/backend/codegen/](src/backend/codegen/mod.rs) | dispatch、call/return、動的配列アクセス、値搬送などのBF生成。 |
 | [src/bf/](src/bf/mod.rs) | BF命令、出自情報、局所最適化、通常・圧縮形式の出力。 |
@@ -26,6 +26,11 @@ BF生成は `backend/codegen/mod.rs` を入口に、`planning.rs`（配置とpor
 `control.rs`（call/return）、`portal.rs`（動的配列アクセス）、
 `transport.rs`（アドレスと値搬送）、`provenance.rs`（出自情報）に分かれる。
 各モジュールは同じemitterの状態を使い、pointer位置とcontextの規約を共有する。
+
+CLIは `cli/mod.rs` が処理順を組み立て、`options.rs`（引数と検証）、
+`input.rs`（ソース／CIR読み込み）、`output.rs`（BF・CIR出力）、
+`execution.rs`（IR実行と進捗）、`metrics.rs`（計測設定とレポート）、
+`identity.rs`（成果物ID）を呼ぶ。入力後の実行・出力処理は両入力経路で共通である。
 
 ## 処理の流れ
 
@@ -52,7 +57,7 @@ BFCソース
 この入力では既に共有されているフラットな記憶領域の関係を保存するため、ソース入力と同じ
 インライン化・スロット再割り当ての経路には通さない。
 
-どちらの入力も、`--run-ir` ではBF生成の代わりに [cir/vm.rs](src/cir/vm.rs) で実行する。
+どちらの入力も、`--run-ir` ではBF生成の代わりに [cir/vm/](src/cir/vm/mod.rs) で実行する。
 `cell/` の低水準APIは `Cell IR → cell::codegen → BF IR` という独立した経路である。
 
 ## 名前の近い処理
