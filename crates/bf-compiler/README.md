@@ -77,8 +77,17 @@ BFCソース
 
 ## テストと設計資料
 
-各モジュール内のユニットテストに加え、[tests/](tests/) に公開API、言語機能、CLI、最適化の回帰テストがある。
-`backend/codegen/*_probe.rs` はテスト時のみ組み込まれ、差分実行や測定を行う。
+各モジュール内のユニットテストに加え、[tests/](tests/) に機能別の統合テストがある。
+
+- `tests/language/`: グローバル変数・配列・型・マクロなどの言語仕様。
+- `tests/optimizations/`: 比較・減算の融合、局所フレーム、構造化制御などの最適化。
+- `tests/cli/`: 出力形式、バックエンドのオプション、計測、入力保護、複数ソース。共通ヘルパーは `support.rs`。
+- `tests/public_api.rs`: 公開IRの構築・コンパイル・プロファイルAPI。
+- `tests/selfhost.rs`: 明示実行するselfhost全体の互換性検証。
+
+[backend/codegen/tests/](src/backend/codegen/tests/mod.rs) はBF生成の回帰テストを
+dispatch、call/return、命令、portal、region出力、インライン化に分けている。
+`support.rs` は共通fixtureとVM/BF差分測定、`measurements.rs` は明示実行の成果物出力を担当する。
 `cell/continuation_adapter.rs` もテスト専用である。[examples/](examples/) には比較・計測用ドライバがある。
 
 リポジトリルートから通常の検証を実行する。
@@ -86,6 +95,11 @@ BFCソース
 ```sh
 TMPDIR="$PWD/tmp" cargo test -p bf-compiler
 cargo fmt -p bf-compiler -- --check
+
+# 機能を絞る例
+TMPDIR="$PWD/tmp" cargo test -p bf-compiler --test cli
+TMPDIR="$PWD/tmp" cargo test -p bf-compiler --test language globals_and_arrays
+TMPDIR="$PWD/tmp" cargo test -p bf-compiler --lib backend::codegen::tests::regions
 ```
 
 明示実行が必要なselfhost全体のテストや測定は、通常のテストではignoredとなる。

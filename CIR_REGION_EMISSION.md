@@ -76,14 +76,14 @@ compact にする。semantic continuation ID と portal resume protocol はそ�
 ## 再現と実測
 
 ```sh
-cargo test -p bf-compiler region_probe -- --nocapture
+cargo test -p bf-compiler backend::codegen::tests::regions -- --nocapture
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 (cd tools/cir-viewer && npm run build)
 ```
 
-測定 fixture は `region_probe.rs` に固定した。最初の2ケースは source frontend の
+測定 fixture は `backend/codegen/tests/regions.rs` に固定した。最初の2ケースは source frontend の
 既定 CFG optimizer を通し、CIR inline を明示的に無効化して backend の効果を単独で測る。
 初版では conditional early return により当時の HIR inline を防いでいた。
 BF bytes は全 program の最適化済み通常 BF、BF 命令数は全 program の実行命令数。
@@ -160,7 +160,7 @@ nested optional Call loop が18→21訪問になる。B1 はこれらの soft ed
 ## RLE 実行命令数
 
 2026-09-23、通常 CFG 化済みの `d654320` を基準に RLE の測定も追加した。
-以後の `region_probe` は raw BF／RLE の両カウンタと selector の内訳を出力する。
+以後の `backend::codegen::tests::regions` は raw BF／RLE の両カウンタと selector の内訳を出力する。
 RLE は隣接する同一の `+`／`-`／`<`／`>` を1命令にまとめた場合の動的実行数であり、
 ファイルの圧縮 byte 数や interpreter の native optimization 実行数ではない。
 profile 有無で raw／RLE の総数が一致することも検証する。

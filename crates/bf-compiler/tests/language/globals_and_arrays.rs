@@ -24,7 +24,7 @@ fn assert_executes_for_sixteen_cell_chunks(source: &str, input: &[u8], expected:
 #[test]
 fn repository_self_test_program_reports_all_ok() {
     assert_executes_for_sixteen_cell_chunks(
-        include_str!("../../../test.bfc"),
+        include_str!("../../../../test.bfc"),
         &[],
         b"ok\nok\nok\nok\nok\nok\nok\nok\n",
     );
@@ -32,7 +32,7 @@ fn repository_self_test_program_reports_all_ok() {
 
 #[test]
 fn repository_self_test_harness_aborts_after_the_first_failure() {
-    let source = include_str!("../../../test.bfc");
+    let source = include_str!("../../../../test.bfc");
     let failing = source.replace("check!(test8());", "check!(0); output('x');");
     assert_ne!(
         failing, source,

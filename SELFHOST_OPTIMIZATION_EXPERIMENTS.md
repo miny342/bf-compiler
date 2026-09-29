@@ -241,7 +241,7 @@ portal nibbleの値ごとのlocal equality dispatchで、値ごとに`value * ch
 21,613→83,003 bytes、`global-large`は184,673→307,453 bytesとなった。4-bitのpopcount分解を
 productionへ入れるには、16値の比較表を増やさずにbitを判定する別のscratch設計が必要である。
 
-`cargo test -p bf-compiler --test stage78`、上記長配列fixtureのIR/BF出力比較、既存portal fixtureの
+`cargo test -p bf-compiler --test language globals_and_arrays`、上記長配列fixtureのIR/BF出力比較、既存portal fixtureの
 出力検証は成功した。dispatchの頻度配置（#4）はこの実験では変更していない。
 
 ## 2026-09-20: Rust loweringでのゼロ比較の直接分岐

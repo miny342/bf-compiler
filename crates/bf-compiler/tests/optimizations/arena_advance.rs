@@ -1,7 +1,7 @@
 use bf_compiler as bfc;
 
 fn arena_source() -> String {
-    let source = include_str!("../../../selfhost/stage2/compiler/06_arena.bfc");
+    let source = include_str!("../../../../selfhost/stage2/compiler/06_arena.bfc");
     // Exercise the production function without allocating the million-cell
     // arena: arithmetic only needs the type and constant declarations.
     let declarations = source.split_once("WideValue wide_from_cell(").unwrap().0;

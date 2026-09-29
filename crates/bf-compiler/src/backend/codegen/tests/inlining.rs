@@ -1,5 +1,4 @@
 //! Differential tests use explicit CIR targets and bypass HIR inlining.
-use super::region_probe::measure;
 use super::*;
 use crate::cir::inline::{InlineStats, inline_selected};
 use crate::{

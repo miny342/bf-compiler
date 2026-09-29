@@ -35,10 +35,6 @@ mod transport;
 use crate::backend::layout_plan::{
     FunctionLayout, GLOBAL_ROUTE_NIBBLE_CELLS, build_layouts_with_regions,
 };
-#[cfg(test)]
-use crate::backend::layout_plan::{build_layouts, estimated_frame_chunks};
-#[cfg(test)]
-use crate::backend::regions::maximum_branch_depth;
 use dispatch::DispatchEncoding;
 use portal_plan::*;
 use static_frames::{StaticFramePlan, StaticResume};
@@ -447,11 +443,3 @@ impl<'a> AbiEmitter<'a> {
         }
     }
 }
-
-#[cfg(test)]
-mod portal_probe;
-
-#[cfg(test)]
-mod inline_probe;
-#[cfg(test)]
-mod region_probe;

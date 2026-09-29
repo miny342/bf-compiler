@@ -136,7 +136,7 @@ fn selfhost_hex_serializer_keeps_frame_control_and_exact_output() {
              WideValue n;n.low=input();n.mid=input();n.high=input();
              emit_repeat_wide('>',n);output('.');
          }}}}",
-        include_str!("../../../selfhost/stage2/compiler/09_bf_serialization.bfc")
+        include_str!("../../../../selfhost/stage2/compiler/09_bf_serialization.bfc")
     );
     let (program, _) = lower(&source);
     // The ordinary CFG inliner now removes serializer helpers as well.

@@ -35,7 +35,8 @@ def main():
     compiler, interpreter = args.compiler.resolve(), args.interpreter.resolve()
     identities = [compiler, interpreter, Path(__file__), Path(diag.__file__),
         diag.REPO/'crates/bf-compiler/src/backend/codegen/mod.rs',
-        diag.REPO/'crates/bf-compiler/src/backend/codegen/portal_probe.rs']
+        diag.REPO/'crates/bf-compiler/src/backend/codegen/tests/support.rs',
+        diag.REPO/'crates/bf-compiler/src/backend/codegen/tests/measurements.rs']
     if args.baseline_compiler:
         identities.append(args.baseline_compiler.resolve())
     diag.save(root/'manifest.json', dict(
@@ -52,7 +53,7 @@ def main():
             env=dict(os.environ, BFC_PORTAL_PROBE_OUTPUT=str(directory),
                      BFC_PORTAL_NIBBLE_TRANSFER=str(int(variant=='nibble')))
             result=diag.invoke(['cargo','test','--release','-p','bf-compiler','--lib',
-                'backend::codegen::portal_probe::export_portal_transport_fixtures','--','--ignored','--exact'],env=env)
+                'backend::codegen::tests::measurements::export_portal_transport_fixtures','--','--ignored','--exact'],env=env)
             (directory/'export.log').write_bytes(result.stdout+result.stderr)
     summaries={}
     for name in args.cases:

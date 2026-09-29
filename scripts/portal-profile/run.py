@@ -235,7 +235,8 @@ def main():
     compiler, interpreter = args.compiler.resolve(), args.interpreter.resolve()
     selected = {k:v for k,v in cases().items() if not args.cases or k in args.cases}
     inputs = [compiler, interpreter, Path(__file__), REPO/'crates/bf-compiler/src/backend/codegen/mod.rs',
-              REPO/'crates/bf-compiler/src/backend/codegen/portal_probe.rs',
+              REPO/'crates/bf-compiler/src/backend/codegen/tests/support.rs',
+              REPO/'crates/bf-compiler/src/backend/codegen/tests/measurements.rs',
               *[REPO/'selfhost/stage2/compiler'/f for f in ['06_arena.bfc','09_bf_serialization.bfc']]]
     if args.baseline_compiler:
         inputs.append(args.baseline_compiler.resolve())
@@ -246,7 +247,7 @@ def main():
     if any(c['kind']=='transport' for c in selected.values()):
         env = dict(os.environ, BFC_PORTAL_PROBE_OUTPUT=str(root), BFC_PORTAL_NIBBLE_TRANSFER=str(int(args.enable_nibble_transfer)))
         result = invoke(['cargo','test','--release','-p','bf-compiler','--lib',
-            'backend::codegen::portal_probe::export_portal_transport_fixtures','--','--ignored','--exact'],
+            'backend::codegen::tests::measurements::export_portal_transport_fixtures','--','--ignored','--exact'],
             env=env)
         (root/'export.log').write_bytes(result.stdout+result.stderr)
     summaries = {}

@@ -39,13 +39,13 @@ allocator・frame fusion・virtual cleanup で共用する。
 ## 差分実行と測定
 
 ```sh
-cargo test -p bf-compiler inline_probe -- --nocapture --test-threads=1
+cargo test -p bf-compiler backend::codegen::tests::inlining -- --nocapture --test-threads=1
 cargo test -p bf-compiler explicit_inline_retains_call_when_no_clone_ids_fit
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-`backend/codegen/inline_probe.rs` は HIR inline をバイパスし、同一 unallocated CIR の inline 前後を
+`backend/codegen/tests/inlining.rs` は HIR inline をバイパスし、同一 unallocated CIR の inline 前後を
 CIR VM と B0／B1 の生成 BF で実行する。期待出力、入力消費、残存 hard operation の実行数、
 profile 有無の BF／raw／RLE カウンタを比較する。下表は **B1 を共通に使用した inline 前→後**。
 訪問数・BF bytes・raw／RLE は全 program。frame は対象 caller の値。
@@ -154,7 +154,7 @@ CLI の artifact identity は `bfc-ir-artifact-v6` とし、`inline_functions` �
 selfhost 全体の差分検証は次で再実行できる。
 
 ```sh
-cargo test --release -p bf-compiler --test cir_selfhost_migration -- --ignored --nocapture
+cargo test --release -p bf-compiler --test selfhost -- --ignored --nocapture
 ```
 
 この検証は compiler 自体を CIR VM 上で動かし、inline 有無で出力 CIR bytes・入力消費・終了状態を
@@ -183,21 +183,21 @@ compiler 自体の CIR 訪問数を BF dispatcher 訪問数として扱わない
 
 | 計画のケース | 主な回帰 |
 |---|---|
-| 1. 1-call loop | `region_probe::source_yield_lowering_preserves_dispatch_minimum` |
-| 2. 2-call loop | `region_probe::two_call_loop_reaches_five_real_dispatcher_visits` |
-| 3–4. nested if／while、soft cycle | `region_probe` の optional/nested Call と32種類の有限 CFG |
-| 5. both-arm yielding if | `region_probe::both_yielding_arms_reach_two_real_dispatcher_visits` |
-| 6–7. RHS→index→portal、aggregate snapshot／部分更新 | `region_probe` と `inline_probe` の Call/portal、subrange、outbox tail |
-| 8–9. yielding short-circuit | `inline_probe::inline_keeps_short_circuit_evaluation_and_zero_sized_returns` |
-| 10. yielding inline、内側 Call 保持 | `inline_probe::yielding_and_early_return_inline_preserves_inner_calls_and_iteration_order` |
-| 11. 複数 caller | `inline_probe::multiple_callers_and_nested_inline_have_fresh_storage` |
-| 12. scalar return、毎回の初期化 | `inline_probe` の fresh storage／loop invocation／readonly snapshot |
-| 13. aggregate 値渡し・結果 | `inline_probe` の nested results／parameter subrange／outbox tail／zero-sized return |
-| 14. 直接／相互再帰 | `inline_probe::direct_and_mutual_recursive_sccs_are_never_inlined` と automatic budget test |
-| 15. Abort／early return | `inline_probe`、`structured_frame_lowering`、selfhost error case |
-| condition 再利用・共有 resume・source span・ID上限 | `region_probe`／`inline_probe`／`explicit_inline_retains_call_when_no_clone_ids_fit` |
+| 1. 1-call loop | `backend::codegen::tests::regions::source_yield_lowering_preserves_dispatch_minimum` |
+| 2. 2-call loop | `backend::codegen::tests::regions::two_call_loop_reaches_five_real_dispatcher_visits` |
+| 3–4. nested if／while、soft cycle | `backend::codegen::tests::regions` の optional/nested Call と32種類の有限 CFG |
+| 5. both-arm yielding if | `backend::codegen::tests::regions::both_yielding_arms_reach_two_real_dispatcher_visits` |
+| 6–7. RHS→index→portal、aggregate snapshot／部分更新 | `backend::codegen::tests::regions` と `backend::codegen::tests::inlining` の Call/portal、subrange、outbox tail |
+| 8–9. yielding short-circuit | `backend::codegen::tests::inlining::inline_keeps_short_circuit_evaluation_and_zero_sized_returns` |
+| 10. yielding inline、内側 Call 保持 | `backend::codegen::tests::inlining::yielding_and_early_return_inline_preserves_inner_calls_and_iteration_order` |
+| 11. 複数 caller | `backend::codegen::tests::inlining::multiple_callers_and_nested_inline_have_fresh_storage` |
+| 12. scalar return、毎回の初期化 | `backend::codegen::tests::inlining` の fresh storage／loop invocation／readonly snapshot |
+| 13. aggregate 値渡し・結果 | `backend::codegen::tests::inlining` の nested results／parameter subrange／outbox tail／zero-sized return |
+| 14. 直接／相互再帰 | `backend::codegen::tests::inlining::direct_and_mutual_recursive_sccs_are_never_inlined` と automatic budget test |
+| 15. Abort／early return | `backend::codegen::tests::inlining`、`optimizations::structured_control`、selfhost error case |
+| condition 再利用・共有 resume・source span・ID上限 | `backend::codegen::tests::regions`／`backend::codegen::tests::inlining`／`explicit_inline_retains_call_when_no_clone_ids_fit` |
 | frame／展開上限 | automatic global frame guard／work budget、region capacity fallback／255・256 terminal／depth・node limit |
-| 公開API・CLI・wire・profile・圧縮 | `public_api`／`ir_metrics_cli`／`cir_selfhost_migration` |
+| 公開API・CLI・wire・profile・圧縮 | `public_api`／`cli`／`selfhost` |
 
 残る性能調整は、cheap case の定数／コピー簡約、B1 の追加 scratch と selector cost、
 大規模入力の試行 allocation／複製量である。dispatcher 削減を保証するテストを維持したまま調整する。

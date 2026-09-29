@@ -120,10 +120,8 @@ fn load_sources(options: &Options) -> Result<LoadedProgram, Box<dyn std::error::
         .collect();
 
     let report_lowering = options.run_ir || options.cir_output.is_some();
-    if report_lowering {
-        if let Some(cli_id) = ir_artifact_id.as_deref() {
-            validate_cli_artifact_id(cli_id, &artifact_identity)?;
-        }
+    if report_lowering && let Some(cli_id) = ir_artifact_id.as_deref() {
+        validate_cli_artifact_id(cli_id, &artifact_identity)?;
     }
     let lower_started = Instant::now();
     if report_lowering {

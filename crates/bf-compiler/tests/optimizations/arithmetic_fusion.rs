@@ -63,7 +63,7 @@ fn fused_count(body: &[I]) -> usize {
 
 #[test]
 fn source_fusion_covers_every_pair_and_preserves_inputs() {
-    let source = include_str!("../../../scripts/sub-borrow-fusion/pairs.bfc");
+    let source = include_str!("../../../../scripts/sub-borrow-fusion/pairs.bfc");
     let mut input = Vec::new();
     let mut expected = Vec::new();
     for a in 0..=255u8 {
@@ -230,7 +230,7 @@ fn changed_inputs_and_io_prevent_fusion() {
 
 #[test]
 fn production_wide_subtract_preserves_borrow_chains_and_call_frames() {
-    let arena = include_str!("../../../selfhost/stage2/compiler/06_arena.bfc");
+    let arena = include_str!("../../../../selfhost/stage2/compiler/06_arena.bfc");
     let function = arena
         .split("WideValue wide_subtract(")
         .nth(1)
