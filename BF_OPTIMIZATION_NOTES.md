@@ -388,6 +388,30 @@ stage 2のBFC内部test BFをrelease buildで実行した結果は次のとお�
 bf-interpreter --stats program.bf < input
 ```
 
+最適化を個別に無効化して比較する場合は、次のCLI flagを使う。
+APIでは同名のsnake_case fieldを`RunOptions`へ設定する。既定ではすべて有効。
+
+| flag | 無効になる処理 |
+|---|---|
+| `--disable-rle` | RLEと全ループ最適化。圧縮BFも各命令を逐次実行する |
+| `--disable-clear` | Clearと、内部のclearまで一括処理する旧Compare |
+| `--disable-scan` | ScanとRemoteTransfer |
+| `--disable-transfer` | TransferとRemoteTransfer |
+| `--disable-countdown` | Countdownの進入部分の一括処理 |
+| `--disable-compare` | 旧Compareと新CompareSlide |
+| `--disable-remote-transfer` | RemoteTransfer |
+
+flagは組み合わせて指定できる。Clear無効時も新CompareSlideと通常のTransferは有効で、
+`[-]`や`[+]`を転送先のないTransferへ再分類する処理は止める。
+Countdownは子ループと末尾の処理を個別に実行するので、RLE以外への依存はない。
+無効化された子の最適化は通常のBF実行に戻る。
+
+`--disable-rle`でもBFCRLE1/BFCRLE2の入力形式は受け付ける。圧縮runは展開せずに保持し、
+実行時に1命令ずつ処理するため、大きな反復数も途中でinterruptできる。
+`executed_instructions`と`executed_rle_instructions`は設定によらず同じ論理命令数を保持し、
+実際の一括処理の違いは`native_operations`と各最適化counterに現れる。
+RLE無効時の`rle_operations`は0になる。
+
 これはセルフホスト検証を高速化するinterpreter実装であり、compiler backendのcost modelや生成BFを
 変更するものではない。
 

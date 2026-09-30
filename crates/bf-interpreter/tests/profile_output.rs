@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,6 +28,80 @@ impl TemporaryDirectory {
 impl Drop for TemporaryDirectory {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.0).expect("remove temporary directory");
+    }
+}
+
+#[test]
+fn cli_bypasses_reach_execution_and_disable_dependent_optimizations() {
+    let directory = TemporaryDirectory::new();
+    let program = directory.path().join("program.bf");
+    let cases = [
+        ("--disable-rle", "@BFCRLE2;+10.", "rle_operations"),
+        ("--disable-clear", "++++[-].", "clear_loops"),
+        ("--disable-scan", "+>+>+<<[>].", "scan_loops"),
+        ("--disable-transfer", "++++[->++<]>.", "transfer_loops"),
+        ("--disable-countdown", "+++[-[-[-[-]>+<]>+<]>+<]>.", ""),
+        (
+            "--disable-clear",
+            "+++>+<[>>+<[-<->>-]>[-<<[-]>>>]<<<].",
+            "clear_loops",
+        ),
+        (
+            "--disable-scan",
+            ">>+>>+>>+<<<<<+++[->[>>]>+<<<[<<]>]>>>>>>>>.",
+            "remote_transfer_loops",
+        ),
+        (
+            "--disable-transfer",
+            ">>+>>+>>+<<<<<+++[->[>>]>+<<<[<<]>]>>>>>>>>.",
+            "remote_transfer_loops",
+        ),
+    ];
+    for (flag, source, counter) in cases {
+        fs::write(&program, source).unwrap();
+        let execute = |flags: &[&str]| {
+            let result = Command::new(env!("CARGO_BIN_EXE_bf-interpreter"))
+                .args(["--stats", "--no-progress"])
+                .args(flags)
+                .arg(&program)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let stats = String::from_utf8(result.stderr)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let (key, value) = line.split_once('=').unwrap();
+                    (key.to_owned(), value.parse::<u64>().unwrap())
+                })
+                .collect::<BTreeMap<_, _>>();
+            (result.stdout, stats)
+        };
+        let (expected_output, expected) = execute(&[]);
+        let (output, actual) = execute(&[flag]);
+        assert_eq!(output, expected_output, "{flag} {source}");
+        for key in [
+            "executed_instructions",
+            "executed_rle_instructions",
+            "max_pointer",
+        ] {
+            assert_eq!(actual[key], expected[key], "{flag} {key}");
+        }
+        assert!(
+            actual["native_operations"] > expected["native_operations"],
+            "{flag} {source}"
+        );
+        if !counter.is_empty() {
+            assert!(expected[counter] > 0, "{flag} {counter}");
+            assert_eq!(actual[counter], 0, "{flag} {counter}");
+        }
+        if flag == "--disable-clear" {
+            assert_eq!(actual["transfer_loops"], 0);
+        }
     }
 }
 

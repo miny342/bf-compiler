@@ -75,6 +75,11 @@ enum ProfileFormat {
 }
 
 struct CliOptions {
+    disable_rle: bool,
+    disable_clear: bool,
+    disable_scan: bool,
+    disable_transfer: bool,
+    disable_countdown: bool,
     disable_remote_transfer: bool,
     disable_compare: bool,
     print_stats: bool,
@@ -176,6 +181,11 @@ fn main_result() -> Result<(), Box<dyn std::error::Error>> {
         &source,
         &input,
         RunOptions {
+            disable_rle: options.disable_rle,
+            disable_clear: options.disable_clear,
+            disable_scan: options.disable_scan,
+            disable_transfer: options.disable_transfer,
+            disable_countdown: options.disable_countdown,
             disable_remote_transfer: options.disable_remote_transfer,
             disable_compare: options.disable_compare,
             unbounded_tape: options.unlimited_tape,
@@ -252,6 +262,11 @@ fn parse_arguments(
     let mut print_stats = false;
     let mut print_timings = false;
     let mut unlimited_tape = false;
+    let mut disable_rle = false;
+    let mut disable_clear = false;
+    let mut disable_scan = false;
+    let mut disable_transfer = false;
+    let mut disable_countdown = false;
     let mut disable_remote_transfer = false;
     let mut disable_compare = false;
     let mut program_path = None;
@@ -272,6 +287,16 @@ fn parse_arguments(
             print_timings = true;
         } else if argument == "--unlimited-tape" {
             unlimited_tape = true;
+        } else if argument == "--disable-rle" {
+            disable_rle = true;
+        } else if argument == "--disable-clear" {
+            disable_clear = true;
+        } else if argument == "--disable-scan" {
+            disable_scan = true;
+        } else if argument == "--disable-transfer" {
+            disable_transfer = true;
+        } else if argument == "--disable-countdown" {
+            disable_countdown = true;
         } else if argument == "--disable-remote-transfer" {
             disable_remote_transfer = true;
         } else if argument == "--disable-compare" {
@@ -357,6 +382,11 @@ fn parse_arguments(
         return Err("--no-progress cannot be combined with --progress-interval".into());
     }
     Ok(CliOptions {
+        disable_rle,
+        disable_clear,
+        disable_scan,
+        disable_transfer,
+        disable_countdown,
         disable_remote_transfer,
         disable_compare,
         print_stats,
@@ -898,13 +928,20 @@ fn duration_percent(numerator: u128, denominator: u128) -> f64 {
 
 fn usage(executable: &OsStr) -> String {
     format!(
-        "usage: {} [--stats] [--timings] [--unlimited-tape] [--disable-remote-transfer] [--disable-compare] [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
+        "usage: {} [--stats] [--timings] [--unlimited-tape] \
+         [--disable-rle] [--disable-clear] [--disable-scan] [--disable-transfer] \
+         [--disable-countdown] [--disable-remote-transfer] [--disable-compare] \
+         [--progress-interval 10s] [--no-progress] [--profile-map PATH] [--accept-embedded-profile] \
          [--profile-mode counters|sample|exact] [--profile-sample-interval 1ms] \
          [--profile-output PATH] [--profile-format text|json] <program.bf>\n\
          Accepts ordinary BF and auto-detects @BFCRLE1;/@BFCRLE2; compressed BF.\n\
+         --disable-rle executes each BF command separately and disables all optimizations.\n\
+         --disable-clear also bypasses the old comparison idiom; CompareSlide remains enabled.\n\
+         --disable-scan and --disable-transfer each also bypass RemoteTransfer.\n\
+         --disable-countdown bypasses nested countdown folding.\n\
          --disable-compare bypasses both comparison-loop idioms.\n\
          --disable-remote-transfer bypasses scan-bearing remote transfers.\n\
-         These flags can be combined; generic loop and RLE optimizations remain enabled.",
+         These flags can be combined; optimizations with disabled prerequisites are bypassed.",
         executable.to_string_lossy()
     )
 }
@@ -915,20 +952,41 @@ mod tests {
 
     #[test]
     fn parses_independent_optimization_bypasses() {
-        for disable_compare in [false, true] {
-            for disable_remote_transfer in [false, true] {
-                let mut arguments = vec![OsString::from("program.bf")];
-                if disable_compare {
-                    arguments.push("--disable-compare".into());
+        let flags = [
+            "--disable-rle",
+            "--disable-clear",
+            "--disable-scan",
+            "--disable-transfer",
+            "--disable-countdown",
+            "--disable-compare",
+            "--disable-remote-transfer",
+        ];
+        for mask in 0..128 {
+            let mut arguments = vec![OsString::from("program.bf")];
+            for (bit, flag) in flags.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    arguments.push((*flag).into());
                 }
-                if disable_remote_transfer {
-                    arguments.push("--disable-remote-transfer".into());
-                }
-                let options = parse_arguments(OsStr::new("bf-interpreter"), arguments).unwrap();
-                assert_eq!(options.disable_compare, disable_compare);
-                assert_eq!(options.disable_remote_transfer, disable_remote_transfer);
-                assert_eq!(options.program_path, PathBuf::from("program.bf"));
             }
+            let options = parse_arguments(OsStr::new("bf-interpreter"), arguments).unwrap();
+            let disabled = [
+                options.disable_rle,
+                options.disable_clear,
+                options.disable_scan,
+                options.disable_transfer,
+                options.disable_countdown,
+                options.disable_compare,
+                options.disable_remote_transfer,
+            ];
+            for (bit, actual) in disabled.iter().enumerate() {
+                assert_eq!(
+                    *actual,
+                    mask & (1 << bit) != 0,
+                    "mask={mask} flag={}",
+                    flags[bit]
+                );
+            }
+            assert_eq!(options.program_path, PathBuf::from("program.bf"));
         }
     }
 

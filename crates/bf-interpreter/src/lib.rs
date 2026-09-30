@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 pub use bf_profiling::{ProfileMap, ProfileSiteId};
 
 mod compare_loop;
+#[cfg(test)]
+mod optimization_bypass_tests;
 mod remote_transfer;
 
 /// Number of cells in the standard tape.
@@ -23,6 +25,7 @@ pub struct RunStats {
     pub executed_instructions: u64,
     /// Estimated instructions executed by a target that groups adjacent,
     /// identical `+`, `-`, `<`, and `>` instructions into one operation.
+    /// This count is retained even when RLE execution is disabled.
     pub executed_rle_instructions: u64,
     /// Largest tape index reached by the data pointer.
     pub max_pointer: usize,
@@ -42,7 +45,7 @@ pub struct OptimizationRunStats {
     pub remote_transfer_iterations: u64,
     /// Candidates whose runtime safety checks required normal BF execution.
     pub remote_transfer_fallbacks: u64,
-    /// Fast-IR instructions dispatched by Rust.
+    /// Scalar or fused operations dispatched by Rust.
     pub executed_native_operations: u64,
     /// Coalesced `+`, `-`, `<`, or `>` runs executed.
     pub rle_operations: u64,
@@ -72,6 +75,17 @@ pub struct RunResult {
 /// Options for the configurable interpreter entry point.
 #[derive(Clone, Default)]
 pub struct RunOptions {
+    /// Disable RLE execution and every optimization built on it.
+    /// Compressed BF is still decoded, but each command executes separately.
+    pub disable_rle: bool,
+    /// Disable clear loops and the old comparison idiom that includes a clear.
+    pub disable_clear: bool,
+    /// Disable scan loops and RemoteTransfer recognition.
+    pub disable_scan: bool,
+    /// Disable linear transfers and RemoteTransfer recognition.
+    pub disable_transfer: bool,
+    /// Disable folding of nested countdown prefixes.
+    pub disable_countdown: bool,
     /// Disable only RemoteTransfer recognition, for differential evaluation.
     pub disable_remote_transfer: bool,
     /// Disable both comparison-loop idioms, leaving generic optimizations enabled.
@@ -87,6 +101,11 @@ impl fmt::Debug for RunOptions {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RunOptions")
+            .field("disable_rle", &self.disable_rle)
+            .field("disable_clear", &self.disable_clear)
+            .field("disable_scan", &self.disable_scan)
+            .field("disable_transfer", &self.disable_transfer)
+            .field("disable_countdown", &self.disable_countdown)
             .field("disable_remote_transfer", &self.disable_remote_transfer)
             .field("disable_compare", &self.disable_compare)
             .field("unbounded_tape", &self.unbounded_tape)
@@ -95,6 +114,38 @@ impl fmt::Debug for RunOptions {
             .field("profile", &self.profile)
             .field("progress", &self.progress.as_ref().map(|_| "enabled"))
             .finish()
+    }
+}
+
+/// Effective switches after applying the prerequisites of each optimization.
+#[derive(Debug, Clone, Copy)]
+struct Optimizations {
+    rle: bool,
+    clear: bool,
+    scan: bool,
+    transfer: bool,
+    countdown: bool,
+    remote_transfer: bool,
+    compare: bool,
+    compare_slide: bool,
+}
+
+impl From<&RunOptions> for Optimizations {
+    fn from(options: &RunOptions) -> Self {
+        let rle = !options.disable_rle;
+        let clear = rle && !options.disable_clear;
+        let scan = rle && !options.disable_scan;
+        let transfer = rle && !options.disable_transfer;
+        Self {
+            rle,
+            clear,
+            scan,
+            transfer,
+            countdown: rle && !options.disable_countdown,
+            remote_transfer: scan && transfer && !options.disable_remote_transfer,
+            compare: clear && !options.disable_compare,
+            compare_slide: rle && !options.disable_compare,
+        }
     }
 }
 
@@ -380,11 +431,10 @@ pub fn run_with_options(
     // 40-byte `Instruction` per BF byte before immediately coalescing those runs
     // multiplies a large source into tens of gigabytes. Build the fast representation
     // directly in both profiled and unprofiled modes.
-    let optimized = parse_optimized_with_flags(
+    let optimized = parse_optimized_with_options(
         source,
         options.profile.as_ref().map(|profile| &profile.map),
-        !options.disable_remote_transfer,
-        !options.disable_compare,
+        Optimizations::from(&options),
     )?;
     let parse_elapsed = parse_started.map_or(Duration::ZERO, |started| started.elapsed());
     let build_elapsed = Duration::ZERO;
@@ -482,7 +532,7 @@ impl BodyRange {
         }
     }
 
-    fn slice<'a>(self, instructions: &'a [FastInstruction]) -> &'a [FastInstruction] {
+    fn slice(self, instructions: &[FastInstruction]) -> &[FastInstruction] {
         let start = self.start as usize;
         &instructions[start..start + self.len as usize]
     }
@@ -524,6 +574,14 @@ impl std::ops::Deref for FastProgram {
 #[derive(Debug, Clone)]
 enum FastInstruction {
     Unused,
+    /// Compact storage for decoded commands executed one at a time, without RLE.
+    RawRun {
+        site: ResolvedProfileSite,
+        op: RleOp,
+        count: usize,
+        source_offset: usize,
+        starts_rle: bool,
+    },
     Countdown {
         site: ResolvedProfileSite,
         chain: Box<CountdownChain>,
@@ -554,7 +612,8 @@ enum FastInstruction {
 impl FastInstruction {
     const fn site(&self) -> ResolvedProfileSite {
         match self {
-            Self::Countdown { site, .. }
+            Self::RawRun { site, .. }
+            | Self::Countdown { site, .. }
             | Self::Move { site, .. }
             | Self::Add { site, .. }
             | Self::Input { site, .. }
@@ -566,7 +625,8 @@ impl FastInstruction {
 
     const fn mixed_provenance(&self) -> bool {
         match self {
-            Self::Countdown { site, .. }
+            Self::RawRun { site, .. }
+            | Self::Countdown { site, .. }
             | Self::Move { site, .. }
             | Self::Add { site, .. }
             | Self::Input { site, .. }
@@ -820,18 +880,10 @@ impl SourceOffsets {
     }
 }
 
+#[derive(Default)]
 struct InstructionBuffer {
     first: Option<FastInstruction>,
     rest: Vec<FastInstruction>,
-}
-
-impl Default for InstructionBuffer {
-    fn default() -> Self {
-        Self {
-            first: None,
-            rest: Vec::new(),
-        }
-    }
 }
 
 impl InstructionBuffer {
@@ -841,7 +893,7 @@ impl InstructionBuffer {
 
     fn as_slice(&self) -> &[FastInstruction] {
         if self.rest.is_empty() {
-            self.first.as_ref().map_or(&[], std::slice::from_ref)
+            self.first.as_slice()
         } else {
             &self.rest
         }
@@ -887,6 +939,23 @@ struct FastBlock {
 }
 
 impl FastBlock {
+    fn push_raw_run(
+        &mut self,
+        op: RleOp,
+        site: ResolvedProfileSite,
+        count: usize,
+        source_offset: usize,
+    ) {
+        self.instructions.push(FastInstruction::RawRun {
+            site,
+            op,
+            count,
+            source_offset,
+            starts_rle: self.last_rle != Some(op),
+        });
+        self.last_rle = Some(op);
+    }
+
     fn root() -> Self {
         Self {
             instructions: InstructionBuffer::default(),
@@ -1018,11 +1087,28 @@ fn parse_optimized(source: &[u8], profile_map: Option<&ProfileMap>) -> Result<Fa
     parse_optimized_with_flags(source, profile_map, true, true)
 }
 
+#[cfg(test)]
 fn parse_optimized_with_flags(
     source: &[u8],
     profile_map: Option<&ProfileMap>,
     remote_transfer: bool,
     compare: bool,
+) -> Result<FastProgram, Error> {
+    parse_optimized_with_options(
+        source,
+        profile_map,
+        Optimizations::from(&RunOptions {
+            disable_remote_transfer: !remote_transfer,
+            disable_compare: !compare,
+            ..RunOptions::default()
+        }),
+    )
+}
+
+fn parse_optimized_with_options(
+    source: &[u8],
+    profile_map: Option<&ProfileMap>,
+    enabled: Optimizations,
 ) -> Result<FastProgram, Error> {
     let mut blocks = vec![FastBlock::root()];
     let mut arena = Vec::with_capacity(source.len().saturating_div(3));
@@ -1051,6 +1137,19 @@ fn parse_optimized_with_flags(
             ordinal += count as u64;
             remaining -= count;
             let current = blocks.last_mut().unwrap();
+            if !enabled.rle {
+                let op = match byte {
+                    b'>' => Some(RleOp::Right),
+                    b'<' => Some(RleOp::Left),
+                    b'+' => Some(RleOp::Increment),
+                    b'-' => Some(RleOp::Decrement),
+                    _ => None,
+                };
+                if let Some(op) = op {
+                    current.push_raw_run(op, site, count, source_offset);
+                    continue;
+                }
+            }
             match byte {
                 b'>' => current.push_move(
                     RleOp::Right,
@@ -1089,18 +1188,18 @@ fn parse_optimized_with_flags(
                     let single_range = profile_map
                         .is_none_or(|map| map.ranges[range_index].start <= block.opening_ordinal);
                     let body_instructions = body.as_slice();
-                    let optimization = if compare
+                    let optimization = if enabled.compare
                         && single_range
                         && compare_loop::recognize(body_instructions, &arena)
                     {
                         Some(LoopOptimization::Compare)
-                    } else if compare
+                    } else if enabled.compare_slide
                         && single_range
                         && compare_loop::recognize_slide(body_instructions, &arena)
                     {
                         Some(LoopOptimization::CompareSlide)
                     } else {
-                        recognize_fast_loop(body_instructions, remote_transfer, &optimizations)
+                        recognize_fast_loop(body_instructions, enabled, &optimizations)
                     };
                     let mut loop_site = block.opening_site.unwrap();
                     let mut mixed = false;
@@ -1124,14 +1223,17 @@ fn parse_optimized_with_flags(
                             .try_into()
                             .expect("loop optimization count fits in u32")
                     });
-                    blocks.last_mut().unwrap().push_non_rle(fold_countdown(
-                        FastInstruction::Loop {
-                            site: loop_site.with_mixed(mixed),
-                            body: body_range,
-                            optimization,
-                        },
-                        &mut arena,
-                    ));
+                    let instruction = FastInstruction::Loop {
+                        site: loop_site.with_mixed(mixed),
+                        body: body_range,
+                        optimization,
+                    };
+                    let instruction = if enabled.countdown {
+                        fold_countdown(instruction, &mut arena)
+                    } else {
+                        instruction
+                    };
+                    blocks.last_mut().unwrap().push_non_rle(instruction);
                 }
                 _ => {}
             }
@@ -1239,10 +1341,10 @@ fn lowest_common_ancestor(
 
 fn recognize_fast_loop(
     body: &[FastInstruction],
-    remote_transfer: bool,
+    enabled: Optimizations,
     optimizations: &[LoopOptimization],
 ) -> Option<LoopOptimization> {
-    if body.is_empty() {
+    if !enabled.rle || body.is_empty() {
         return None;
     }
 
@@ -1253,7 +1355,7 @@ fn recognize_fast_loop(
     ] = body
         && amount % 2 == 1
     {
-        return Some(LoopOptimization::Clear {
+        return enabled.clear.then(|| LoopOptimization::Clear {
             iterations_factor: clear_iterations_factor(*amount),
             body_raw_count: *raw_count,
             body_rle_count: 1,
@@ -1268,10 +1370,21 @@ fn recognize_fast_loop(
         },
     ] = body
     {
-        return Some(LoopOptimization::Scan {
+        return enabled.scan.then(|| LoopOptimization::Scan {
             amount: *amount,
             source_offsets: source_offsets.clone(),
         });
+    }
+
+    // Do not resurrect disabled clears as transfers with no destinations,
+    // including add-only loops whose increment/decrement runs alternate.
+    if !enabled.transfer
+        || (!enabled.clear
+            && body
+                .iter()
+                .all(|instruction| matches!(instruction, FastInstruction::Add { .. })))
+    {
+        return None;
     }
 
     let mut pointer = 0_isize;
@@ -1302,13 +1415,15 @@ fn recognize_fast_loop(
                 let value = updates.entry(pointer).or_default();
                 *value = value.wrapping_add(*amount);
             }
-            FastInstruction::Countdown { .. }
+            FastInstruction::RawRun { .. }
+            | FastInstruction::Countdown { .. }
             | FastInstruction::Input { .. }
             | FastInstruction::Output { .. }
             | FastInstruction::Loop { .. }
             | FastInstruction::Unused => {
-                return (remote_transfer && remote_transfer::recognize(body, optimizations))
-                    .then_some(LoopOptimization::RemoteTransfer);
+                return (enabled.remote_transfer
+                    && remote_transfer::recognize(body, optimizations))
+                .then_some(LoopOptimization::RemoteTransfer);
             }
         }
     }
@@ -1621,6 +1736,10 @@ impl<'a> Machine<'a> {
     ) -> Result<(), Error> {
         let instructions = body.slice(&program.instructions);
         for instruction in instructions {
+            if matches!(instruction, FastInstruction::RawRun { .. }) {
+                self.execute_raw_run::<false, SAMPLE>(instruction)?;
+                continue;
+            }
             self.observe_progress(instruction.site())?;
             if SAMPLE {
                 self.publish_sample_site(instruction.site());
@@ -1667,7 +1786,76 @@ impl<'a> Machine<'a> {
                     *body,
                     program.optimization(*optimization),
                 )?,
+                FastInstruction::RawRun { .. } => unreachable!("raw run handled separately"),
                 FastInstruction::Unused => unreachable!("folded countdown body was executed"),
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_raw_run<const PROFILE: bool, const SAMPLE: bool>(
+        &mut self,
+        instruction: &FastInstruction,
+    ) -> Result<(), Error> {
+        let FastInstruction::RawRun {
+            site,
+            op,
+            count,
+            source_offset,
+            starts_rle,
+        } = instruction
+        else {
+            unreachable!("expected a raw run")
+        };
+        let site = *site;
+        let mut source_offsets = SourceOffsets::default();
+        source_offsets.push_repeated(*source_offset, 1);
+        let exact = PROFILE && self.profile.as_ref().is_some_and(|profile| profile.exact);
+        for index in 0..*count {
+            self.observe_progress(site)?;
+            if SAMPLE || (PROFILE && self.sampled_site.is_some()) {
+                self.publish_sample_site(site);
+            }
+            self.optimization.executed_native_operations += 1;
+            let started = exact.then(Instant::now);
+            if exact {
+                self.clock_reads += 1;
+            }
+            if PROFILE {
+                self.profile_block_executions += 1;
+                let profile = self.profile.as_mut().unwrap().site_mut(site);
+                profile.counters.fast_operations += 1;
+                profile.counters.maximum_pointer_observed =
+                    profile.counters.maximum_pointer_observed.max(self.pointer);
+                profile.profile_block_executions += 1;
+            }
+            // Keep the hypothetical RLE count even though execution is scalar.
+            self.countdown_counts::<PROFILE>(site, 1, u64::from(*starts_rle && index == 0));
+            match op {
+                RleOp::Right => self.move_pointer(1, &source_offsets)?,
+                RleOp::Left => self.move_pointer(-1, &source_offsets)?,
+                RleOp::Increment => {
+                    self.tape[self.pointer] = self.tape[self.pointer].wrapping_add(1);
+                }
+                RleOp::Decrement => {
+                    self.tape[self.pointer] = self.tape[self.pointer].wrapping_sub(1);
+                }
+            }
+            if PROFILE {
+                self.record_maximum_pointer(site);
+                if matches!(op, RleOp::Right | RleOp::Left) {
+                    self.profile
+                        .as_mut()
+                        .unwrap()
+                        .site_mut(site)
+                        .counters
+                        .pointer_distance += 1;
+                }
+            }
+            if let Some(started) = started {
+                let elapsed = started.elapsed();
+                self.clock_reads += 1;
+                self.profile.as_mut().unwrap().site_mut(site).exclusive_time += elapsed;
             }
         }
         Ok(())
@@ -1920,6 +2108,10 @@ impl<'a> Machine<'a> {
     ) -> Result<(), Error> {
         let instructions = body.slice(&program.instructions);
         for instruction in instructions {
+            if matches!(instruction, FastInstruction::RawRun { .. }) {
+                self.execute_raw_run::<true, false>(instruction)?;
+                continue;
+            }
             let site = instruction.site();
             self.observe_progress(site)?;
             if self.sampled_site.is_some() {
@@ -2001,6 +2193,7 @@ impl<'a> Machine<'a> {
                     }
                     self.execute_loop(program, site, *body, program.optimization(*optimization))?
                 }
+                FastInstruction::RawRun { .. } => unreachable!("raw run handled separately"),
                 FastInstruction::Unused => unreachable!("folded countdown body was executed"),
             };
             if let Some(started) = started {
