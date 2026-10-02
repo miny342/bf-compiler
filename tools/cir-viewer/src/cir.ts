@@ -38,7 +38,7 @@ export type CirProgram = {
   mainFunction: number;
   functions: CirFunction[];
   continuations: CirContinuation[];
-  format: "BFCIR-1" | "BFCIR-Rust-IR-1";
+  format: "BFCIR-1" | "BFCIR-2" | "BFCIR-Rust-IR-1";
 };
 
 class Reader {
@@ -93,7 +93,9 @@ class Reader {
 const MAGIC = [66, 70, 67, 73, 82, 0, 1, 10];
 
 export function looksLikeCir(bytes: Uint8Array): boolean {
-  return MAGIC.every((byte, index) => bytes[index] === byte);
+  return MAGIC.every((byte, index) => index === 6
+    ? bytes[index] === 1 || bytes[index] === 2
+    : bytes[index] === byte);
 }
 
 export function parseCir(input: ArrayBuffer | Uint8Array): CirProgram {
@@ -103,7 +105,7 @@ export function parseCir(input: ArrayBuffer | Uint8Array): CirProgram {
     try {
       return parseRustIr(JSON.parse(new TextDecoder().decode(bytes)));
     } catch (error) {
-      throw new Error(`not a BFCIR version 1 file or Rust continuation IR JSON: ${messageOf(error)}`);
+      throw new Error(`not a BFCIR version 1/2 file or Rust continuation IR JSON: ${messageOf(error)}`);
     }
   }
   for (let index = 0; index < MAGIC.length; index += 1) reader.u8();
@@ -113,7 +115,7 @@ export function parseCir(input: ArrayBuffer | Uint8Array): CirProgram {
     mainFunction: reader.u16(),
     functions: [],
     continuations: [],
-    format: "BFCIR-1",
+    format: bytes[6] === 2 ? "BFCIR-2" : "BFCIR-1",
   };
   let current: { id: number; functionId: number; instructions: Instruction[] } | undefined;
 
@@ -150,7 +152,7 @@ export function parseCir(input: ArrayBuffer | Uint8Array): CirProgram {
     }
     if (record === 3) {
       if (!current) throw new Error("instruction outside a continuation");
-      current.instructions.push(readInstruction(reader));
+      current.instructions.push(readInstruction(reader, bytes[6]));
       continue;
     }
     if (record === 4) {
@@ -174,7 +176,7 @@ export function parseCir(input: ArrayBuffer | Uint8Array): CirProgram {
   return program;
 }
 
-function readInstruction(reader: Reader): Instruction {
+function readInstruction(reader: Reader, version: number): Instruction {
   const tag = reader.u8();
   if (tag === 1) {
     const destination = reader.u8();
@@ -241,6 +243,12 @@ function readInstruction(reader: Reader): Instruction {
     const high = reader.u8();
     const amount = reader.u16();
     return { kind: "offset", text: `[f[${low}], f[${high}]] += ${amount}` };
+  }
+  if (version >= 2 && (tag === 30 || tag === 31)) {
+    const condition = reader.u8();
+    return tag === 30
+      ? { kind: "local-open", text: `while (f[${condition}] != 0) {` }
+      : { kind: "local-close", text: `} // f[${condition}]` };
   }
   throw new Error(`unknown instruction tag ${tag}`);
 }

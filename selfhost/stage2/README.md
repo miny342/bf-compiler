@@ -226,6 +226,11 @@ BF出力前に、継続数`N > 256`ならpage幅を`ceil(sqrt(N + 1))`へ均衡�
 dispatch IDをpage/slotへ再符号化する。0は予約し、IDの昇順と関数境界は維持する。
 profile headerも再符号化後のIDを使うため、異なる版のprofileは関数名で比較する。
 CIR出力はこのBF専用の再符号化を行わない。
+通常・compressed・profileのBF出力では、call、return/abort、動的projection、短絡論理、
+aggregate materializationを含まないif/whileを同じcontinuation内のBF loopとして保持し、
+dispatcherへの往復を省く。条件とelse flagのtemporaryをbodyから予約し、239-cell上限へ
+収まらない場合は従来のcontinuationへ戻す。公開CIR出力でもversion 2のlocal loop命令として
+保持し、Rust adapterが`FrameInstruction::Loop`へ変換する。従来のversion 1も読み込み可能。
 ABI backendはhigh byteのpage選択とpage内low byteの両方を破壊的countdownでdispatchし、
 caseごとのPC copy/restoreと定数比較を行わない。call先のPCは移動先contextの`NextPc`へ設定し、
 dispatch cycle末までは`Pc`を0に保つ。
@@ -309,10 +314,15 @@ python3 scripts/verify-selfhost-compressed.py --compiler target/release/bfc \
   --interpreter target/release/bf-interpreter
 python3 scripts/verify-stage2-limits.py --compiler target/release/bfc \
   --interpreter target/release/bf-interpreter
+python3 scripts/verify-selfhost-local-control.py --compiler target/release/bfc \
+  --interpreter target/release/bf-interpreter
 ```
 
 `verify-stage2-limits.py`は301関数の小さな入力を通常BF・圧縮BF・CIR経路でコンパイルして実行し、
 255/256境界のcall/return、サイズ切り捨て拒否、arena・算術境界を検証する。自己入力実験は行わない。
+`verify-selfhost-local-control.py`は入れ子の分岐・loop、inputを含む条件、従来経路へのfallback、
+temporary上限付近をBF製compilerとIR VMで照合し、RLE-only/全ONの意味・論理counter一致と
+公開CIR経路を検証する。
 
 診断だけの短い回帰検証は次で実行する。全call siteのID重複・引数漏れと、lexer・semantic・
 内部算術helperのエラー表示および停止を確認する。compiler自身を入力する実験は行わない。

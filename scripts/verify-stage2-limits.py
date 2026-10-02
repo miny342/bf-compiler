@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-HEADER = b"@BFCRLE1;"
+HEADER = b"@BFCRLE2;"
 
 
 def main():
@@ -104,24 +104,27 @@ def main():
 
         # Generate arithmetic BF directly: no large array portal or self-input needed.
         helper.write_text(prelude + """void main() {
-            emit_constant(20,0); emit_constant(21,0);
-            emit_logical_offset_steps(20,21,0,255);
-            emit_move_to(20); compiler_output!('.');
-            emit_move_to(21); compiler_output!('.');
+            cell position;
+            position = emit_constant(position,20,0);
+            position = emit_constant(position,21,0);
+            position = emit_logical_offset_steps(position,20,21,0,255);
+            position = emit_move_to(position,20); compiler_output!('.');
+            position = emit_move_to(position,21); compiler_output!('.');
         }""")
         high_only = HEADER + run([compiler, "--run-ir", str(helper)])
         assert len(high_only) < 128, len(high_only)
         assert execute(high_only) == bytes((0, 255))
         offsets = [(0, 0), (255, 0), (0, 255), (255, 255), (250, 128)]
         amounts = [(0, 0), (1, 0), (255, 0), (0, 1), (0, 255), (255, 255)]
-        body = "void main(){"
+        body = "void main(){cell position;"
         expected_offsets = bytearray()
         for low, high in offsets:
             for add_low, add_high in amounts:
-                body += (f"emit_constant(20,{low});emit_constant(21,{high});"
-                         f"emit_logical_offset_steps(20,21,{add_low},{add_high});"
-                         "emit_move_to(20);compiler_output!('.');"
-                         "emit_move_to(21);compiler_output!('.');")
+                body += (f"position=emit_constant(position,20,{low});"
+                         f"position=emit_constant(position,21,{high});"
+                         f"position=emit_logical_offset_steps(position,20,21,{add_low},{add_high});"
+                         "position=emit_move_to(position,20);compiler_output!('.');"
+                         "position=emit_move_to(position,21);compiler_output!('.');")
                 value = (low + 256 * high + add_low + 256 * add_high) % 65536
                 expected_offsets.extend(value.to_bytes(2, "little"))
         body += "}"

@@ -3,6 +3,8 @@
 /new_logs/
 /fizzbuzz_logs/
 /tmp/
+/scripts/abi-eval/
+/optimize_logs/
 /tools/cir-viewer/node_modules/
 /tools/cir-viewer/dist/
 /tools/cir-viewer/*.tsbuildinfo

@@ -1,6 +1,7 @@
 // Same compiler and expanded BF commands as main; only the output encoding differs.
 const cell COMPRESSED_BF_OUTPUT = 1;
 const cell PROFILE_BF_OUTPUT = 0;
+const cell SELFHOST_LOCAL_CFG = 1;
 
 void read_character() {
     current_char = input();

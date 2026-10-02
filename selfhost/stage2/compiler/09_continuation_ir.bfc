@@ -36,6 +36,9 @@ const cell IR_ARRAY_SUBTRACT = 25;
 const cell IR_COPY_OUTBOX = 26;
 const cell IR_OFFSET_ADD_SCALED = 27;
 const cell IR_OFFSET_ADD_CONSTANT = 28;
+// Local control is shared by BF and CIR v2. 29 is the BF-only portal resume.
+const cell IR_LOCAL_OPEN = 30;
+const cell IR_LOCAL_CLOSE = 31;
 
 const cell VOID_RETURN_SLOT = 0xff;
 // Continuation records use every common field plus a dense dispatch ID.
@@ -48,6 +51,7 @@ NodeId lowering_instruction_tail;
 NodeId lowering_current_function;
 cell lowering_temp_next;
 cell lowering_temp_max;
+cell lowering_local_region;
 
 NodeId continuation_dispatch_id(NodeId continuation) {
     NodeId result;
@@ -641,6 +645,114 @@ void lower_ast_expression(NodeId expression, cell destination) {
     fail('H', 'J');
 }
 
+// Local control is admitted only when no continuation boundary
+// can occur, and the existing 239-cell temporary limit can still be met.
+
+cell local_cfg_expression(NodeId expression, cell budget) {
+    if (node_is_null(expression)) { return 1; }
+    cell kind = node_kind(expression);
+    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_ENUM_EXPRESSION
+        || kind == NODE_LEN_EXPRESSION || kind == NODE_INPUT_EXPRESSION
+        || kind == NODE_NAME_EXPRESSION) { return 1; }
+    if (kind == NODE_INDEX_EXPRESSION || kind == NODE_FIELD_EXPRESSION) {
+        cell storage = node_tag(expression);
+        return storage == RESOLVED_LOCAL || storage == RESOLVED_GLOBAL;
+    }
+    if (kind == NODE_UNARY_EXPRESSION) {
+        return local_cfg_expression(node_a(expression), budget);
+    }
+    if (kind == NODE_BINARY_EXPRESSION) {
+        cell operator = node_tag(expression);
+        if (operator == AST_BINARY_LOGICAL_AND
+            || operator == AST_BINARY_LOGICAL_OR || budget == 0) { return 0; }
+        return local_cfg_expression(node_a(expression), budget)
+            && local_cfg_expression(node_b(expression), budget - 1);
+    }
+    return 0;
+}
+
+cell local_cfg_statement(NodeId statement, cell budget) {
+    if (node_is_null(statement)) { return 1; }
+    cell kind = node_kind(statement);
+    if (kind == NODE_EMPTY_STATEMENT) { return 1; }
+    if (kind == NODE_BLOCK) {
+        NodeId child = node_a(statement);
+        while (!node_is_null(child)) {
+            if (!local_cfg_statement(child, budget)) { return 0; }
+            child = node_next(child);
+        }
+        return 1;
+    }
+    if (kind == NODE_DECLARATION) {
+        if (node_tag(statement) == AST_DECLARATION_ARRAY) { return 0; }
+        return local_cfg_expression(node_a(statement), budget);
+    }
+    if (kind == NODE_OUTPUT_STATEMENT || kind == NODE_CALL_STATEMENT) {
+        if (budget == 0) { return 0; }
+        return local_cfg_expression(node_a(statement), budget - 1);
+    }
+    if (kind == NODE_ASSIGNMENT) {
+        if (budget == 0) { return 0; }
+        NodeId left = node_a(statement);
+        if (type_is_aggregate(expression_type(left))) { return 0; }
+        return local_cfg_expression(left, budget - 1)
+            && local_cfg_expression(node_b(statement), budget - 1);
+    }
+    if (kind == NODE_IF_STATEMENT || kind == NODE_WHILE_STATEMENT) {
+        if (budget == 0) { return 0; }
+        if (!local_cfg_expression(node_a(statement), budget - 1)) { return 0; }
+        budget -= 1;
+        if (kind == NODE_IF_STATEMENT && !node_is_null(node_c(statement))) {
+            if (budget == 0) { return 0; }
+            budget -= 1;
+        }
+        if (!local_cfg_statement(node_b(statement), budget)) { return 0; }
+        if (kind == NODE_IF_STATEMENT) {
+            return local_cfg_statement(node_c(statement), budget);
+        }
+        return 1;
+    }
+    // Calls, return/abort, dynamic projection, short-circuit expressions and
+    // aggregate materialization retain the original lowering.
+    return 0;
+}
+
+void lower_local_cfg_statement(NodeId statement) {
+    cell previous_region = lowering_local_region;
+    lowering_local_region = 1;
+    cell condition = allocate_lowering_temp();
+    lower_ast_expression(node_a(statement), condition);
+    append_ir_instruction(IR_BOOLEANIZE, condition, 0);
+    if (node_kind(statement) == NODE_WHILE_STATEMENT) {
+        append_ir_instruction(IR_LOCAL_OPEN, condition, 0);
+        append_ir_instruction(IR_SET, condition, 0);
+        lower_ast_statement(node_b(statement));
+        lower_ast_expression(node_a(statement), condition);
+        append_ir_instruction(IR_BOOLEANIZE, condition, 0);
+        append_ir_instruction(IR_LOCAL_CLOSE, condition, 0);
+    } else {
+        NodeId alternative = node_c(statement);
+        cell other;
+        if (!node_is_null(alternative)) {
+            other = allocate_lowering_temp();
+            append_ir_instruction(IR_SET, other, 1);
+        }
+        append_ir_instruction(IR_LOCAL_OPEN, condition, 0);
+        append_ir_instruction(IR_SET, condition, 0);
+        if (!node_is_null(alternative)) { append_ir_instruction(IR_SET, other, 0); }
+        lower_ast_statement(node_b(statement));
+        append_ir_instruction(IR_LOCAL_CLOSE, condition, 0);
+        if (!node_is_null(alternative)) {
+            append_ir_instruction(IR_LOCAL_OPEN, other, 0);
+            append_ir_instruction(IR_SET, other, 0);
+            lower_ast_statement(alternative);
+            append_ir_instruction(IR_LOCAL_CLOSE, other, 0);
+        }
+    }
+    release_lowering_temp(condition);
+    lowering_local_region = previous_region;
+}
+
 void lower_ast_statement(NodeId statement) {
     if (node_is_null(lowering_current_continuation)) {
         return;
@@ -823,6 +935,12 @@ void lower_ast_statement(NodeId statement) {
         lowering_current_continuation = null_node();
         return;
     }
+    if (SELFHOST_LOCAL_CFG && (kind == NODE_IF_STATEMENT || kind == NODE_WHILE_STATEMENT)) {
+        if (lowering_local_region || local_cfg_statement(statement, 0xef - lowering_temp_next)) {
+            lower_local_cfg_statement(statement);
+            return;
+        }
+    }
     if (kind == NODE_IF_STATEMENT) {
         cell condition = allocate_lowering_temp();
         lower_ast_expression(node_a(statement), condition);
@@ -944,6 +1062,7 @@ void lower_global_initializers() {
 void lower_ast_program() {
     first_continuation = null_node();
     last_continuation = null_node();
+    lowering_local_region = 0;
     NodeId function = first_function;
     while (!node_is_null(function)) {
         lowering_current_function = function;

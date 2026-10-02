@@ -836,6 +836,10 @@ cell emit_ir_instruction(cell position, NodeId instruction) {
         if (kind == IR_LESS_EQUAL) {
             position = emit_frame_not(position, destination);
         }
+    } else if (kind == IR_LOCAL_OPEN) {
+        position = emit_loop_open(position, destination);
+    } else if (kind == IR_LOCAL_CLOSE) {
+        position = emit_loop_close(position, destination);
     } else {
         fail('H', 'R');
     }

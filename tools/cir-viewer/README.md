@@ -33,7 +33,8 @@ target/release/bfc --cir-output rust-internal.cir stage2-compiler.bfc
 
 The Rust internal artifact is JSON with a `.cir` extension so the viewer can
 load the complete optimized `ContinuationProgram`; it is distinct from the
-executable binary self-host `BFCIR-1` format.
+executable binary self-host `BFCIR-1` / `BFCIR-2` formats. Version 2 adds local
+loop open/close instructions; both versions remain readable.
 
 Dependencies are pinned in `package.json` and `package-lock.json`. Installation scripts are not required;
 use `npm ci --ignore-scripts` when reviewing or reproducing the dependency installation.

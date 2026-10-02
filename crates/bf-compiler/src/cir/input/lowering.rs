@@ -339,11 +339,29 @@ fn lower_continuation(
     let function = FunctionId::new(usize::from(source.function));
     let mut current_id = continuation_id(source.id)?;
     let mut body = Vec::new();
+    let mut local_loops: Vec<(u8, Vec<FrameInstruction>)> = Vec::new();
     let scratch = (0..ADAPTER_SCRATCH_CELLS)
         .map(|index| frame(frame_cells + index))
         .collect::<Vec<_>>();
 
     for instruction in &source.instructions {
+        match *instruction {
+            SelfhostCirInstruction::LocalOpen { condition } => {
+                local_loops.push((condition, std::mem::take(&mut body)));
+                continue;
+            }
+            SelfhostCirInstruction::LocalClose { condition } => {
+                let (opening, mut parent) = local_loops.pop().expect("validated local loop");
+                debug_assert_eq!(opening, condition);
+                parent.push(FrameInstruction::Loop {
+                    condition: frame(usize::from(condition)),
+                    body,
+                });
+                body = parent;
+                continue;
+            }
+            _ => {}
+        }
         let SelfhostCirInstruction::Array {
             op,
             data,
@@ -595,6 +613,9 @@ fn lower_plain_instruction(
             body,
         ),
         SelfhostCirInstruction::Array { .. } => unreachable!("array instructions split blocks"),
+        SelfhostCirInstruction::LocalOpen { .. } | SelfhostCirInstruction::LocalClose { .. } => {
+            unreachable!("local loops are assembled by lower_continuation")
+        }
     }
     Ok(())
 }
@@ -838,6 +859,133 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run(&program), b"A");
+    }
+
+    #[test]
+    fn imported_nested_loops_preserve_all_byte_inputs_without_cfg_reconstruction() {
+        use SelfhostCirInstruction as I;
+        let program = SelfhostCirProgram::new(
+            1,
+            0,
+            vec![SelfhostCirFunction {
+                id: 0,
+                entry: 1,
+                frame_cells: 3,
+                return_type: SelfhostCirReturnType::Void,
+                parameters: vec![],
+            }],
+            vec![SelfhostCirContinuation {
+                id: 1,
+                function: 0,
+                instructions: vec![
+                    I::Input { destination: 0 },
+                    I::Set {
+                        destination: 2,
+                        value: b'A',
+                    },
+                    I::Global {
+                        op: SelfhostCirGlobalOp::Set,
+                        data: 0,
+                        address: 0,
+                    },
+                    I::LocalOpen { condition: 0 },
+                    I::Set {
+                        destination: 1,
+                        value: 2,
+                    },
+                    I::LocalOpen { condition: 1 },
+                    I::Set {
+                        destination: 2,
+                        value: 1,
+                    },
+                    I::Global {
+                        op: SelfhostCirGlobalOp::Add,
+                        data: 2,
+                        address: 0,
+                    },
+                    I::Set {
+                        destination: 2,
+                        value: 1,
+                    },
+                    I::Binary {
+                        op: SelfhostCirBinaryOp::Subtract,
+                        destination: 1,
+                        source: 2,
+                    },
+                    I::LocalClose { condition: 1 },
+                    I::Set {
+                        destination: 2,
+                        value: 1,
+                    },
+                    I::Binary {
+                        op: SelfhostCirBinaryOp::Subtract,
+                        destination: 0,
+                        source: 2,
+                    },
+                    I::LocalClose { condition: 0 },
+                    I::Global {
+                        op: SelfhostCirGlobalOp::Copy,
+                        data: 2,
+                        address: 0,
+                    },
+                    I::Output { source: 2 },
+                    I::Output { source: 0 },
+                    I::Output { source: 1 },
+                ],
+                terminator: SelfhostCirTerminator::Halt,
+            }],
+        )
+        .unwrap();
+        let decoded = SelfhostCirProgram::decode(&program.encode().unwrap()).unwrap();
+        let (lowered, _) = lower_selfhost_cir_with_options(
+            &decoded,
+            ContinuationOptimizationOptions {
+                structure_local_control_flow: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(lowered.continuations().len(), 1);
+        assert!(
+            lowered.continuations()[0]
+                .body()
+                .iter()
+                .any(|instruction| matches!(instruction, FrameInstruction::Loop { .. }))
+        );
+        let bf = crate::optimize_bf(&crate::lower_continuations(&lowered).unwrap()).to_source();
+        for value in 0u8..=255 {
+            let expected = vec![value.wrapping_mul(2), 0, 0];
+            let mut output = Vec::new();
+            run_continuations_with_io(
+                &lowered,
+                &mut &[value][..],
+                &mut output,
+                Default::default(),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(output, expected, "IR input {value}");
+            for rle_only in [false, true] {
+                let result = bf_interpreter::run_with_options(
+                    bf.as_bytes(),
+                    &[value],
+                    bf_interpreter::RunOptions {
+                        disable_clear: rle_only,
+                        disable_scan: rle_only,
+                        disable_transfer: rle_only,
+                        disable_countdown: rle_only,
+                        disable_compare: rle_only,
+                        disable_remote_transfer: rle_only,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    result.output, expected,
+                    "BF input {value} RLE-only={rle_only}"
+                );
+            }
+        }
     }
 
     #[test]

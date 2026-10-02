@@ -725,7 +725,8 @@ Continuation IRのconstructorは次を検証する。
 ## selfhost binary CIR
 
 stage-2 selfhost compilerは、arena recordやtyped ASTをserializeせず、lowering後のflat ABI CIRだけを
-`BFCIR\0\x01\n` magicで始まるbinary record streamへ出力できる。headerは24-bit little-endianの
+`BFCIR\0\x02\n` magicで始まるbinary record streamへ出力できる。Rust decoderは従来の
+`BFCIR\0\x01\n`も読み込む。headerは24-bit little-endianの
 static cell数と16-bit main function IDを持つ。その後にfunction、continuation、instruction、
 terminator recordが続き、`0xff`で終了する。
 
@@ -734,6 +735,10 @@ terminator recordが続き、`0xff`で終了する。
 - scalar slotは8-bit、dispatcher/function IDとlogical offset量は16-bit、global base/lengthは24-bitである。
 - call recordはcallee、resume、評価済みargumentのsource/destination/幅を持つ。
 - dynamic access recordはoperation、data slot、offset low/high、base、region幅、frame/global種別を持つ。
+- version 2はinstruction tag 30/31と8-bit condition slotでlocal loopの開閉を表す。
+  同じcontinuation内で対応し、閉じるslotは開いたslotと一致する。動的portalを跨がず、
+  入れ子は239段まで。Rust adapterは対応した列を`FrameInstruction::Loop`へ直接変換する。
+  version 1の命令・record配置は維持し、Rustのencoderはlocal loopを含まないprogramをversion 1で出す。
 
 Rust decoderはrecordを直接typed vectorへ読み、flat frame全体を一つのaligned aggregateへ写す。
 配列命令はhidden continuationを挟むportal terminatorへ分割する。globalはdynamic accessされた区間だけを

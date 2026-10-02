@@ -107,7 +107,8 @@ void emit_cir_instruction(NodeId instruction) {
         compiler_output!(node_value(instruction));
         compiler_output!(instruction_source(instruction));
     } else if (kind == IR_NEGATE || kind == IR_NOT
-        || kind == IR_BOOLEANIZE) {
+        || kind == IR_BOOLEANIZE || kind == IR_LOCAL_OPEN
+        || kind == IR_LOCAL_CLOSE) {
         compiler_output!(node_value(instruction));
     } else if (kind == IR_SET_GLOBAL || kind == IR_COPY_GLOBAL
         || kind == IR_STORE_GLOBAL || kind == IR_ADD_GLOBAL
@@ -238,7 +239,7 @@ void emit_cir_program() {
     compiler_output!('I');
     compiler_output!('R');
     compiler_output!(0);
-    compiler_output!(1);
+    compiler_output!(2);
     compiler_output!('\n');
     emit_cir_wide(stage7_static_cells);
     NodeId main_id = cir_function_id(main_function);

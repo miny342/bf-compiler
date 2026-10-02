@@ -11,6 +11,9 @@ use std::error::Error;
 use std::fmt;
 
 const MAGIC: &[u8; 8] = b"BFCIR\0\x01\n";
+const MAGIC_V2: &[u8; 8] = b"BFCIR\0\x02\n";
+// Bound the nesting before building the recursive typed FrameInstruction IR.
+const MAX_LOCAL_LOOP_DEPTH: usize = 239;
 const RECORD_FUNCTION: u8 = 1;
 const RECORD_CONTINUATION: u8 = 2;
 const RECORD_INSTRUCTION: u8 = 3;
@@ -139,6 +142,14 @@ pub enum SelfhostCirInstruction {
         high: u8,
         amount: u16,
     },
+    /// Begin a local nonzero loop, closed in the same continuation.
+    LocalOpen {
+        condition: u8,
+    },
+    /// End the innermost local loop with the same condition slot.
+    LocalClose {
+        condition: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -211,7 +222,16 @@ impl SelfhostCirProgram {
     pub fn encode(&self) -> Result<Vec<u8>, SelfhostCirError> {
         self.validate()?;
         let mut output = Vec::new();
-        output.extend_from_slice(MAGIC);
+        let local_control = self.continuations.iter().any(|continuation| {
+            continuation.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SelfhostCirInstruction::LocalOpen { .. }
+                        | SelfhostCirInstruction::LocalClose { .. }
+                )
+            })
+        });
+        output.extend_from_slice(if local_control { MAGIC_V2 } else { MAGIC });
         push_u24(&mut output, self.static_cells)?;
         push_u16(&mut output, self.main_function);
         for function in &self.functions {
@@ -251,9 +271,11 @@ impl SelfhostCirProgram {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SelfhostCirError> {
         let mut input = Decoder::new(bytes);
-        if input.take(MAGIC.len())? != MAGIC {
-            return Err(input.error("invalid CIR magic or version"));
-        }
+        let version = match input.take(MAGIC.len())? {
+            bytes if bytes == MAGIC => 1,
+            bytes if bytes == MAGIC_V2 => 2,
+            _ => return Err(input.error("invalid CIR magic or version")),
+        };
         let static_cells = input.u24()?;
         let main_function = input.u16()?;
         let mut functions = Vec::new();
@@ -303,7 +325,7 @@ impl SelfhostCirProgram {
                     let Some((_, _, instructions)) = current.as_mut() else {
                         return Err(input.error("instruction outside a continuation"));
                     };
-                    instructions.push(decode_instruction(&mut input)?);
+                    instructions.push(decode_instruction(&mut input, version)?);
                 }
                 RECORD_TERMINATOR => {
                     let Some((id, function, instructions)) = current.take() else {
@@ -410,8 +432,37 @@ impl SelfhostCirProgram {
                     continuation.id, continuation.function
                 )));
             };
+            let mut local_conditions = Vec::new();
             for instruction in &continuation.instructions {
                 validate_instruction(instruction, function.frame_cells, self.static_cells)?;
+                match instruction {
+                    SelfhostCirInstruction::LocalOpen { condition } => {
+                        if local_conditions.len() == MAX_LOCAL_LOOP_DEPTH {
+                            return Err(SelfhostCirError::Invalid(
+                                "local loop nesting exceeds 239".into(),
+                            ));
+                        }
+                        local_conditions.push(*condition);
+                    }
+                    SelfhostCirInstruction::LocalClose { condition } => {
+                        if local_conditions.pop() != Some(*condition) {
+                            return Err(SelfhostCirError::Invalid(
+                                "unmatched local loop condition".into(),
+                            ));
+                        }
+                    }
+                    SelfhostCirInstruction::Array { .. } if !local_conditions.is_empty() => {
+                        return Err(SelfhostCirError::Invalid(
+                            "dynamic portal inside a local loop".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            if !local_conditions.is_empty() {
+                return Err(SelfhostCirError::Invalid(
+                    "local loop crosses a continuation boundary".into(),
+                ));
             }
             validate_terminator(
                 &continuation.terminator,
@@ -484,6 +535,8 @@ fn validate_instruction(
             slot(source)
         }
         SelfhostCirInstruction::Output { source } => slot(source),
+        SelfhostCirInstruction::LocalOpen { condition }
+        | SelfhostCirInstruction::LocalClose { condition } => slot(condition),
         SelfhostCirInstruction::Global {
             op: SelfhostCirGlobalOp::Set,
             address,
@@ -726,11 +779,20 @@ fn encode_instruction(
             output.extend_from_slice(&[28, *low, *high]);
             push_u16(output, *amount);
         }
+        SelfhostCirInstruction::LocalOpen { condition } => {
+            output.extend_from_slice(&[30, *condition]);
+        }
+        SelfhostCirInstruction::LocalClose { condition } => {
+            output.extend_from_slice(&[31, *condition]);
+        }
     }
     Ok(())
 }
 
-fn decode_instruction(input: &mut Decoder<'_>) -> Result<SelfhostCirInstruction, SelfhostCirError> {
+fn decode_instruction(
+    input: &mut Decoder<'_>,
+    version: u8,
+) -> Result<SelfhostCirInstruction, SelfhostCirError> {
     let kind = input.u8()?;
     Ok(match kind {
         1 => SelfhostCirInstruction::Set {
@@ -791,6 +853,12 @@ fn decode_instruction(input: &mut Decoder<'_>) -> Result<SelfhostCirInstruction,
             low: input.u8()?,
             high: input.u8()?,
             amount: input.u16()?,
+        },
+        30 if version >= 2 => SelfhostCirInstruction::LocalOpen {
+            condition: input.u8()?,
+        },
+        31 if version >= 2 => SelfhostCirInstruction::LocalClose {
+            condition: input.u8()?,
         },
         _ => return Err(input.error(format!("unknown instruction tag {kind}"))),
     })
@@ -1091,9 +1159,59 @@ mod tests {
 
     #[test]
     fn decoder_rejects_truncation_at_every_byte() {
-        let encoded = sample_program().encode().unwrap();
-        for length in 0..encoded.len() {
-            assert!(SelfhostCirProgram::decode(&encoded[..length]).is_err());
+        for program in [sample_program(), local_program()] {
+            let encoded = program.encode().unwrap();
+            for length in 0..encoded.len() {
+                assert!(SelfhostCirProgram::decode(&encoded[..length]).is_err());
+            }
+        }
+    }
+
+    fn local_program() -> SelfhostCirProgram {
+        let mut program = sample_program();
+        program.continuations[0].instructions = vec![
+            SelfhostCirInstruction::LocalOpen { condition: 0 },
+            SelfhostCirInstruction::LocalOpen { condition: 1 },
+            SelfhostCirInstruction::Set {
+                destination: 1,
+                value: 0,
+            },
+            SelfhostCirInstruction::LocalClose { condition: 1 },
+            SelfhostCirInstruction::Set {
+                destination: 0,
+                value: 0,
+            },
+            SelfhostCirInstruction::LocalClose { condition: 0 },
+        ];
+        program
+    }
+
+    #[test]
+    fn local_loops_round_trip_as_v2_and_cannot_be_disguised_as_v1() {
+        let program = local_program();
+        let mut encoded = program.encode().unwrap();
+        assert_eq!(&encoded[..MAGIC_V2.len()], MAGIC_V2);
+        assert_eq!(SelfhostCirProgram::decode(&encoded).unwrap(), program);
+        encoded[6] = 1;
+        assert!(SelfhostCirProgram::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn validation_rejects_unbalanced_local_loops_and_portal_boundaries() {
+        use SelfhostCirInstruction::{LocalClose as Close, LocalOpen as Open};
+        let portal = sample_program().continuations[0].instructions[2].clone();
+        for instructions in [
+            vec![Close { condition: 0 }],
+            vec![Open { condition: 0 }],
+            vec![Open { condition: 0 }, Close { condition: 1 }],
+            vec![Open { condition: 6 }, Close { condition: 6 }],
+            vec![Open { condition: 0 }, portal, Close { condition: 0 }],
+            vec![Open { condition: 0 }; MAX_LOCAL_LOOP_DEPTH + 1],
+        ] {
+            let mut program = sample_program();
+            program.continuations[0].instructions = instructions;
+            assert!(program.validate().is_err());
+            assert!(program.encode().is_err());
         }
     }
 

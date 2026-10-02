@@ -119,7 +119,10 @@ def main():
             expected = run([compiler, "--run-ir", str(example)], data).stdout
             check(example.stem, example.read_bytes(), data, expected)
 
-        page_source = (b"void main(){cell n=input();" + b"if(n){n-=1;}" * 140 + b"output(n);}")
+        # A call keeps each branch as continuations rather than local BF loops,
+        # so this fixture still executes dispatch IDs beyond the byte boundary.
+        page_source = (b"void touch(){cell unused;}void main(){cell n=input();"
+                       + b"if(n){touch();n-=1;}" * 140 + b"output(n);}")
         _, page_reports = check("dispatch-pages", page_source, b"\xff", bytes([115]))
         assert any(s["kind"] == "continuation" and int(s["attributes"]["continuation_id"]) >= 256
                    and s["counters"]["fast_operations"] > 0
