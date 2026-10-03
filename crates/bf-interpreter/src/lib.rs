@@ -14,6 +14,8 @@ mod compare_loop;
 #[cfg(test)]
 mod optimization_bypass_tests;
 mod remote_transfer;
+#[cfg(test)]
+mod rle_execution_tests;
 
 /// Number of cells in the standard tape.
 pub const TAPE_LEN: usize = 30_000;
@@ -543,6 +545,101 @@ struct FastProgram {
     instructions: Vec<FastInstruction>,
     root: BodyRange,
     optimizations: Vec<LoopOptimization>,
+    // Extra execution payloads for unprofiled RLE-only runs; the tree is kept
+    // for profiled execution and physical source offsets on boundary errors.
+    compact_rle: Option<Vec<CompactRleInstruction>>,
+}
+
+#[derive(Debug, Clone)]
+// Keep frequently dispatched payloads together without a second instruction
+// lookup. Pointer source ranges are needed only by the boundary/growth fallback.
+enum CompactRleInstruction {
+    Move {
+        amount: isize,
+        raw_count: u64,
+        source_index: u32,
+    },
+    Add {
+        amount: u8,
+        raw_count: u64,
+    },
+    Input,
+    Output,
+    Open {
+        target: u32,
+    },
+    Close {
+        target: u32,
+    },
+}
+
+// Re-entry targets the first body instruction, preserving the tree VM's
+// opening/closing counts and its per-native-operation progress poll cadence.
+fn compact_rle(instructions: &[FastInstruction], root: BodyRange) -> Vec<CompactRleInstruction> {
+    let mut steps = Vec::new();
+    let mut pending: Vec<(usize, usize, Option<usize>)> = vec![(
+        root.start as usize,
+        root.start as usize + root.len as usize,
+        None,
+    )];
+    while let Some((cursor, end, opening)) = pending.last_mut() {
+        if *cursor == *end {
+            let opening = *opening;
+            pending.pop();
+            if let Some(opening) = opening {
+                steps.push(CompactRleInstruction::Close {
+                    target: (opening + 1)
+                        .try_into()
+                        .expect("compact RLE instruction count fits in u32"),
+                });
+                steps[opening] = CompactRleInstruction::Open {
+                    target: steps
+                        .len()
+                        .try_into()
+                        .expect("compact RLE instruction count fits in u32"),
+                };
+            }
+            continue;
+        }
+        let index = *cursor;
+        *cursor += 1;
+        let step = match &instructions[index] {
+            FastInstruction::Move {
+                amount,
+                source_offsets,
+                ..
+            } => CompactRleInstruction::Move {
+                amount: *amount,
+                raw_count: source_offsets.len() as u64,
+                source_index: index
+                    .try_into()
+                    .expect("fast IR instruction count fits in u32"),
+            },
+            FastInstruction::Add {
+                amount, raw_count, ..
+            } => CompactRleInstruction::Add {
+                amount: *amount,
+                raw_count: *raw_count,
+            },
+            FastInstruction::Input { .. } => CompactRleInstruction::Input,
+            FastInstruction::Output { .. } => CompactRleInstruction::Output,
+            FastInstruction::Loop {
+                body,
+                optimization: None,
+                ..
+            } => {
+                pending.push((
+                    body.start as usize,
+                    body.start as usize + body.len as usize,
+                    Some(steps.len()),
+                ));
+                CompactRleInstruction::Open { target: 0 }
+            }
+            _ => unreachable!("compact RLE cannot contain optimized operations"),
+        };
+        steps.push(step);
+    }
+    steps
 }
 
 impl FastProgram {
@@ -791,14 +888,14 @@ impl Default for SourceOffsets {
 }
 
 impl SourceOffsets {
-    fn push(&mut self, offset: usize) {
-        let range = SourceOffsetRange::new(offset, 1, false);
+    fn push_contiguous(&mut self, offset: usize, count: usize) {
+        let range = SourceOffsetRange::new(offset, count, false);
         match &mut self.ranges {
             SourceOffsetRanges::Empty => self.ranges = SourceOffsetRanges::Single(range),
             SourceOffsetRanges::Single(last)
                 if !last.repeated() && last.start.checked_add(last.count()) == Some(offset) =>
             {
-                last.len += 1;
+                last.len += count;
             }
             SourceOffsetRanges::Single(last) => {
                 let previous = *last;
@@ -809,7 +906,7 @@ impl SourceOffsets {
                     && !last.repeated()
                     && last.start.checked_add(last.count()) == Some(offset)
                 {
-                    last.len += 1;
+                    last.len += count;
                 } else {
                     let previous = std::mem::replace(&mut self.ranges, SourceOffsetRanges::Empty);
                     let SourceOffsetRanges::Many(ranges) = previous else {
@@ -1009,14 +1106,14 @@ impl FastBlock {
             if compressed {
                 source_offsets.push_repeated(source_offset, count);
             } else {
-                source_offsets.push(source_offset);
+                source_offsets.push_contiguous(source_offset, count);
             }
         } else {
             let mut source_offsets = SourceOffsets::default();
             if compressed {
                 source_offsets.push_repeated(source_offset, count);
             } else {
-                source_offsets.push(source_offset);
+                source_offsets.push_contiguous(source_offset, count);
             }
             self.instructions.push(FastInstruction::Move {
                 site,
@@ -1117,12 +1214,17 @@ fn parse_optimized_with_options(
     let mut range_index = 0_usize;
     let range_slots = profile_map.map(profile_range_slots);
     let compressed = bf_profiling::rle::compressed(source);
-    for run in bf_profiling::rle::Runs::new(source) {
+    let runs = if enabled.rle {
+        bf_profiling::rle::Runs::new_coalesced(source)
+    } else {
+        bf_profiling::rle::Runs::new(source)
+    };
+    for run in runs {
         let run = run.map_err(|e| Error::InvalidEncoding(e.to_string()))?;
-        let source_offset = run.offset;
         let byte = run.byte;
         let mut remaining = run.count;
         while remaining > 0 {
+            let source_offset = run.offset + if compressed { 0 } else { run.count - remaining };
             let site = resolved_profile_site(
                 profile_map,
                 range_slots.as_deref(),
@@ -1247,7 +1349,18 @@ fn parse_optimized_with_options(
     }
     let root = blocks.pop().unwrap().instructions;
     let root_range = append_fast_block(&mut arena, root, source.len());
+    let compact_rle = (profile_map.is_none()
+        && enabled.rle
+        && !enabled.clear
+        && !enabled.scan
+        && !enabled.transfer
+        && !enabled.countdown
+        && !enabled.compare
+        && !enabled.compare_slide
+        && !enabled.remote_transfer)
+        .then(|| compact_rle(&arena, root_range));
     Ok(FastProgram {
+        compact_rle,
         instructions: arena,
         root: root_range,
         optimizations,
@@ -1779,7 +1892,8 @@ impl<'a> Machine<'a> {
                     ..
                 } => {
                     self.optimization.rle_operations += 1;
-                    self.add_counts_unprofiled(source_offsets.len() as u64, 1);
+                    // Move runs merge only one direction, so distance is the exact raw count.
+                    self.add_counts_unprofiled(amount.unsigned_abs() as u64, 1);
                     self.move_pointer(*amount, source_offsets)?;
                 }
                 FastInstruction::Add {
@@ -1811,6 +1925,102 @@ impl<'a> Machine<'a> {
                 FastInstruction::Unused => unreachable!("folded countdown body was executed"),
             }
         }
+        Ok(())
+    }
+
+    // Called once per RLE-only run. Keep the VM loop separate from the
+    // surrounding parser/profile setup to avoid growing their shared code.
+    #[inline(never)]
+    fn execute_compact_rle(
+        &mut self,
+        program: &FastProgram,
+        steps: &[CompactRleInstruction],
+    ) -> Result<(), Error> {
+        // This path has no profile collector. Keep counters local between
+        // progress polls, publishing them before callbacks and on completion.
+        let mut raw = self.executed_instructions;
+        let mut rle = self.executed_rle_instructions;
+        let mut native = self.optimization.executed_native_operations;
+        let mut rle_operations = self.optimization.rle_operations;
+        let mut pc = 0;
+        while pc < steps.len() {
+            let instruction = &steps[pc];
+            // A close adds raw/RLE counts, with no native operation or poll.
+            if let CompactRleInstruction::Close { target } = instruction {
+                raw += 1;
+                rle += 1;
+                pc = if self.tape[self.pointer] != 0 {
+                    *target as usize
+                } else {
+                    pc + 1
+                };
+                continue;
+            }
+            if self.progress_poll_due() {
+                self.executed_instructions = raw;
+                self.executed_rle_instructions = rle;
+                self.optimization.executed_native_operations = native;
+                self.optimization.rle_operations = rle_operations;
+                self.poll_progress(ResolvedProfileSite::ROOT)?;
+            }
+            native += 1;
+            match instruction {
+                CompactRleInstruction::Move {
+                    amount,
+                    raw_count,
+                    source_index,
+                } => {
+                    rle_operations += 1;
+                    raw += *raw_count;
+                    rle += 1;
+                    if let Some(destination) = self.pointer.checked_add_signed(*amount)
+                        && destination < self.tape.len()
+                    {
+                        self.pointer = destination;
+                        self.max_pointer = self.max_pointer.max(destination);
+                    } else {
+                        let FastInstruction::Move { source_offsets, .. } =
+                            &program.instructions[*source_index as usize]
+                        else {
+                            unreachable!()
+                        };
+                        self.move_pointer(*amount, source_offsets)?;
+                    }
+                }
+                CompactRleInstruction::Add { amount, raw_count } => {
+                    rle_operations += 1;
+                    raw += *raw_count;
+                    rle += 1;
+                    self.tape[self.pointer] = self.tape[self.pointer].wrapping_add(*amount);
+                }
+                CompactRleInstruction::Input => {
+                    raw += 1;
+                    rle += 1;
+                    self.tape[self.pointer] =
+                        self.input.get(self.input_position).copied().unwrap_or(0);
+                    self.input_position = self.input_position.saturating_add(1);
+                }
+                CompactRleInstruction::Output => {
+                    raw += 1;
+                    rle += 1;
+                    self.output.push(self.tape[self.pointer]);
+                }
+                CompactRleInstruction::Open { target } => {
+                    raw += 1;
+                    rle += 1;
+                    if self.tape[self.pointer] == 0 {
+                        pc = *target as usize;
+                        continue;
+                    }
+                }
+                CompactRleInstruction::Close { .. } => unreachable!(),
+            }
+            pc += 1;
+        }
+        self.executed_instructions = raw;
+        self.executed_rle_instructions = rle;
+        self.optimization.executed_native_operations = native;
+        self.optimization.rle_operations = rle_operations;
         Ok(())
     }
 
@@ -2167,11 +2377,11 @@ impl<'a> Machine<'a> {
                     ..
                 } => {
                     self.optimization.rle_operations += 1;
-                    self.add_counts(site, source_offsets.len() as u64, 1);
+                    self.add_counts(site, amount.unsigned_abs() as u64, 1);
                     if let Some(profile) = &mut self.profile {
                         let counters = &mut profile.site_mut(site).counters;
                         counters.rle_operations += 1;
-                        counters.pointer_distance += source_offsets.len() as u64;
+                        counters.pointer_distance += amount.unsigned_abs() as u64;
                     }
                     self.move_pointer(*amount, source_offsets)?;
                     self.record_maximum_pointer(site);
@@ -2511,7 +2721,13 @@ fn execute(
         sampled_counts,
         progress,
     );
-    let execution = machine.execute_block(program, program.root);
+    let execution = if let Some(steps) = &program.compact_rle
+        && machine.profile.is_none()
+    {
+        machine.execute_compact_rle(program, steps)
+    } else {
+        machine.execute_block(program, program.root)
+    };
     if let Some(sampled_site) = &machine.sampled_site {
         sampled_site.store(INACTIVE_PROFILE_SITE, Ordering::Release);
     }

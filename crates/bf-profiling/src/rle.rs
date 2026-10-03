@@ -85,14 +85,25 @@ pub struct Runs<'a> {
     position: usize,
     rle: bool,
     total: usize,
+    coalesce_plain: bool,
 }
 impl<'a> Runs<'a> {
+    /// Coalesce physically adjacent plain `+`, `-`, `<`, and `>` commands.
+    /// Encoded runs and other commands retain their usual source positions.
+    pub fn new_coalesced(source: &'a [u8]) -> Self {
+        Self {
+            coalesce_plain: true,
+            ..Self::new(source)
+        }
+    }
+
     pub fn new(source: &'a [u8]) -> Self {
         Self {
             source,
             position: 0,
             rle: compressed(source),
             total: 0,
+            coalesce_plain: false,
         }
     }
 }
@@ -110,7 +121,16 @@ impl Iterator for Runs<'_> {
                 self.position += 1;
                 continue;
             }
-            if let Ok(run) = run_at(self.source, offset, self.rle) {
+            if let Ok(mut run) = run_at(self.source, offset, self.rle) {
+                if self.coalesce_plain && !self.rle && matches!(run.byte, b'+' | b'-' | b'<' | b'>')
+                {
+                    let mut end = run.end;
+                    while self.source.get(end) == Some(&run.byte) {
+                        end += 1;
+                    }
+                    run.count = end - run.offset;
+                    run.end = end;
+                }
                 self.position = run.end;
                 if let Some(total) = self
                     .total
@@ -180,6 +200,66 @@ mod tests {
                 Runs::new(source.as_bytes())
                     .collect::<Result<Vec<_>, _>>()
                     .is_err()
+            );
+        }
+    }
+    #[test]
+    fn coalesced_plain_runs_preserve_every_physical_command_offset() {
+        for byte in 0_u8..=255 {
+            for count in [0, 1, 2, 15, 16, 17, 127, 1024] {
+                let mut source = vec![b' '];
+                source.extend(std::iter::repeat_n(byte, count));
+                source.push(b' ');
+                let expected = Runs::new(&source)
+                    .map(|r| {
+                        let r = r.unwrap();
+                        (r.byte, r.offset, r.end)
+                    })
+                    .collect::<Vec<_>>();
+                let mut actual = Vec::new();
+                for run in Runs::new_coalesced(&source) {
+                    let run = run.unwrap();
+                    assert_eq!(run.end - run.offset, run.count);
+                    for offset in run.offset..run.end {
+                        actual.push((run.byte, offset, offset + 1));
+                    }
+                    if !matches!(byte, b'+' | b'-' | b'<' | b'>') {
+                        assert_eq!(run.count, 1);
+                    }
+                }
+                assert_eq!(actual, expected, "byte={byte} count={count}");
+            }
+        }
+        for source in [b"++++xyz+++>9>>>--[[]].,,".as_slice(), b"< <xyz<<<<"] {
+            let runs = Runs::new_coalesced(source)
+                .map(Result::unwrap)
+                .collect::<Vec<_>>();
+            for run in runs {
+                assert!(
+                    source[run.offset..run.end]
+                        .iter()
+                        .all(|byte| *byte == run.byte)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coalescing_preserves_encoded_runs_and_invalid_header_offsets() {
+        for source in [
+            b"@BFCRLE1;+++>123xyz>7-255".as_slice(),
+            b"@BFCRLE2;+++>aF-ff<3",
+            b"@BFCRLE1;+0",
+            b"@BFCRLE2;>ffffffffffffffffffffffff",
+            b"@BFCRLE3;++",
+        ] {
+            let collect = |runs: Runs<'_>| {
+                runs.map(|r| r.map(|r| (r.byte, r.count, r.offset, r.end)))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                collect(Runs::new_coalesced(source)),
+                collect(Runs::new(source))
             );
         }
     }
