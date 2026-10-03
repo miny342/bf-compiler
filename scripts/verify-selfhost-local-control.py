@@ -50,6 +50,17 @@ def fixtures():
         ("slot-limit", "void main(){cell[237] p;cell n=input();while(n){output(n);n-=1;}output(p[236]);}", [b"\2"], True),
         ("else-slot-limit", "void main(){cell[237] p;cell n=input();if(n){p[0]=65;}else{p[0]=66;}output(p[0]);}", [b"\0", b"\1"], True),
         ("dispatch-pages", "void touch(){cell unused;}void main(){cell n=input();" + "if(n){touch();n-=1;}" * 140 + "output(n);}", [b"\xff"], True),
+        ("goto-live-then", "void f(cell n){if(n){output(65);}else{return;}output(66);}void main(){f(input());}", values, True),
+        ("goto-live-else", "void f(cell n){if(n){return;}else{output(65);}output(66);}void main(){f(input());}", values, True),
+        ("goto-both-return", "cell f(cell n){if(n){return 65;}else{return 66;}}void main(){output(f(input()));}", values, True),
+        ("goto-empty-else", "cell test(){return input();}void main(){if(test()){output(65);}else{}output(66);}", values, True),
+        ("goto-empty-then", "cell test(){return input();}void main(){if(test()){}else{output(65);}output(66);}", values, True),
+        ("goto-nonempty-join", "cell test(){return input();}void main(){if(test()){output(65);}else{output(66);}output(67);}", values, True),
+        ("goto-nested-joins", "void touch(){cell unused;}void main(){cell n=input();if(n==1){touch();output(65);}else if(n==2){touch();output(66);}else if(n==3){touch();output(67);}else{touch();output(68);}output(69);}", values, True),
+        ("goto-empty-while-entry", "cell test(){return input();}void main(){while(test()){output(65);}output(66);}", [b"\0", b"\3\2\1\0"], True),
+        ("goto-nonempty-while-entry", "cell test(){return input();}void main(){output(66);while(test()){output(65);}output(67);}", [b"\0", b"\3\2\1\0"], True),
+        ("goto-global-init-before-while", "cell g=input();cell test(){return input();}void main(){while(test()){output(g);}output(input());}", [b"A\0Z", b"A\1\2\0Z"], True),
+        ("goto-while-after-join", "void touch(){cell unused;}cell test(){return input();}void main(){if(input()){touch();}while(test()){output(65);}output(66);}", [b"\0\0", b"\1\3\2\1\0"], True),
     ]
 
 

@@ -297,6 +297,12 @@ node領域を30.5%削減する。scalar literalは値を短いrecord内へ詰め
 右辺literalはbinary recordの未使用fieldへ即値として埋め込む。両辺literalのbinary式とliteralへの
 unary式はその場で畳み込み、不要になった末尾recordをarenaへ戻す。
 
+continuation形式の`if`では、生きている片側の終端や空の終端を合流先に再利用する。
+`while`では直前のブロックが空の場合だけ条件評価の入口へ再利用し、backedgeで
+直前の命令を繰り返さない。不要なGotoとcontinuationは構築時に省き、既存のtailを復元して
+後続命令をappendする。全CIRの辺の張り替えや命令の複製は追加しない。
+BF出力と公開CIR出力の両方で同じ規則を使う。
+
 static globalsの右にzero anchorを置き、各activationの`Active`をallocation flagとして保存する。
 global accessはcurrent frameからanchorへ左走査し、処理後にanchorからfrontierへ右走査して同じ
 activationへ戻るため、再帰深度によらず単一のstatic領域を参照する。動的添字はsource indexを
@@ -323,6 +329,7 @@ python3 scripts/verify-selfhost-local-control.py --compiler target/release/bfc \
 `verify-selfhost-local-control.py`は入れ子の分岐・loop、inputを含む条件、従来経路へのfallback、
 temporary上限付近をBF製compilerとIR VMで照合し、RLE-only/全ONの意味・論理counter一致と
 公開CIR経路を検証する。
+片側・両側return、空のthen/else、else-ifの合流、命令のある/ないwhile入口も検証する。
 
 診断だけの短い回帰検証は次で実行する。全call siteのID重複・引数漏れと、lexer・semantic・
 内部算術helperのエラー表示および停止を確認する。compiler自身を入力する実験は行わない。

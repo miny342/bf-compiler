@@ -8,6 +8,7 @@
 |---|---|---|
 | interpreterの非同期比較idiomの一括化 | 採用 | 全256×256入力で出力・raw/RLE命令数を照合。実行時の補助セルと境界を検査し、不成立時は通常実行。full28と同じcompiler BFの短いwide-globalコンパイルでsample実行時間9.28%減。 |
 | clear loopの命令数を逆元で計算 | 採用 | 全256入力×128奇数増分で従来の反復数と一致。比較一括化との合計で短いwide-globalコンパイルを12.28%短縮（profileなし）。full自己入力は再測定していない。 |
+| interpreterの進捗処理分離とsite遅延取得 | 採用 | 進捗有無・countdown判定をinline化し、時計・通知処理をcold関数へ分離。非profile実行ではpoll時だけsiteを取得し、16,384回のpoll間隔・中断snapshot・raw/RLE/native counterを維持。通常release・圧縮BFの各3組の試作比較で全ON・2,788-byte入力のexecute中央値6.403→4.316秒、RLE-only・583-byte入力20.366→15.410秒。本体でも通常BF/圧縮BF・RLE-only/全ONの出力と全counter一致、workspace 375テストpass。[perf測定と取り込み記録](optimize_logs/INTERPRETER_PERF_RESULTS.md)。stage3全体の時間は未測定。 |
 | emit_move_toの同一位置での早期return | 試作のみ・不採用 | 4入力で出力一致したがnative operationsが0.85〜1.09%増加。追加の等値比較・制御の費用が上回った。 |
 | emit_hex_byteのwhile化 | 試作のみ・保留 | 4入力で出力一致、native operations削減は0.024〜0.182%。速度改善は確認できずproductionに残していない。emit_repeat_characterの既存whileは維持。 |
 | 空Goto threading・到達不能除去・ID compaction | 採用 | source/CIRで出力一致、helloのprocess wall短縮。主効果はdispatcher往復削減。full selfhost改善は未確認。 |
@@ -16,6 +17,7 @@
 | 同一関数の非空Branch後継inline化（2c） | 再評価後に採用 | 当初の少数wall測定による不採用をpaired比較で見直した。source/CIR複数ケースでBF execute短縮を確認。生成BF増加を伴う。全入力で差を識別できたわけではなく、end-to-end/full selfhost改善は未確認。 |
 | 局所CFG構造化（2d） | 採用 | source/CIRの複数入力でBF execute短縮と出力一致を確認。call・portal等の境界を維持し、通常loweringで有効化。frame guard追加とID配置変化を伴うため、削減全体をloop化だけの効果とは解釈しない。full selfhost時間の改善は未確認。 |
 | selfhostのlocal if/while保持 | 採用 | BF出力でdispatcher往復を省略し、call・return・portal・239-cell上限は従来経路へ戻す。試作の通常BF・583-byte入力でexecute中央値はRLE-only 29.24→19.01秒、全ON 4.95→1.24秒、compiler BFは約0.09%増。compressed＋全ONのstage2＋stage3は20分49→20分38秒（各1回で改善断定不可）。公開CIR v2でもLoopへ変換し、旧v1は読込可能。通常BF・RLE-onlyの全段時間は未測定。 |
+| selfhostの構築時Goto省略 | 採用（Goto単独） | ifの生きた終端・空の終端とwhileの空入口を再利用し、tailを復元して後続命令を追加。全CIR走査・命令複製なし。BF/公開CIRでreturn・空の枝・入れ子・loop入口を検証。固定compiler入力のcontinuationは5,948→5,792、empty Gotoは219→63、命令数23,420は不変。通常BF・583-byte入力のexecute中央値（各3回）はRLE-only 18.806→18.668秒、全ON 1.226→1.179秒、動的RLE−0.64%、compiler BF＋0.020%。追加実装の自己コンパイル費用を踏まえ、semantic定数畳み込みと定数条件除去は外した。[Goto単独の取り込み記録](optimize_logs/SELFHOST_GOTO_ONLY_ADOPTION.md)。Goto単独の全段時間は未測定。 |
 | IR継続・遷移・終端・phase・portal集計 | 採用 | 出力・通常counter一致とaccounting、source/CIR測定を確認。計測費用があるためオプトイン。BF hidden dispatch/navigation費用は測れていない。 |
 | BFCRLE v1テキスト圧縮 | 採用（オプトイン） | Rust版出力のSSD書込量を削減。通常BF互換を維持し、profileの展開後ordinal/identityとinline markerを保つ。セルフホスト版にもcompressedエントリを追加し、通常mainとbinary CIRを維持。 |
 | interpreter RemoteTransfer | 採用 | BFの意味から経路不変性を実行時検証してScan往復を一括転送へ置換。source由来BFの複数入力で出力・論理counter一致とexecute短縮を確認。不成立時は通常実行。CIR/full selfhost時間比較は未実施。 |

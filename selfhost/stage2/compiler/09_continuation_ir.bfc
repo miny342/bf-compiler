@@ -967,6 +967,7 @@ void lower_ast_statement(NodeId statement) {
         select_new_continuation(then_continuation);
         lower_ast_statement(node_b(statement));
         NodeId then_end = lowering_current_continuation;
+        NodeId then_tail = lowering_instruction_tail;
 
         select_new_continuation(else_continuation);
         if (!node_is_null(node_c(statement))) {
@@ -974,8 +975,23 @@ void lower_ast_statement(NodeId statement) {
         }
         NodeId else_end = lowering_current_continuation;
 
-        if (node_is_null(then_end) && node_is_null(else_end)) {
-            lowering_current_continuation = null_node();
+        if (node_is_null(then_end)) {
+            // else_end and its instruction tail are already selected.
+            // If both arms terminated, else_end is null too.
+        } else if (node_is_null(else_end)) {
+            lowering_current_continuation = then_end;
+            lowering_instruction_tail = then_tail;
+        } else if (node_is_null(lowering_instruction_tail)) {
+            // Reuse the empty else endpoint as the join, including joins
+            // already shared by nested branches. No incoming-edge rewrite.
+            lowering_current_continuation = then_end;
+            finish_goto(else_end);
+            lowering_current_continuation = else_end;
+            lowering_instruction_tail = null_node();
+        } else if (node_is_null(then_tail)) {
+            finish_goto(then_end);
+            lowering_current_continuation = then_end;
+            lowering_instruction_tail = null_node();
         } else {
             NodeId join = new_continuation();
             if (!node_is_null(then_end)) {
@@ -991,10 +1007,14 @@ void lower_ast_statement(NodeId statement) {
         return;
     }
     if (kind == NODE_WHILE_STATEMENT) {
-        NodeId condition_continuation = new_continuation();
+        NodeId condition_continuation = lowering_current_continuation;
+        cell reuse_condition = node_is_null(lowering_instruction_tail);
+        if (!reuse_condition) {
+            condition_continuation = new_continuation();
+            finish_goto(condition_continuation);
+        }
         NodeId body_continuation = new_continuation();
         NodeId exit_continuation = new_continuation();
-        finish_goto(condition_continuation);
 
         select_new_continuation(condition_continuation);
         cell condition = allocate_lowering_temp();

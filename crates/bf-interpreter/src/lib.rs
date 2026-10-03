@@ -1634,16 +1634,31 @@ impl<'a> Machine<'a> {
         }
     }
 
-    fn observe_progress(&mut self, site: ResolvedProfileSite) -> Result<(), Error> {
+    #[inline]
+    fn progress_poll_due(&mut self) -> bool {
         if self.progress.is_none() {
-            return Ok(());
+            return false;
         }
         self.progress_countdown -= 1;
         if self.progress_countdown != 0 {
-            return Ok(());
+            return false;
         }
         self.progress_countdown = PROGRESS_POLL_OPERATIONS;
+        true
+    }
 
+    #[inline]
+    fn observe_progress(&mut self, site: ResolvedProfileSite) -> Result<(), Error> {
+        if self.progress_poll_due() {
+            self.poll_progress(site)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn poll_progress(&mut self, site: ResolvedProfileSite) -> Result<(), Error> {
         let progress = self.progress.as_ref().unwrap();
         let interrupted = (progress.interrupted)();
         let now = Instant::now();
@@ -1740,7 +1755,10 @@ impl<'a> Machine<'a> {
                 self.execute_raw_run::<false, SAMPLE>(instruction)?;
                 continue;
             }
-            self.observe_progress(instruction.site())?;
+            // Resolve the site only when polling to avoid a second dispatch per instruction.
+            if self.progress_poll_due() {
+                self.poll_progress(instruction.site())?;
+            }
             if SAMPLE {
                 self.publish_sample_site(instruction.site());
                 if instruction.mixed_provenance() {
