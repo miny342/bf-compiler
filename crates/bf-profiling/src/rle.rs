@@ -44,6 +44,7 @@ fn count_digit(byte: u8, hexadecimal: bool) -> Option<u8> {
 }
 
 /// Decode one command at `offset`. Non-command bytes are left to the caller.
+#[inline]
 pub fn run_at(source: &[u8], offset: usize, rle: bool) -> Result<Run, RleError> {
     let byte = source[offset];
     let mut end = offset + 1;
@@ -97,6 +98,7 @@ impl<'a> Runs<'a> {
 }
 impl Iterator for Runs<'_> {
     type Item = Result<Run, RleError>;
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.position == 0 && self.source.starts_with(b"@BFCRLE") && !self.rle {
             self.position = self.source.len();

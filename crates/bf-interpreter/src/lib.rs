@@ -1549,9 +1549,12 @@ struct Machine<'a> {
     input: &'a [u8],
     input_position: usize,
     output: Vec<u8>,
+    // Keep these counters separated by optimization stats. In measured release
+    // builds, adjacent counters caused LLVM to pack frequent updates into SIMD
+    // operations; this ordering gave faster scalar updates in RLE-only runs.
     executed_instructions: u64,
-    executed_rle_instructions: u64,
     optimization: OptimizationRunStats,
+    executed_rle_instructions: u64,
     grow_tape: bool,
     profile: Option<ProfileCollector>,
     sampled_site: Option<Arc<AtomicU32>>,

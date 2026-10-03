@@ -9,6 +9,7 @@
 | interpreterの非同期比較idiomの一括化 | 採用 | 全256×256入力で出力・raw/RLE命令数を照合。実行時の補助セルと境界を検査し、不成立時は通常実行。full28と同じcompiler BFの短いwide-globalコンパイルでsample実行時間9.28%減。 |
 | clear loopの命令数を逆元で計算 | 採用 | 全256入力×128奇数増分で従来の反復数と一致。比較一括化との合計で短いwide-globalコンパイルを12.28%短縮（profileなし）。full自己入力は再測定していない。 |
 | interpreterの進捗処理分離とsite遅延取得 | 採用 | 進捗有無・countdown判定をinline化し、時計・通知処理をcold関数へ分離。非profile実行ではpoll時だけsiteを取得し、16,384回のpoll間隔・中断snapshot・raw/RLE/native counterを維持。通常release・圧縮BFの各3組の試作比較で全ON・2,788-byte入力のexecute中央値6.403→4.316秒、RLE-only・583-byte入力20.366→15.410秒。本体でも通常BF/圧縮BF・RLE-only/全ONの出力と全counter一致、workspace 375テストpass。[perf測定と取り込み記録](optimize_logs/INTERPRETER_PERF_RESULTS.md)。stage3全体の時間は未測定。 |
+| interpreterのcounter配置変更とBF decoder inline化 | 採用 | privateなMachineのraw/RLE counterをoptimization statsで離し、Runs::next/run_atをinline化。配置の理由はコードコメントに保存。通常release・各3組の併用比較で圧縮BFのRLE-only execute中央値15.846→11.243秒、全ON・2,788-byte入力4.627→4.061秒、通常BFのparse 4.167→2.106秒。本体でも通常BF/圧縮BF・RLE-only/全ONの5実行で出力と全counter一致、workspace 375テストpass。CPU/LLVM依存の改善で、stage3全体は未測定。[測定と取り込み記録](optimize_logs/INTERPRETER_NEXT_OPTIMIZATIONS.md)。 |
 | emit_move_toの同一位置での早期return | 試作のみ・不採用 | 4入力で出力一致したがnative operationsが0.85〜1.09%増加。追加の等値比較・制御の費用が上回った。 |
 | emit_hex_byteのwhile化 | 試作のみ・保留 | 4入力で出力一致、native operations削減は0.024〜0.182%。速度改善は確認できずproductionに残していない。emit_repeat_characterの既存whileは維持。 |
 | 空Goto threading・到達不能除去・ID compaction | 採用 | source/CIRで出力一致、helloのprocess wall短縮。主効果はdispatcher往復削減。full selfhost改善は未確認。 |
