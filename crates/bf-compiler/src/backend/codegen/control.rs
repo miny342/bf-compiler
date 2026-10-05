@@ -55,7 +55,13 @@ impl<'a> AbiEmitter<'a> {
                 callee,
                 arguments,
                 return_to,
-            } => self.emit_call(continuation.function(), *callee, arguments, *return_to)?,
+            } => self.emit_call(
+                continuation.id(),
+                continuation.function(),
+                *callee,
+                arguments,
+                *return_to,
+            )?,
             Terminator::Return { value } => self.emit_return(continuation.function(), *value)?,
             Terminator::ArrayLoad {
                 array: _,
@@ -79,6 +85,7 @@ impl<'a> AbiEmitter<'a> {
 
     pub(super) fn emit_call(
         &mut self,
+        call: ContinuationId,
         caller: FunctionId,
         callee: FunctionId,
         arguments: &[ValueOperand],
@@ -88,12 +95,13 @@ impl<'a> AbiEmitter<'a> {
             if emitter.fixed.is_some() {
                 return emitter.emit_fixed_call(caller, callee, arguments, return_to);
             }
-            emitter.emit_call_inner(caller, callee, arguments, return_to)
+            emitter.emit_call_inner(Some(call), caller, callee, arguments, return_to)
         })
     }
 
     pub(super) fn emit_call_inner(
         &mut self,
+        call: Option<ContinuationId>,
         caller: FunctionId,
         callee: FunctionId,
         arguments: &[ValueOperand],
@@ -123,9 +131,9 @@ impl<'a> AbiEmitter<'a> {
         let callee_context_delta = (callee_frame.frame_chunks() * stride) as isize;
         let caller_frontier = (caller_context_chunks * stride) as isize;
 
-        // Each copy restores its caller source. Repeating an Address for
-        // multiple parameters therefore has the same value semantics as the
-        // source language's left-to-right, already-evaluated argument list.
+        // Repeated/overlapping sources are consumed only at their final use,
+        // and only if they are dead after resume. This retains the snapshot
+        // semantics of the already-evaluated, left-to-right argument list.
         // Copy before marking callee heads: while a global source is visited,
         // anchor-to-frontier normalization must still return to the caller.
         // Returned frame data is zero, so writing the future parameter region
@@ -136,51 +144,49 @@ impl<'a> AbiEmitter<'a> {
         }
         // An aggregate parameter can overlap a later scalar parameter (or
         // vice versa). Only the first write is guaranteed to see a zero cell.
-        let mut written_parameters = HashSet::new();
+        let mut copies = Vec::new();
+        let mut remaining = HashMap::<Location, usize>::new();
         for (&argument, &(parameter, parameter_cells)) in arguments.iter().zip(&parameters) {
-            match (argument, parameter) {
-                (ValueOperand::Cell(argument), ParameterLocation::Cell(parameter)) => {
-                    let src = self.address_location(argument, caller)?;
-                    let dst = Location::Relative(
-                        callee_context_delta + callee_frame.frame_offset(parameter),
-                    );
-                    if !written_parameters.insert(dst) {
-                        self.clear_location(dst);
+            for index in 0..parameter_cells.unwrap_or(1) {
+                let address = match argument {
+                    ValueOperand::Cell(address) => address,
+                    ValueOperand::Array(array) => Address::ArrayElement { array, index },
+                    ValueOperand::Aggregate {
+                        region: array,
+                        offset,
+                        ..
+                    } => Address::ArrayElement {
+                        array,
+                        index: offset + index,
+                    },
+                };
+                let src = self.address_location(address, caller)?;
+                let offset = match parameter {
+                    ParameterLocation::Cell(slot) => callee_frame.frame_offset(slot),
+                    ParameterLocation::AggregateElement { aggregate, index } => {
+                        callee_frame.aggregate_element_offset(aggregate, index)?
                     }
-                    self.copy_locations_to_zeroed_destination(src, dst, restore);
-                }
-                (
-                    ValueOperand::Cell(argument),
-                    ParameterLocation::AggregateElement { aggregate, index },
-                ) => {
-                    let src = self.address_location(argument, caller)?;
-                    let dst = Location::Relative(
-                        callee_context_delta
-                            + callee_frame.aggregate_element_offset(aggregate, index)?,
-                    );
-                    if !written_parameters.insert(dst) {
-                        self.clear_location(dst);
+                    ParameterLocation::Array(aggregate)
+                    | ParameterLocation::Aggregate(aggregate) => {
+                        callee_frame.aggregate_element_offset(aggregate, index)?
                     }
-                    self.copy_locations_to_zeroed_destination(src, dst, restore);
-                }
-                (
-                    ValueOperand::Array(_) | ValueOperand::Aggregate { .. },
-                    ParameterLocation::Array(parameter) | ParameterLocation::Aggregate(parameter),
-                ) => {
-                    let cells = parameter_cells.expect("aggregate parameter size");
-                    for index in 0..cells {
-                        let src = self.value_operand_element_location(argument, index, caller)?;
-                        let dst = Location::Relative(
-                            callee_context_delta
-                                + callee_frame.aggregate_element_offset(parameter, index)?,
-                        );
-                        if !written_parameters.insert(dst) {
-                            self.clear_location(dst);
-                        }
-                        self.copy_locations_to_zeroed_destination(src, dst, restore);
-                    }
-                }
-                _ => unreachable!("validated call operand and parameter types must match"),
+                };
+                let dst = Location::Relative(callee_context_delta + offset);
+                *remaining.entry(src).or_default() += 1;
+                copies.push((address, src, dst));
+            }
+        }
+        let mut written_parameters = HashSet::new();
+        for (address, src, dst) in copies {
+            if !written_parameters.insert(dst) {
+                self.clear_location(dst);
+            }
+            let left = remaining.get_mut(&src).unwrap();
+            *left -= 1;
+            if *left == 0 && call.is_some_and(|call| self.lifetime.call_dead(call, address)) {
+                self.move_location_to_zero(src, dst);
+            } else {
+                self.copy_locations_to_zeroed_destination(src, dst, restore);
             }
         }
 
@@ -245,8 +251,14 @@ impl<'a> AbiEmitter<'a> {
             Some(ValueOperand::Cell(value)) => {
                 let value = self.address_location(value, callee)?;
                 let callee_value = Location::Relative(callee_frame.abi_offset(AbiField::Value));
-                self.copy_locations(value, callee_value, restore);
-                self.move_location(callee_value, caller_value);
+                // The callee frame dies here; local results need no restore
+                // or staging through its ABI Value. Globals remain preserved.
+                if matches!(value, Location::Relative(_)) {
+                    self.move_location(value, caller_value);
+                } else {
+                    self.copy_locations(value, callee_value, restore);
+                    self.move_location(callee_value, caller_value);
+                }
             }
             Some(operand @ (ValueOperand::Array(_) | ValueOperand::Aggregate { .. })) => {
                 let cells = match self.function(callee)?.return_type() {
@@ -257,7 +269,11 @@ impl<'a> AbiEmitter<'a> {
                 for index in 0..cells {
                     let src = self.value_operand_element_location(operand, index, callee)?;
                     let dst = Location::Relative(caller_delta + self.common_outbox_offset(index));
-                    self.copy_locations_with_zeroed_restore(src, dst, restore);
+                    if matches!(src, Location::Relative(_)) {
+                        self.move_location(src, dst);
+                    } else {
+                        self.copy_locations_with_zeroed_restore(src, dst, restore);
+                    }
                 }
                 self.clear_location(caller_value);
             }

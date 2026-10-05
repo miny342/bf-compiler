@@ -191,7 +191,9 @@ impl<'a> AbiEmitter<'a> {
                 let src = self.address_location(source_address, function)?;
                 let dst = self.address_location(*dst, function)?;
                 let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
-                if self.nibble_transfer
+                if self.fixed.is_none() && self.lifetime.dead(instruction, source_address) {
+                    self.move_location(src, dst);
+                } else if self.nibble_transfer
                     && self.fixed_context.is_none()
                     && matches!(source_address, Address::Global(_))
                     && let (Location::Global(source), Location::Relative(destination)) = (src, dst)
@@ -205,7 +207,7 @@ impl<'a> AbiEmitter<'a> {
                 self.transfer(*src, targets, function)?;
             }
             FrameInstruction::AggregateCopy { src, dst, cells } => {
-                self.aggregate_copy(*src, *dst, *cells, function)?;
+                self.aggregate_copy(instruction, *src, *dst, *cells, function)?;
             }
             FrameInstruction::Input { dst } => {
                 let dst = self.address_location(*dst, function)?;
@@ -466,6 +468,7 @@ impl<'a> AbiEmitter<'a> {
 
     pub(super) fn aggregate_copy(
         &mut self,
+        instruction: &FrameInstruction,
         src: ArrayRegion,
         dst: ArrayRegion,
         cells: usize,
@@ -477,9 +480,14 @@ impl<'a> AbiEmitter<'a> {
         let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
         self.clear_location(restore);
         for index in 0..cells {
+            let source = Address::ArrayElement { array: src, index };
             let src = self.array_element_location(src, index, function)?;
             let dst = self.array_element_location(dst, index, function)?;
-            self.copy_locations_with_zeroed_restore(src, dst, restore);
+            if self.fixed.is_none() && self.lifetime.dead(instruction, source) {
+                self.move_location(src, dst);
+            } else {
+                self.copy_locations_with_zeroed_restore(src, dst, restore);
+            }
         }
         Ok(())
     }

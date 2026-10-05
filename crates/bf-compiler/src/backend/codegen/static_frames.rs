@@ -236,7 +236,7 @@ impl<'a> AbiEmitter<'a> {
         let callee_base = fixed.contexts.get(&callee).copied();
         let original_context = self.fixed_context;
         if original_context.is_none() && callee_base.is_none() {
-            return self.emit_call_inner(caller, callee, arguments, return_to);
+            return self.emit_call_inner(None, caller, callee, arguments, return_to);
         }
         let function = self.function(callee)?;
         let entry = function.entry();

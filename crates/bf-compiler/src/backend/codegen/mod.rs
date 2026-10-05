@@ -26,6 +26,7 @@ use crate::{
 mod control;
 mod dispatch;
 mod instructions;
+mod lifetime;
 mod portal;
 mod portal_plan;
 mod provenance;
@@ -385,6 +386,7 @@ enum Location {
 
 struct AbiEmitter<'a> {
     program: &'a ContinuationProgram,
+    lifetime: lifetime::Plan<'a>,
     layouts: &'a HashMap<FunctionId, FunctionLayout>,
     static_layout: &'a StaticLayout,
     portal: &'a PortalPlan,
@@ -441,6 +443,7 @@ impl<'a> AbiEmitter<'a> {
         }
         Self {
             program,
+            lifetime: lifetime::Plan::new(program),
             layouts,
             static_layout,
             portal,

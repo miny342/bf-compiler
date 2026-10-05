@@ -150,7 +150,7 @@ pub(crate) fn allocate(
         // Backend operations must retain distinct operands even when an input
         // dies at this instruction (notably destructive transfers and portals).
         let operands: Slots = node.uses.union(&node.defs).copied().collect();
-        // A non-destructive scalar Copy can become a self-copy when its
+        // A scalar or complete aggregate Copy can become a self-copy when its
         // source dies here. Live-out interference still separates both cells
         // whenever either value must remain independently observable.
         if node.copy.is_none() {
@@ -305,6 +305,21 @@ fn build_body(
         } = instruction
         {
             node.copy = Some((src.index(), dst.index()));
+        }
+        if let FrameInstruction::AggregateCopy {
+            src: AggregateRegion::Frame(src),
+            dst: AggregateRegion::Frame(dst),
+            cells,
+        } = instruction
+            && function.frame_aggregate(*src).unwrap().cells() == *cells
+            && function.frame_aggregate(*dst).unwrap().cells() == *cells
+        {
+            // A whole copy transfers ownership when the source dies. Partial
+            // copies must retain distinct storage for the untouched suffix.
+            node.copy = Some((
+                function.frame_slots() + src.index(),
+                function.frame_slots() + dst.index(),
+            ));
         }
         match instruction {
             FrameInstruction::Loop { condition, body } => {
@@ -469,6 +484,7 @@ fn full_initialization(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::frontend::{lexer, lowering, macro_expansion, parser, semantic};
     use crate::{
         AbiConfig, ContinuationProgram, ContinuationRunOptions, run_continuations_with_io,
@@ -628,6 +644,79 @@ mod tests {
         assert_eq!(original.functions()[0].frame_aggregates().len(), 3);
         assert_eq!(allocated.functions()[0].frame_aggregates().len(), 1);
         check(source, b"", &[7, 0, 8, 9]);
+    }
+
+    #[test]
+    fn whole_copy_coalesces_but_partial_copies_and_independent_writes_do_not() {
+        let main = crate::FunctionId::new(0);
+        let entry = ContinuationId::new(1).unwrap();
+        let region = |n| AggregateRegion::Frame(FrameAggregateId::new(n));
+        let cell = |n, index| Address::ArrayElement {
+            array: region(n),
+            index,
+        };
+        for (cells, independent_write, regions) in [(3, false, 1), (2, false, 2), (3, true, 2)] {
+            let f = FunctionDescriptor::new_aggregates(
+                main,
+                vec![],
+                0,
+                (0..2)
+                    .map(|n| FrameAggregateDescriptor::new(FrameAggregateId::new(n), 3))
+                    .collect(),
+                0,
+                crate::ValueType::Void,
+                entry,
+            );
+            let mut body = vec![
+                FrameInstruction::Set {
+                    dst: cell(0, 0),
+                    value: 17,
+                },
+                FrameInstruction::Set {
+                    dst: cell(0, 1),
+                    value: 18,
+                },
+                FrameInstruction::Set {
+                    dst: cell(0, 2),
+                    value: 19,
+                },
+                FrameInstruction::AggregateCopy {
+                    src: region(0),
+                    dst: region(1),
+                    cells,
+                },
+            ];
+            if independent_write {
+                body.extend([
+                    FrameInstruction::Set {
+                        dst: cell(0, 0),
+                        value: 77,
+                    },
+                    FrameInstruction::Output { src: cell(0, 0) },
+                ]);
+            }
+            body.push(FrameInstruction::Output { src: cell(1, 0) });
+            body.push(FrameInstruction::Output { src: cell(1, 2) });
+            let original = ContinuationProgram::new(
+                main,
+                vec![f.clone()],
+                vec![Continuation::new(entry, main, body, Terminator::Halt)],
+            )
+            .unwrap();
+            let (f, cs) = allocate(f, original.continuations().to_vec());
+            assert_eq!(f.frame_aggregates().len(), regions);
+            let allocated = ContinuationProgram::new(main, vec![f], cs).unwrap();
+            let expected = execute(&original, b"");
+            assert_eq!(execute(&allocated, b""), expected);
+            assert_eq!(
+                bf_interpreter::run(
+                    crate::compile_continuations(&allocated).unwrap().as_bytes(),
+                    b""
+                )
+                .unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
