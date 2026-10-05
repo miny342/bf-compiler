@@ -29,8 +29,9 @@ fn hex_name(bytes: &[u8]) -> Result<String, EmbeddedProfileError> {
     {
         return Err(EmbeddedProfileError::MalformedMarker);
     }
-    let decoded = bytes
-        .chunks_exact(2)
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let decoded = pairs
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect();
     String::from_utf8(decoded).map_err(|_| EmbeddedProfileError::MalformedMarker)
