@@ -14,11 +14,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", required=True, type=Path)
     parser.add_argument("--interpreter", required=True, type=Path)
+    parser.add_argument("--enable-nibble-transfer", action="store_true")
     parser.add_argument("--selfhost-compiler", type=Path,
                         help="also generate each fixture with this BF compiler and compare bytes")
     args = parser.parse_args()
     compiler = str(args.compiler.resolve())
     interpreter = str(args.interpreter.resolve())
+    codegen_flags = ["--enable-nibble-transfer"] if args.enable_nibble_transfer else []
     (ROOT / "tmp").mkdir(exist_ok=True)
 
     def run(command, data=b""):
@@ -29,7 +31,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="selfhost-portals-", dir=ROOT / "tmp") as directory:
         work = Path(directory)
         source = work / "compiler.bfc"
-        source.write_bytes(run([str(ROOT / "scripts/concat-stage2-compiler.sh"), "profile"]).stdout)
+        source.write_bytes(run([str(ROOT / "scripts/concat-stage2-compiler.sh"), "profile", *codegen_flags]).stdout)
 
         def check(name, program, data, expected=None, maximum_bytes=150_000, ordinary=False):
             path = work / f"{name}.bfc"
@@ -55,7 +57,7 @@ def main():
             assert {"portal0", "portal1", "portal2", "portal3"} <= functions
             if ordinary:
                 plain_source = work / "plain-compiler.bfc"
-                plain_source.write_bytes(run([str(ROOT / "scripts/concat-stage2-compiler.sh"), "main"]).stdout)
+                plain_source.write_bytes(run([str(ROOT / "scripts/concat-stage2-compiler.sh"), "main", *codegen_flags]).stdout)
                 plain = run([compiler, "--run-ir", "--disable-function-inline", str(plain_source)],
                             program.encode()).stdout
                 encoded = re.sub(rb"@[^;]*;", b"", bf)

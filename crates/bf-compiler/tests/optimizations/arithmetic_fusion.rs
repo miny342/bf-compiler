@@ -39,11 +39,24 @@ fn check(program: &bfc::ContinuationProgram, input: &[u8], expected: &[u8]) {
     )
     .unwrap();
     assert_eq!(ir, expected);
-    let bf = bfc::optimize_bf(
-        &bfc::lower_continuations_with_config(program, bfc::AbiConfig::new(16).unwrap()).unwrap(),
-    )
-    .to_source();
-    assert_eq!(bf_interpreter::run(bf.as_bytes(), input).unwrap(), expected);
+    for inplace_compare in [false, true] {
+        let bf = bfc::optimize_bf(
+            &bfc::lower_continuations_with_codegen_options(
+                program,
+                bfc::AbiCodegenOptions {
+                    inplace_compare,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .to_source();
+        assert_eq!(
+            bf_interpreter::run(bf.as_bytes(), input).unwrap(),
+            expected,
+            "in-place comparison={inplace_compare}"
+        );
+    }
 }
 
 fn fused_count(body: &[I]) -> usize {

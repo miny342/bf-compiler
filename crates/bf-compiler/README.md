@@ -66,6 +66,27 @@ BFCソース
 どちらの入力も、`--run-ir` ではBF生成の代わりに [cir/vm/](src/cir/vm/mod.rs) で実行する。
 `cell/` の低水準APIは `Cell IR → cell::codegen → BF IR` という独立した経路である。
 
+## 選択式のBF生成option
+
+以下は全て既定OFFで、独立に選択できる。通常/圧縮BFとprofile付き出力に共通である。
+
+| CLI | `AbiCodegenOptions` | 動作 |
+|---|---|---|
+| `--enable-nibble-transfer` | `nibble_transfer` | global搬送のbyteをnibbleへ分解する。 |
+| `--enable-inplace-compare` | `inplace_compare` | 比較に使うFrameSlotにzero/flagを予約し、ABI Scratchへのoperand搬送を省く。 |
+| `--enable-anchor-bank` | `anchor_bank` | 16 anchorsを使い、stackのglobal往復を272 cells刻みで走査する。 |
+
+```sh
+cargo run --release -p bf-compiler -- \
+  --enable-inplace-compare --enable-anchor-bank --enable-nibble-transfer program.bfc > program.bf
+```
+
+公開CIRはflat frameを連続aggregateとして保つため、直接比較は従来方式へ戻す。
+Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimental-static-frames`は併用できない。
+これらのoptionはCIR出力・inline判断を変更せず、BFを生成する際だけ使う。
+論理RLE op数の削減を目的とし、全最適化ONのinterpreterの実時間では遅くなる場合もある。
+配置とfallbackの詳細は[Rust ABI](../../ABI-rust.md#選択式の直接比較とanchor16)を参照。
+
 ## 名前の近い処理
 
 - `cir/structure.rs`: Continuation IRを書き換え、局所的な分岐・ループを構造化する。

@@ -1,6 +1,7 @@
 // production compilerのbinary CIR出力用entrypoint。
 
 const cell SELFHOST_LOCAL_CFG = 1;
+const cell NIBBLE_BF_TRANSFER = 0;
 
 void read_character() {
     current_char = input();

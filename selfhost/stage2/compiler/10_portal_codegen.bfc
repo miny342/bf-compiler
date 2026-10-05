@@ -110,19 +110,24 @@ WideValue physical_page_origin(WideValue address) {
 }
 
 WideValue physical_static_cells() {
-    if (!stage12_portals) {
-        return stage7_static_cells;
-    }
     WideValue rounded = stage7_static_cells;
-    if (rounded.low != 0) {
-        rounded = wide_add(rounded, wide_from_cell(0 - rounded.low));
+    if (stage12_portals) {
+        if (rounded.low != 0) {
+            rounded = wide_add(rounded, wide_from_cell(0 - rounded.low));
+        }
+        rounded = physical_page_origin(rounded);
     }
-    return physical_page_origin(rounded);
+    // Shared scratch sits outside user payload and page protocol headers.
+    // It is zero at helper boundaries and never changes logical CIR addresses.
+    if (NIBBLE_BF_TRANSFER) {
+        rounded = wide_add(rounded, wide_from_cell(NIBBLE_STATIC_CELLS));
+    }
+    return rounded;
 }
 
 WideValue physical_global_distance(WideValue address) {
     if (!stage12_portals) {
-        return wide_subtract(stage7_static_cells, address);
+        return wide_subtract(physical_static_cells(), address);
     }
     WideValue physical = wide_add(physical_page_origin(address), wide_from_cell(16));
     physical = wide_add(physical, wide_from_cell(address.low));
@@ -159,14 +164,30 @@ void emit_portal_profile_headers() {
 }
 
 // Destructively stage one caller field into a zeroed base-page field.
-cell emit_portal_stage(cell position, cell source, cell target, WideValue distance) {
+cell emit_portal_stage_digit(
+    cell position, cell source, cell target, WideValue distance, cell contribution
+) {
     position = emit_loop_open(position, source);
     compiler_output!('-');
     position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
-    position = emit_add_constant(position, target, 1);
+    position = emit_add_constant(position, target, contribution);
     position = emit_move_to(position, 0);
     position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
     return emit_loop_close(position, source);
+}
+
+cell emit_portal_stage(cell position, cell source, cell target, WideValue distance) {
+    // Payload and offset low are variable bytes worth splitting. Validity is
+    // already staged; base carry is computed after payload and staged before
+    // offset low. Thus scratch 9,11..15 is not live at either call.
+    // Offset high retains the smaller unary transport template.
+    if (NIBBLE_BF_TRANSFER && (target == 8 || target == 7)) {
+        position = emit_nibble_split(position, source, FRAME_RESTORE, FRAME_SCRATCH_0, 15);
+        position = emit_portal_stage_digit(position, FRAME_SCRATCH_0, target, distance, 1);
+        position = emit_portal_stage_digit(position, 15, target, distance, 16);
+        return position;
+    }
+    return emit_portal_stage_digit(position, source, target, distance, 1);
 }
 
 // Consume source and set result to source < limit. The adjacent [-[-... descent
@@ -266,13 +287,32 @@ cell emit_portal_resume(cell position, NodeId instruction) {
         position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
         position = emit_clear(position, physical_frame_slot(node_value(instruction)));
         position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
-        position = emit_loop_open(position, 7);
-        compiler_output!('-');
-        position = emit_move_to(position, 0);
-        position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
-        position = emit_add_constant(position, physical_frame_slot(node_value(instruction)), 1);
-        position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
-        position = emit_loop_close(position, 7);
+        if (NIBBLE_BF_TRANSFER) {
+            // Decompose in the page header. Its request scratch is dead here;
+            // routing the byte via anchor scratch would duplicate long moves.
+            position = emit_nibble_split(position, FRAME_VALUE, FRAME_RESTORE, FRAME_SCRATCH_0, 15);
+            cell digit = FRAME_SCRATCH_0;
+            cell contribution = 1;
+            while (digit <= 15) {
+                position = emit_loop_open(position, digit);
+                compiler_output!('-');
+                position = emit_move_to(position, 0);
+                position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
+                position = emit_add_constant(position, physical_frame_slot(node_value(instruction)), contribution);
+                position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
+                position = emit_loop_close(position, digit);
+                digit += 4;
+                contribution = 16;
+            }
+        } else {
+            position = emit_loop_open(position, 7);
+            compiler_output!('-');
+            position = emit_move_to(position, 0);
+            position = emit_global_to_current_distance(position, distance, stage8_frame_cells);
+            position = emit_add_constant(position, physical_frame_slot(node_value(instruction)), 1);
+            position = emit_current_to_global_distance(position, distance, stage8_frame_cells);
+            position = emit_loop_close(position, 7);
+        }
     }
     cell field;
     while (field != 16) {

@@ -52,8 +52,28 @@ cargo run --release -p bf-compiler -- --unlimited-tape --compressed-bf \
 Rust backendはframe/global間のbyte搬送を既定でunaryにする。
 従来の搬送を比較する場合は上のRustコンパイラに`--enable-nibble-transfer`を追加する。
 RemoteTransferを使わないBF処理系向けに、値の分解で往復のBF命令数を抑える選択肢である。
-この指定はRustが生成するBFにだけ適用し、stage2コンパイラ自身のbackendや
-配列offset/windowのbase-16移動には影響しない。
+Rust側のflagはRustが生成するBFに適用する。
+stage2コンパイラ自身のBF backendにもnibble搬送を選ぶ場合は、ソース連結時に指定する。
+
+```sh
+scripts/concat-stage2-compiler.sh profile --enable-nibble-transfer > "$run_dir/stage2-compiler.bfc"
+```
+
+`main`・`compressed`・`profile`・`test`と組み合わせられ、既定はOFF。
+連結したsourceの`const cell NIBBLE_BF_TRANSFER`が生成方式を選ぶため、自己コンパイルの次段でも
+同じ設定を使うなら、そのsourceを入力する。Rust側の同名flagとは独立している。
+global→frameのcopyと、共有portalの要求payload・offset low byte・load結果を二つのnibbleに分解し、
+値に応じたstack往復を最大255回から最大30回へ抑える。通常のtransfer/remote-transfer一括実行が
+使える処理系では分解費用が負担になりうる。RLE命令数を減らすための選択肢である。
+frame幅は変えず、anchor手前に6-cellの共有static scratchを追加する。分解部分のコードは固定サイズ。
+portal load結果はpage headerのscratchで直接分解し、anchorへの中間搬送を省く。
+high byteとpage間payloadの搬送、配列offset/windowのbase-16移動は従来の方式を使う。
+
+`cir --enable-nibble-transfer`の出力CIRはflagなしと同じ。BF生成方式はCIRへ保存しないので、
+CIRからRustのBF backendで生成するときはRust側へ`--enable-nibble-transfer`を指定する。
+検証は`python3 scripts/verify-selfhost-nibble.py --compiler <bfc> --interpreter <bf-interpreter>`。
+全byte、再帰、共有portal、各出力形式、公開CIR、selfhost生成BFコンパイラで照合する。
+
 コンパイラ実行のprofile mapと、生成されたプログラムのmapは別物である。
 `main`/`compressed`はprofile markerを生成しない。生成BFを計測するときは、以下の`profile` entryを使う。
 入力は引き続きBFCソースであり、BFCRLEをBFCとして再入力するものではない。

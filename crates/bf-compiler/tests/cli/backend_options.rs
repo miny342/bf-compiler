@@ -1,18 +1,20 @@
 use super::*;
 
 #[test]
-fn nibble_transfer_is_opt_in_for_source_cir_and_all_output_formats() {
+fn backend_flags_are_opt_in_for_source_cir_and_all_output_formats() {
     use SelfhostCirInstruction as I;
-    use bf_compiler::{SelfhostCirArrayOp, SelfhostCirGlobalOp, SelfhostCirStorage};
+    use bf_compiler::{
+        SelfhostCirArrayOp, SelfhostCirBinaryOp, SelfhostCirGlobalOp, SelfhostCirStorage,
+    };
     use bf_interpreter::{RunOptions, run_with_options};
 
-    let root = test_root().with_file_name(format!("nibble-transfer-cli-{}", std::process::id()));
+    let root = test_root().with_file_name(format!("backend-flags-cli-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     fs::write(
         root.join("main.bfc"),
         "cell[256] values; cell global; void main(){cell i=input(); \
          global=input(); cell saved=global; global=input(); values[i]=saved; \
-         output(values[i]); output(saved); output(global);}",
+         output(values[i]); output(saved); output(global); cell rhs=global; output(saved < rhs);}",
     )
     .unwrap();
     let cir = SelfhostCirProgram::new(
@@ -91,6 +93,20 @@ fn nibble_transfer_is_opt_in_for_source_cir_and_all_output_formats() {
                     address: 256,
                 },
                 I::Output { source: 4 },
+                I::Copy {
+                    destination: 0,
+                    source: 3,
+                },
+                I::Copy {
+                    destination: 1,
+                    source: 4,
+                },
+                I::Binary {
+                    op: SelfhostCirBinaryOp::Less,
+                    destination: 0,
+                    source: 1,
+                },
+                I::Output { source: 0 },
             ],
             terminator: SelfhostCirTerminator::Halt,
         }],
@@ -100,13 +116,20 @@ fn nibble_transfer_is_opt_in_for_source_cir_and_all_output_formats() {
     for input in [vec!["main.bfc"], vec!["--cir-input", "main.cir"]] {
         for unbounded in [false, true] {
             let mut identities = Vec::new();
-            for nibble in [false, true] {
+            for flags in 0..8 {
+                let nibble = flags & 1 != 0;
                 let mut arguments = input.clone();
                 if unbounded {
                     arguments.push("--unlimited-tape");
                 }
                 if nibble {
                     arguments.push("--enable-nibble-transfer");
+                }
+                if flags & 2 != 0 {
+                    arguments.push("--enable-inplace-compare");
+                }
+                if flags & 4 != 0 {
+                    arguments.push("--enable-anchor-bank");
                 }
                 let plain = run_bfc(&root, &arguments);
                 assert!(plain.status.success(), "{:?}", plain.stderr);
@@ -133,35 +156,78 @@ fn nibble_transfer_is_opt_in_for_source_cir_and_all_output_formats() {
                         Some(map)
                     );
                     for value in [0, 1, 15, 16, 127, 128, 254, 255] {
+                        let mut logical_counts = None;
                         for disable_remote_transfer in [false, true] {
                             let run = run_with_options(
                                 &profiled.stdout,
                                 &[value, value, 255 - value],
                                 RunOptions {
                                     unbounded_tape: unbounded,
+                                    collect_stats: true,
                                     disable_remote_transfer,
+                                    disable_compare: disable_remote_transfer,
                                     ..RunOptions::default()
                                 },
                             )
                             .unwrap();
                             assert_eq!(
                                 run.output,
-                                [value, value, 255 - value],
+                                [value, value, 255 - value, u8::from(value < 255 - value)],
                                 "{args:?}, RT disabled={disable_remote_transfer}"
                             );
+                            let counts = (
+                                run.stats.executed_instructions,
+                                run.stats.executed_rle_instructions,
+                            );
+                            if let Some(reference) = logical_counts {
+                                assert_eq!(
+                                    counts, reference,
+                                    "native recognition must preserve logical counts: {args:?}"
+                                );
+                            }
+                            logical_counts = Some(counts);
                         }
                     }
                 }
             }
-            assert_ne!(
-                identities[0], identities[1],
-                "flag must change generated BF"
-            );
+            for flags in 0..8 {
+                for bit in [1, 2, 4] {
+                    // Binary CIR keeps its flat frame as one aggregate;
+                    // private scalar guards cannot split that storage.
+                    if bit == 2 && input[0] == "--cir-input" {
+                        assert_eq!(identities[flags], identities[flags ^ bit]);
+                        continue;
+                    }
+                    assert_ne!(
+                        identities[flags],
+                        identities[flags ^ bit],
+                        "each flag must change generated BF independently: {input:?}, flags={flags}, bit={bit}"
+                    );
+                }
+            }
         }
     }
-    let invalid = run_bfc(&root, &["--run-ir", "--enable-nibble-transfer", "main.bfc"]);
+    for flag in [
+        "--enable-nibble-transfer",
+        "--enable-inplace-compare",
+        "--enable-anchor-bank",
+    ] {
+        let invalid = run_bfc(&root, &["--run-ir", flag, "main.bfc"]);
+        assert!(!invalid.status.success());
+        assert!(
+            String::from_utf8_lossy(&invalid.stderr).contains("Brainfuck code-generation options")
+        );
+    }
+    let invalid = run_bfc(
+        &root,
+        &[
+            "--experimental-static-frames",
+            "--enable-anchor-bank",
+            "main.bfc",
+        ],
+    );
     assert!(!invalid.status.success());
-    assert!(String::from_utf8_lossy(&invalid.stderr).contains("Brainfuck code-generation options"));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("anchor bank cannot be combined"));
     fs::remove_dir_all(root).unwrap();
 }
 

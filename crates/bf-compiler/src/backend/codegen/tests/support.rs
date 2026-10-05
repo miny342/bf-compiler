@@ -176,11 +176,11 @@ pub(super) fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool
     let annotated = lower_continuations_annotated_with_options(
         program,
         AbiConfig::default(),
-        true,
         ProfileGranularity::Source,
-        false,
-        enabled,
-        false,
+        AbiCodegenOptions {
+            region_emission: enabled,
+            ..Default::default()
+        },
     )
     .unwrap();
     let artifact = optimize_annotated_bf(&annotated).profile_artifact(false);

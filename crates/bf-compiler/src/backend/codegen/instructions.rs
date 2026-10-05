@@ -242,14 +242,13 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    /// Destructive unsigned comparison on four adjacent ABI scratch cells:
-    /// L (right operand), E (initially 1), B (zero), R (left operand).
-    /// `[>>>[-<]<<-]` exits at L when right <= left, or at E otherwise.
-    /// Swapping the operands makes the second path exactly left < right,
-    /// without a separate equality test. Join the paths after the countdown.
-    /// Scratch0..3 are contiguous, inaccessible as
-    /// public operand addresses, and all zero on exit. The context origin and
-    /// surrounding structured-branch flags are preserved.
+    /// Destructive unsigned comparison. Default emission stages operands in
+    /// Scratch0..3; opt-in emission uses private guards beside frame operands.
+    /// Both layouts satisfy flag-right = zero-flag = left-left_zero = 1.
+    /// The countdown exits at right for right <= left, or at flag otherwise;
+    /// result processing joins at zero and clears both operands and the flag.
+    /// Restore retains the optional wrapping difference, separate from branch
+    /// temporaries. Equal or non-frame operands use the default staging path.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_compare(
         &mut self,
@@ -261,6 +260,10 @@ impl<'a> AbiEmitter<'a> {
         difference: Option<Address>,
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
+        let inplace = self.inplace_compare
+            && self.fixed_context.is_none()
+            && matches!((left, right), (Address::Frame(_), Address::Frame(_)))
+            && left != right;
         let left = self.address_location(left, function)?;
         let right = self.address_location(right, function)?;
         let dst = self.address_location(dst, function)?;
@@ -270,80 +273,97 @@ impl<'a> AbiEmitter<'a> {
         // Restore is private ABI scratch, separate from structured-branch flags.
         // Retain the countdown remainder here when both outputs are requested.
         let remainder = self.current_abi_offset(AbiField::Restore)?;
-        let l = self.current_abi_offset(AbiField::Scratch0)?;
-        // Adjacent scratch cells: right operand, flag, zero, left operand.
-        let e = self.current_abi_offset(AbiField::Scratch1)?;
-        let b = self.current_abi_offset(AbiField::Scratch2)?;
-        let r = self.current_abi_offset(AbiField::Scratch3)?;
-        debug_assert_eq!([e - l, b - e, r - b], [1, 1, 1]);
-        if left == right {
-            self.copy_locations(right, Location::Relative(l), Location::Relative(e));
+        let (right_cell, flag, zero, left_cell, left_zero) = if inplace {
+            let (Location::Relative(left), Location::Relative(right)) = (left, right) else {
+                unreachable!("in-place comparison uses frame operands");
+            };
+            // Each operand slot owns [zero, value, flag, zero]. Guards stay
+            // zero; the right-hand flag is consumed by result delivery below.
+            (right, right + 1, right + 2, left, left - 1)
         } else {
-            self.move_location_to_zero(right, Location::Relative(l));
-        }
-        self.move_location_to_zero(left, Location::Relative(r));
+            let right_cell = self.current_abi_offset(AbiField::Scratch0)?;
+            let flag = self.current_abi_offset(AbiField::Scratch1)?;
+            let zero = self.current_abi_offset(AbiField::Scratch2)?;
+            let left_cell = self.current_abi_offset(AbiField::Scratch3)?;
+            if left == right {
+                self.copy_locations(
+                    right,
+                    Location::Relative(right_cell),
+                    Location::Relative(flag),
+                );
+            } else {
+                self.move_location_to_zero(right, Location::Relative(right_cell));
+            }
+            self.move_location_to_zero(left, Location::Relative(left_cell));
+            (right_cell, flag, zero, left_cell, zero)
+        };
+        debug_assert_eq!(
+            [flag - right_cell, zero - flag, left_cell - left_zero],
+            [1, 1, 1]
+        );
         if difference.is_some() {
             self.clear(remainder);
         }
-        self.move_to(e);
+        self.move_to(flag);
         self.adjust(1);
-        self.move_to(l);
+        self.move_to(right_cell);
         let countdown = self.capture_infallible(|emitter| {
-            emitter.move_to(r);
+            emitter.move_to(left_cell);
             let nonzero = emitter.capture_infallible(|emitter| {
                 emitter.adjust(255);
-                emitter.move_to(b);
+                emitter.move_to(left_zero);
             });
             emitter.emit_loop(nonzero);
-            // R nonzero exits at B; R zero stays at R. Subtract from L or E.
-            emitter.push_move(-2);
-            emitter.position = l;
+            // Nonzero left exits at its zero guard; zero left stays at its
+            // operand. The same move maps these to right or its flag.
+            emitter.push_move(right_cell - left_zero);
+            emitter.position = right_cell;
             emitter.adjust(255);
         });
         self.emit_loop(countdown);
-        // Exit at L=0 for right <= left, otherwise E=0 with L=right-left.
+        // Exit at right=0 for right <= left, otherwise flag=0 with right-left remaining.
         self.push_move(1);
-        self.position = e;
+        self.position = flag;
         let not_greater = self.capture_infallible(|emitter| {
             emitter.adjust(255);
             if false_value != 0 {
                 emitter.adjust(false_value);
             }
-            emitter.move_to(r);
+            emitter.move_to(left_cell);
             if difference.is_some() {
-                emitter.move_value(r, remainder);
+                emitter.move_value(left_cell, remainder);
             } else {
                 emitter.clear_current();
             }
-            emitter.move_to(b);
+            emitter.move_to(zero);
         });
         self.emit_loop(not_greater);
-        self.position = b;
-        self.move_to(l);
+        self.position = zero;
+        self.move_to(right_cell);
         let greater = self.capture_infallible(|emitter| {
             if difference.is_some() {
                 let subtract = emitter.capture_infallible(|emitter| {
                     emitter.adjust(255);
                     emitter.move_to(remainder);
                     emitter.adjust(255);
-                    emitter.move_to(l);
+                    emitter.move_to(right_cell);
                 });
                 emitter.emit_loop(subtract);
             } else {
                 emitter.clear_current();
             }
             if true_value != 0 {
-                emitter.move_to(e);
+                emitter.move_to(flag);
                 emitter.adjust(true_value);
             }
-            emitter.move_to(l);
+            emitter.move_to(right_cell);
         });
         self.emit_loop(greater);
         self.move_to(0);
         if let Some(difference) = difference {
             self.move_location(Location::Relative(remainder), difference);
         }
-        self.move_location(Location::Relative(e), dst);
+        self.move_location(Location::Relative(flag), dst);
         Ok(())
     }
 

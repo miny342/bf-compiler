@@ -9,3 +9,6 @@ mod comparisons;
 mod local_frames;
 #[path = "optimizations/structured_control.rs"]
 mod structured_control;
+
+#[path = "optimizations/guarded_compare.rs"]
+mod guarded_compare;

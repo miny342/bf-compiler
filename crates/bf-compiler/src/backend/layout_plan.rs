@@ -2,8 +2,11 @@
 
 use super::frame_layout::{AbiConfig, FrameLayout, FrameLayoutError};
 use super::regions::{RegionPlan, maximum_branch_depth};
-use crate::{AggregateRegion, ContinuationProgram, FrameSlot, FunctionId, Terminator};
-use std::collections::HashMap;
+use crate::{
+    Address, AggregateRegion, ContinuationProgram, FrameInstruction, FrameSlot, FunctionId,
+    Terminator,
+};
+use std::collections::{BTreeSet, HashMap};
 
 pub(crate) const GLOBAL_ROUTE_NIBBLE_CELLS: usize = 16;
 
@@ -24,12 +27,72 @@ pub(crate) fn build_layouts(
     build_layouts_with_regions(program, config, None)
 }
 
+#[cfg(test)]
 pub(crate) fn build_layouts_with_regions(
     program: &ContinuationProgram,
     config: AbiConfig,
     regions: Option<&RegionPlan>,
 ) -> Result<HashMap<FunctionId, FunctionLayout>, FrameLayoutError> {
-    build_layouts_with_route(program, config, regions, has_global_portal(program))
+    build_layouts_for_codegen(program, config, regions, false)
+}
+
+/// Apply optional physical guards after compact planning. Inlining cost
+/// estimates keep using build_layouts_with_route and therefore do not change.
+pub(crate) fn build_layouts_for_codegen(
+    program: &ContinuationProgram,
+    config: AbiConfig,
+    regions: Option<&RegionPlan>,
+    inplace_compare: bool,
+) -> Result<HashMap<FunctionId, FunctionLayout>, FrameLayoutError> {
+    let mut layouts =
+        build_layouts_with_route(program, config, regions, has_global_portal(program))?;
+    if inplace_compare {
+        let mut operands: HashMap<FunctionId, BTreeSet<usize>> = HashMap::new();
+        for continuation in program.continuations() {
+            collect_compare_slots(
+                continuation.body(),
+                operands.entry(continuation.function()).or_default(),
+            );
+        }
+        for (function, slots) in operands {
+            layouts
+                .get_mut(&function)
+                .expect("validated continuation function")
+                .frame
+                .reserve_compare_slots(&slots)?;
+        }
+    }
+    Ok(layouts)
+}
+
+fn collect_compare_slots(body: &[FrameInstruction], slots: &mut BTreeSet<usize>) {
+    for instruction in body {
+        match instruction {
+            FrameInstruction::Compare {
+                left: Address::Frame(left),
+                right: Address::Frame(right),
+                ..
+            }
+            | FrameInstruction::SubWithBorrow {
+                left: Address::Frame(left),
+                right: Address::Frame(right),
+                ..
+            } if left != right => {
+                slots.insert(left.index());
+                slots.insert(right.index());
+            }
+            FrameInstruction::Loop { body, .. } => collect_compare_slots(body, slots),
+            FrameInstruction::Branch {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_compare_slots(then_body, slots);
+                collect_compare_slots(else_body, slots);
+            }
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn has_global_portal(program: &ContinuationProgram) -> bool {

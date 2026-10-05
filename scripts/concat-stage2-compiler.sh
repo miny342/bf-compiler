@@ -2,12 +2,32 @@
 set -euo pipefail
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-entry=${1:-main}
+entry=main
+nibble_transfer=0
+entry_selected=0
+for argument in "$@"; do
+    case "$argument" in
+        --enable-nibble-transfer)
+            nibble_transfer=1
+            ;;
+        main|compressed|profile|cir|test)
+            if (( entry_selected )); then
+                echo "usage: $0 [main|compressed|profile|cir|test] [--enable-nibble-transfer]" >&2
+                exit 2
+            fi
+            entry=$argument
+            entry_selected=1
+            ;;
+        *)
+            echo "usage: $0 [main|compressed|profile|cir|test] [--enable-nibble-transfer]" >&2
+            exit 2
+            ;;
+    esac
+done
 
-if [[ "$entry" != main && "$entry" != compressed && "$entry" != profile && "$entry" != cir && "$entry" != test ]]; then
-    echo "usage: $0 [main|compressed|profile|cir|test]" >&2
-    exit 2
-fi
+emit_entry() {
+    sed "s/^const cell NIBBLE_BF_TRANSFER = 0;$/const cell NIBBLE_BF_TRANSFER = $nibble_transfer;/" "$1"
+}
 
 # ファイル境界で字句が連結しないよう、各ソースの後ろに改行を補う。
 for source in "$repo_dir"/selfhost/stage2/compiler/[0-9][0-9]_*.bfc; do
@@ -34,13 +54,13 @@ done
 
 if [[ "$entry" != test ]]; then
     if [[ "$entry" == cir ]]; then
-        cat "$repo_dir/selfhost/stage2/compiler/cir_main.bfc"
+        emit_entry "$repo_dir/selfhost/stage2/compiler/cir_main.bfc"
     elif [[ "$entry" == compressed ]]; then
-        cat "$repo_dir/selfhost/stage2/compiler/compressed_main.bfc"
+        emit_entry "$repo_dir/selfhost/stage2/compiler/compressed_main.bfc"
     elif [[ "$entry" == profile ]]; then
-        cat "$repo_dir/selfhost/stage2/compiler/profile_main.bfc"
+        emit_entry "$repo_dir/selfhost/stage2/compiler/profile_main.bfc"
     else
-        cat "$repo_dir/selfhost/stage2/compiler/main.bfc"
+        emit_entry "$repo_dir/selfhost/stage2/compiler/main.bfc"
     fi
     printf '\n'
 else
@@ -50,6 +70,6 @@ else
     done
     cat "$repo_dir/selfhost/stage2/tests/test_support.bfc"
     printf '\n'
-    cat "$repo_dir/selfhost/stage2/tests/test.bfc"
+    emit_entry "$repo_dir/selfhost/stage2/tests/test.bfc"
     printf '\n'
 fi

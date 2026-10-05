@@ -6,6 +6,8 @@
 
 | 案 | 判断 | 根拠と制約 |
 |---|---|---|
+| Rustの比較slot限定直接比較＋Anchor16 | 採用（独立フラグ・既定OFF） | `--enable-inplace-compare`/`--enable-anchor-bank`、nibbleと併用可。同じCIRのmedium/large64で併用の論理RLE opは通常56.40%/61.65%、nibble35.63%/45.90%減、通常BF量は2.47%/2.01%増。全ONのnative時間は悪化。公開CIRにはAnchor16を適用し、flat aggregateの直接比較は従来方式。全byte pair・alias・再帰位相・配列/call・出力形式・容量境界を検証。[本体取り込み](optimize_logs/RUST_COMPARE_ANCHOR_ADOPTION_20261005.md)。 |
+| selfhostの選択式nibble搬送 | 採用（既定OFF） | concatの`--enable-nibble-transfer`でglobal copy・portal offset low/payloadを分解。frame幅を保ち、static scratchを6 cell追加し、load結果はpage headerで直接分解。全256値・再帰・BF/CIR・出力形式を照合。RLE op数を減らす選択肢で、全ONの時間改善は前提にしない。 |
 | interpreterの非同期比較idiomの一括化 | 採用 | 全256×256入力で出力・raw/RLE命令数を照合。実行時の補助セルと境界を検査し、不成立時は通常実行。full28と同じcompiler BFの短いwide-globalコンパイルでsample実行時間9.28%減。 |
 | clear loopの命令数を逆元で計算 | 採用 | 全256入力×128奇数増分で従来の反復数と一致。比較一括化との合計で短いwide-globalコンパイルを12.28%短縮（profileなし）。full自己入力は再測定していない。 |
 | interpreterの進捗処理分離とsite遅延取得 | 採用 | 進捗有無・countdown判定をinline化し、時計・通知処理をcold関数へ分離。非profile実行ではpoll時だけsiteを取得し、16,384回のpoll間隔・中断snapshot・raw/RLE/native counterを維持。通常release・圧縮BFの各3組の試作比較で全ON・2,788-byte入力のexecute中央値6.403→4.316秒、RLE-only・583-byte入力20.366→15.410秒。本体でも通常BF/圧縮BF・RLE-only/全ONの出力と全counter一致、workspace 375テストpass。[perf測定と取り込み記録](optimize_logs/INTERPRETER_PERF_RESULTS.md)。stage3全体の時間は未測定。 |

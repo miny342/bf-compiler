@@ -32,8 +32,10 @@ mod provenance;
 mod region_emission;
 mod static_frames;
 mod transport;
+#[cfg(test)]
+use crate::backend::layout_plan::build_layouts_with_regions;
 use crate::backend::layout_plan::{
-    FunctionLayout, GLOBAL_ROUTE_NIBBLE_CELLS, build_layouts_with_regions,
+    FunctionLayout, GLOBAL_ROUTE_NIBBLE_CELLS, build_layouts_for_codegen,
 };
 use dispatch::DispatchEncoding;
 use portal_plan::*;
@@ -56,7 +58,7 @@ pub enum ProfileGranularity {
     Source,
 }
 
-/// BF backend choices independent of source/CIR lowering and ABI geometry.
+/// BF backend choices independent of source/CIR lowering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbiCodegenOptions {
     /// Experimental fixed storage for functions outside recursive call SCCs.
@@ -71,6 +73,14 @@ pub struct AbiCodegenOptions {
     /// Off by default: RemoteTransfer can execute unary loops directly.
     /// This does not change offset decomposition or portal window jumps.
     pub nibble_transfer: bool,
+    /// Compare distinct frame operands in their own cells. Reserves private
+    /// zero/flag cells only for slots used by Compare or SubWithBorrow.
+    /// Off by default; changes physical frame sizes, not CIR/inlining.
+    /// Aggregate elements (including imported flat CIR) retain scratch staging.
+    pub inplace_compare: bool,
+    /// Use 16 static anchors and 272-cell stack scans for global crossings.
+    /// Off by default; incompatible with experimental static frames.
+    pub anchor_bank: bool,
 }
 
 impl Default for AbiCodegenOptions {
@@ -80,6 +90,8 @@ impl Default for AbiCodegenOptions {
             region_emission: true,
             unlimited_tape: false,
             nibble_transfer: false,
+            inplace_compare: false,
+            anchor_bank: false,
         }
     }
 }
@@ -103,15 +115,7 @@ pub fn lower_continuations_with_profile_and_codegen_options(
     granularity: ProfileGranularity,
     options: AbiCodegenOptions,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
-    lower_continuations_annotated_with_options(
-        program,
-        AbiConfig::default(),
-        !options.unlimited_tape,
-        granularity,
-        options.nibble_transfer,
-        options.region_emission,
-        options.static_frames,
-    )
+    lower_continuations_annotated_with_options(program, AbiConfig::default(), granularity, options)
 }
 
 /// A normal BF artifact plus its sidecar profile map.
@@ -172,11 +176,8 @@ pub fn lower_continuations_with_profile(
     lower_continuations_annotated_with_options(
         program,
         AbiConfig::default(),
-        true,
         granularity,
-        false,
-        true,
-        false,
+        AbiCodegenOptions::default(),
     )
 }
 
@@ -189,11 +190,11 @@ pub fn lower_continuations_unbounded_with_profile(
     lower_continuations_annotated_with_options(
         program,
         AbiConfig::default(),
-        false,
         granularity,
-        false,
-        true,
-        false,
+        AbiCodegenOptions {
+            unlimited_tape: true,
+            ..Default::default()
+        },
     )
 }
 
@@ -220,11 +221,11 @@ fn lower_continuations_with_options(
     Ok(lower_continuations_annotated_with_options(
         program,
         config,
-        check_capacity,
         ProfileGranularity::Abi,
-        false,
-        true,
-        false,
+        AbiCodegenOptions {
+            unlimited_tape: !check_capacity,
+            ..Default::default()
+        },
     )?
     .into_plain())
 }
@@ -232,20 +233,23 @@ fn lower_continuations_with_options(
 fn lower_continuations_annotated_with_options(
     program: &ContinuationProgram,
     config: AbiConfig,
-    check_capacity: bool,
     granularity: ProfileGranularity,
-    nibble_transfer: bool,
-    region_emission: bool,
-    static_frames: bool,
+    options: AbiCodegenOptions,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
-    let mut regions = region_emission.then(|| RegionPlan::new(program));
-    let mut static_layout = if check_capacity {
+    if options.anchor_bank && options.static_frames {
+        return Err(AbiCodegenError::AnchorBankWithStaticFrames);
+    }
+    let check_capacity = !options.unlimited_tape;
+    let mut regions = options.region_emission.then(|| RegionPlan::new(program));
+    let mut static_layout = if options.anchor_bank {
+        StaticLayout::new_with_anchor_bank(config, program.globals(), check_capacity)?
+    } else if check_capacity {
         StaticLayout::new(config, program.globals())?
     } else {
         StaticLayout::new_unbounded(config, program.globals())?
     };
     let make_layouts = |regions: Option<&RegionPlan>| {
-        let layouts = build_layouts_with_regions(program, config, regions)?;
+        let layouts = build_layouts_for_codegen(program, config, regions, options.inplace_compare)?;
         if check_capacity {
             layouts[&program.main()]
                 .frame
@@ -264,7 +268,8 @@ fn lower_continuations_annotated_with_options(
         Err(error) => return Err(error),
     };
     let portal = PortalPlan::new(program)?;
-    let fixed = static_frames
+    let fixed = options
+        .static_frames
         .then(|| {
             StaticFramePlan::new(
                 program,
@@ -283,7 +288,8 @@ fn lower_continuations_annotated_with_options(
         config,
         granularity,
     );
-    emitter.nibble_transfer = nibble_transfer;
+    emitter.nibble_transfer = options.nibble_transfer;
+    emitter.inplace_compare = options.inplace_compare;
     emitter.regions = regions.as_ref();
     emitter.fixed = fixed.as_ref();
     emitter.dispatch_encoding =
@@ -309,6 +315,7 @@ pub enum AbiCodegenError {
     StaticLayout(StaticLayoutError),
     MissingFunctionLayout { function: FunctionId },
     ContinuationIdsExhausted,
+    AnchorBankWithStaticFrames,
 }
 
 impl fmt::Display for AbiCodegenError {
@@ -322,6 +329,12 @@ impl fmt::Display for AbiCodegenError {
             Self::ContinuationIdsExhausted => {
                 write!(f, "ABI helpers exhaust the 16-bit continuation ID space")
             }
+            Self::AnchorBankWithStaticFrames => {
+                write!(
+                    f,
+                    "anchor bank cannot be combined with experimental static frames"
+                )
+            }
         }
     }
 }
@@ -331,7 +344,9 @@ impl Error for AbiCodegenError {
         match self {
             Self::Layout(error) => Some(error),
             Self::StaticLayout(error) => Some(error),
-            Self::MissingFunctionLayout { .. } | Self::ContinuationIdsExhausted => None,
+            Self::MissingFunctionLayout { .. }
+            | Self::ContinuationIdsExhausted
+            | Self::AnchorBankWithStaticFrames => None,
         }
     }
 }
@@ -349,6 +364,9 @@ impl From<StaticLayoutError> for AbiCodegenError {
 }
 
 const ROUTE_OFFSET_LOW: usize = 0;
+// Separate lanes distinguish the canonical anchor from the return phase.
+const ANCHOR_BREADCRUMB: isize = 1;
+const ANCHOR_GUIDE: isize = 2;
 const ROUTE_OFFSET_HIGH: usize = 1;
 const ROUTE_VALUE: usize = 2;
 const ROUTE_ACCESSOR_LOW: usize = 3;
@@ -394,6 +412,7 @@ struct AbiEmitter<'a> {
     /// Active native soft loops; all close before a terminal changes context.
     region_loops: Vec<(ContinuationId, Location)>,
     nibble_transfer: bool,
+    inplace_compare: bool,
     current_source: Option<SourceSpan>,
 }
 
@@ -439,6 +458,7 @@ impl<'a> AbiEmitter<'a> {
             branch_temporary_depth: 0,
             region_loops: Vec::new(),
             nibble_transfer: false,
+            inplace_compare: false,
             current_source: None,
         }
     }

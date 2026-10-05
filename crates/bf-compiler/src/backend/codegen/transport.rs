@@ -481,14 +481,33 @@ impl<'a> AbiEmitter<'a> {
     pub(super) fn emit_context_to_global_inner(&mut self, position: usize, context_chunks: usize) {
         debug_assert_eq!(self.position, 0);
         let stride = self.config.stride() as isize;
-        self.push_move(context_chunks as isize * stride);
-        self.push_move(-stride);
+        let (canonical, group) = self.static_layout.anchor_bank();
+        if group == 1 {
+            // Keep the legacy sequence, including profile transitions on
+            // moves that cancel, when the anchor bank is disabled.
+            self.push_move(-stride);
+            self.push_move(context_chunks as isize * stride);
+            self.navigation_scan(-stride);
+        } else {
+            self.push_move((context_chunks as isize - 1) * stride);
+            // Allocated stack heads are one. A coarse scan reaches the zero
+            // bank head on this phase lane without adding headers to frames.
+            self.navigation_scan(-(group as isize * stride));
+            self.push_move(ANCHOR_BREADCRUMB);
+            self.adjust(255);
+            self.push_move(ANCHOR_GUIDE - ANCHOR_BREADCRUMB);
+            self.navigation_scan(-stride);
+            self.push_move(-ANCHOR_GUIDE);
+        }
+        self.push_move(position as isize - canonical as isize);
+        self.position = 0;
+    }
+
+    fn navigation_scan(&mut self, distance: isize) {
         self.emit_loop(vec![AnnotatedBfInstruction::new(
             self.current_profile_site(),
-            AnnotatedBfOperation::Move(-stride),
+            AnnotatedBfOperation::Move(distance),
         )]);
-        self.push_move(-((self.static_layout.anchor_head() - position) as isize));
-        self.position = 0;
     }
 
     /// Move from one absolute static cell through the anchor to the current
@@ -509,13 +528,24 @@ impl<'a> AbiEmitter<'a> {
     pub(super) fn emit_global_to_context_inner(&mut self, position: usize, context_chunks: usize) {
         debug_assert_eq!(self.position, 0);
         let stride = self.config.stride() as isize;
-        self.push_move((self.static_layout.anchor_head() - position) as isize);
-        self.push_move(stride);
-        self.emit_loop(vec![AnnotatedBfInstruction::new(
-            self.current_profile_site(),
-            AnnotatedBfOperation::Move(stride),
-        )]);
-        self.push_move(-(context_chunks as isize * stride));
+        let (canonical, group) = self.static_layout.anchor_bank();
+        self.push_move(canonical as isize - position as isize);
+        if group == 1 {
+            self.push_move(stride);
+            self.navigation_scan(stride);
+            self.push_move(-(context_chunks as isize * stride));
+        } else {
+            // Find and consume the phase breadcrumb, then scan to the first
+            // free stack head on that lane and step back to this context.
+            self.push_move(ANCHOR_BREADCRUMB);
+            self.navigation_scan(stride);
+            self.adjust(1);
+            self.push_move(-ANCHOR_BREADCRUMB);
+            let coarse = group as isize * stride;
+            self.push_move(coarse);
+            self.navigation_scan(coarse);
+            self.push_move(-coarse - (context_chunks as isize - 1) * stride);
+        }
         self.position = 0;
     }
 

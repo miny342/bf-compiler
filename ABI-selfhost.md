@@ -5,6 +5,8 @@
 旧文書のRust ABI version 0 / 1とは別の物理配置を使用する。
 
 `main`、`compressed`、`profile` entryは同じ配置を使う。BFの圧縮形式やprofile markerは配置を変えない。
+ソース連結時の`--enable-nibble-transfer`は、anchor手前に共有scratchを6 cell追加する。
+logical global address、frame幅、PC、CIRは変更しない。既定ではscratchを追加しない。
 `cir` entryはこのBF backendを通らず、Rust `--cir-input`へ渡した後のBFにはRust ABIが適用される。
 BFC製コンパイラをRustの`--run-ir`で実行する場合も、直接生成するBFには本仕様が適用される。
 
@@ -65,7 +67,7 @@ offsetはheadの次のcellからではなく、frame baseそのものから数�
 | 9 | `FRAME_RESTORE` | copy時の復元scratch |
 | 10 | `FRAME_BRANCH` | countdown caseの選択flag |
 | 11..14 | `FRAME_SCRATCH_0..3` | 演算・offset・配列accessのscratch |
-| 15 | 対応する`FRAME_*`定数なし | frameでは未使用、global portalでは復路counter |
+| 15 | 対応する`FRAME_*`定数なし | nibble要求搬送のhigh digit、global portalでは復路counter |
 
 headerへparameter/localを割り当てない。portalでは同じ16-cell contextを使い、work cellを
 要求packet用に読み替える。`VALUE`やscratch全体がすべてのinstruction境界で0になるという規約はない。
@@ -73,7 +75,9 @@ headerへparameter/localを割り当てない。portalでは同じ16-cell contex
 
 ## Globalの論理配置と物理配置
 
-`stage7_static_cells = G`をglobal payloadの総cell数とする。各globalには24-bitのlogical baseを
+`stage7_static_cells = G`をglobal payloadの総cell数とする。
+`N = 6`（`NIBBLE_BF_TRANSFER = 1`）、それ以外は`N = 0`を共有scratch幅とする。
+各globalには24-bitのlogical baseを
 割り当て、paddingなしでpayloadを詰める。型のflatten順序は[共通規約](ABI.md#共通する値の意味)に従う。
 
 現行の`layout_global_group`は低addressから次の順にbaseを割り当てる。
@@ -93,7 +97,7 @@ Rustの大きいaggregateを逆宣言順にする配置とは一致しない。g
 
 ```text
 physical_global(a) = a
-physical_static_cells() = G
+physical_static_cells() = G + N
 ```
 
 大きなglobalが宣言されていても、共有portalが必要な動的accessがなければprefixを挿入しない。
@@ -112,7 +116,7 @@ regionごとに専用prefixを挿入するのではなく、複数のglobalが�
 page(a)                 = floor(a / 256)
 physical_page_origin(a) = page(a) * 272
 physical_global(a)      = page(a) * 272 + 16 + (a mod 256)
-physical_static_cells() = ceil(G / 256) * 272
+physical_static_cells() = ceil(G / 256) * 272 + N
 
 | header[16] | global payload[0..255] |
 | header[16] | global payload[256..511] | ...
@@ -158,6 +162,23 @@ anchor -> current:
 Rust文書でいうfrontier headそのものではない。
 anchorからglobalへの距離は`H - physical_global(a)`で、24-bitの`WideValue`で計算する。
 使用中flagとanchorはglobal往復で変更しない。
+
+### 選択式nibble搬送
+
+`NIBBLE_BF_TRANSFER = 1`なら`[H-6,H)`を共有scratchとして予約し、global→frameのcopyに使う。
+global byteを消費しながら、固定距離移動でscratchの下位4bitをincrementして上位nibbleへcarryする。
+中間byte bufferと、それを使う追加の移動template/loopは出力しない。
+二つのdigitからglobalの元値とframeのdestinationを復元する間だけstackを走査する。
+scratchはhelper境界で全cellが0、source globalは保存される。
+この操作はuser functionを呼ばず、別のglobal/portal操作とinterleaveしない。
+
+共有portal要求ではpayloadとoffset low byteの搬送を分解する。validityをstageした後で
+使い終えたcaller headerの9、11..15をscratchにする。低nibbleを11、高nibbleを15へ作り、
+搬送後は全scratchが0、元のsource byteも消費される。
+PC・戻り先・dispatcherのBranchを保存し、portal側に既にstage済みのvalidity/carry/payloadも保持する。
+loadのresumeでは、使い終えたpage headerの9、11..15でpayloadを直接分解し、元のportal fieldを消費してcallerへ届ける。
+anchor scratchへのbyte搬送を挟まず、ACTIVE・PC・Branchを保つ。
+high byteの搬送、page間payload搬送、page番号の既存nibble分解、frame間の引数・戻り値搬送はこのflagの対象外。
 
 ## Callとreturn
 

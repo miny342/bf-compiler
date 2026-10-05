@@ -168,6 +168,18 @@ impl<'a> AbiEmitter<'a> {
         }
 
         let stride = self.config.stride();
+        let (bank, group) = self.static_layout.anchor_bank();
+        if group > 1 {
+            // All heads stay zero. Only the canonical guide is zero; all
+            // breadcrumbs start at one and one becomes zero during a crossing.
+            for phase in 0..group {
+                let anchor = (bank + phase * stride) as isize;
+                if phase != 0 {
+                    self.set_raw(anchor + ANCHOR_GUIDE, 1);
+                }
+                self.set_raw(anchor + ANCHOR_BREADCRUMB, 1);
+            }
+        }
         let frame_bottom = self.static_layout.anchor_head() + stride;
         for chunk in 0..frame.frame_chunks() {
             self.set_raw((frame_bottom + chunk * stride) as isize, 1);

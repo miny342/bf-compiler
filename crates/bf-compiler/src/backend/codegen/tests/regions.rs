@@ -453,11 +453,8 @@ fn condition_slot_reuse_shared_resume_and_sparse_ids_keep_values_and_sources() {
     let annotated = lower_continuations_annotated_with_options(
         &program,
         AbiConfig::default(),
-        true,
         ProfileGranularity::Source,
-        false,
-        true,
-        false,
+        AbiCodegenOptions::default(),
     )
     .unwrap();
     let artifact = optimize_annotated_bf(&annotated).profile_artifact(false);
@@ -1038,11 +1035,8 @@ fn closed_soft_cycle_needs_no_terminal_selector_dispatch() {
     let artifact = lower_continuations_annotated_with_options(
         &program,
         AbiConfig::default(),
-        true,
         ProfileGranularity::Source,
-        false,
-        true,
-        false,
+        AbiCodegenOptions::default(),
     )
     .unwrap()
     .profile_artifact(false);

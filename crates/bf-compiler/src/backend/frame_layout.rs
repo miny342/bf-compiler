@@ -9,6 +9,7 @@
 use crate::cir::ir::{
     FrameAggregateDescriptor, FrameAggregateId, FrameArrayDescriptor, FrameArrayId, FrameSlot,
 };
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
@@ -133,6 +134,9 @@ impl AbiField {
 pub struct FrameLayout {
     config: AbiConfig,
     value_cells: usize,
+    /// Logical data offsets when some scalar slots reserve comparison guards.
+    scalar_offsets: Option<Vec<usize>>,
+    reserved_value_cells: usize,
     outbox_cells: usize,
     route_cells: usize,
     value_chunks: usize,
@@ -239,6 +243,8 @@ impl FrameLayout {
         let layout = Self {
             config,
             value_cells,
+            scalar_offsets: None,
+            reserved_value_cells: value_cells,
             outbox_cells,
             route_cells,
             value_chunks,
@@ -263,6 +269,55 @@ impl FrameLayout {
 
         debug_assert!(layout.regions_do_not_overlap());
         Ok(layout)
+    }
+
+    /// Reserve [zero, value, flag, zero] only for comparison operands. Keep
+    /// every bank within one data chunk so no allocation head is a guard.
+    /// All other scalar slots retain one-cell storage. Callers use this only
+    /// for BF emission; the default layout and CIR cost estimates stay compact.
+    pub(crate) fn reserve_compare_slots(
+        &mut self,
+        slots: &BTreeSet<usize>,
+    ) -> Result<(), FrameLayoutError> {
+        if slots.is_empty() {
+            return Ok(());
+        }
+        let mut offsets = Vec::with_capacity(self.value_cells);
+        let mut next = 0usize;
+        for slot in 0..self.value_cells {
+            if slots.contains(&slot) {
+                let within = next % self.config.chunk_cells();
+                if within + 4 > self.config.chunk_cells() {
+                    next = next
+                        .checked_add(self.config.chunk_cells() - within)
+                        .ok_or(FrameLayoutError::SizeOverflow)?;
+                }
+                offsets.push(next.checked_add(1).ok_or(FrameLayoutError::SizeOverflow)?);
+                next = next.checked_add(4).ok_or(FrameLayoutError::SizeOverflow)?;
+            } else {
+                offsets.push(next);
+                next = next.checked_add(1).ok_or(FrameLayoutError::SizeOverflow)?;
+            }
+        }
+        let new_chunks = checked_chunks(next, self.config)?;
+        self.frame_chunks = self
+            .frame_chunks
+            .checked_sub(self.value_chunks)
+            .and_then(|chunks| chunks.checked_add(new_chunks))
+            .ok_or(FrameLayoutError::SizeOverflow)?;
+        self.value_chunks = new_chunks;
+        self.reserved_value_cells = next;
+        self.scalar_offsets = Some(offsets);
+        let minimum_tape_cells = self.minimum_main_tape_cells(0)?;
+        if minimum_tape_cells > TAPE_CELLS {
+            return Err(FrameLayoutError::FrameTooLarge {
+                frame_chunks: self.frame_chunks,
+                minimum_tape_cells,
+                tape_cells: TAPE_CELLS,
+            });
+        }
+        debug_assert!(self.regions_do_not_overlap());
+        Ok(())
     }
 
     pub const fn config(&self) -> AbiConfig {
@@ -318,7 +373,7 @@ impl FrameLayout {
 
     /// Number of unused value cells before the outbox/context region.
     pub const fn value_padding_cells(&self) -> usize {
-        self.value_chunks * self.config.chunk_cells - self.value_cells
+        self.value_chunks * self.config.chunk_cells - self.reserved_value_cells
     }
 
     /// Number of unused cells at the high end of the outbox allocation.
@@ -351,9 +406,13 @@ impl FrameLayout {
         }
 
         let chunks_below_context = self.value_chunks + self.outbox_chunks + self.route_chunks;
+        let data_index = self
+            .scalar_offsets
+            .as_ref()
+            .map_or(index, |offsets| offsets[index]);
         Ok(
             -(chunks_below_context as isize * self.config.stride() as isize)
-                + self.config.try_logical_offset_from_head(index)? as isize,
+                + self.config.try_logical_offset_from_head(data_index)? as isize,
         )
     }
 

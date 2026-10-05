@@ -33,6 +33,8 @@ impl Options {
         let mut unlimited_tape = false;
         let mut compressed_bf = false;
         let mut nibble_transfer = false;
+        let mut inplace_compare = false;
+        let mut anchor_bank = false;
         let mut region_emission = true;
         let mut static_frames = false;
         let mut profile_map_output = None;
@@ -56,6 +58,10 @@ impl Options {
                 static_frames = true;
             } else if argument == "--enable-nibble-transfer" {
                 nibble_transfer = true;
+            } else if argument == "--enable-inplace-compare" {
+                inplace_compare = true;
+            } else if argument == "--enable-anchor-bank" {
+                anchor_bank = true;
             } else if argument == "--disable-region-emission" {
                 region_emission = false;
             } else if argument == "--enable-region-emission" {
@@ -117,7 +123,7 @@ impl Options {
         }
         if source_paths.is_empty() && cir_input.is_none() {
             return Err(format!(
-                "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--enable-function-inline|--disable-function-inline] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--disable-region-emission] [--experimental-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--disable-region-emission] [--experimental-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
+                "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--enable-function-inline|--disable-function-inline] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--experimental-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--experimental-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
                 executable.to_string_lossy(),
                 executable.to_string_lossy()
             )
@@ -153,6 +159,8 @@ impl Options {
                 || embed_profile
                 || compressed_bf
                 || nibble_transfer
+                || inplace_compare
+                || anchor_bank
                 || !region_emission
                 || static_frames)
         {
@@ -206,6 +214,8 @@ impl Options {
             static_frames,
             unlimited_tape,
             nibble_transfer,
+            inplace_compare,
+            anchor_bank,
             region_emission,
         };
 

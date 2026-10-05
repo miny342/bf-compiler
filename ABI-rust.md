@@ -270,6 +270,52 @@ source/CIR、通常/圧縮BF、profile付き出力で共通の指定である。
 frame/static配置とscratch予約、offset分解、windowのbase-16移動は変更しない。
 stage2のBFC製backendの設定ではない。
 
+### 選択式の直接比較とAnchor16
+
+`--enable-inplace-compare`と`--enable-anchor-bank`は、いずれも既定OFFの独立したBF生成optionである。
+nibble搬送と併用でき、通常/圧縮BFとprofile付きBFで同じ配置を使う。
+libraryでは`AbiCodegenOptions::inplace_compare`と`AbiCodegenOptions::anchor_bank`を指定する。
+CIRの意味・slot割当て・inlineの採否は変更せず、`--cir-output`の内容も変えない。
+
+直接比較では、異なる二つの`Address::Frame`をoperandに持つ`Compare`または`SubWithBorrow`について、
+そのslotだけを次の4-cell bankへ拡張する。他のscalar slotは1 cellのままとする。
+
+```text
+zero | value | flag | zero
+```
+
+bank全体を同じdata chunk内に収め、chunk headをzeroやflagとして使わない。
+左右のoperandをABI Scratchへ搬送せず、元のvalue cellで破壊的比較を行う。
+左valueの直前のzero、右valueの直後のflag、さらにその直後のzeroを使うことで、
+異なる距離にあるoperandでも二つの出口を同じ結果処理へ接続できる。
+zeroは書き換えず、flagは比較終了時に0へ戻す。結果の配送と必要なoperand保存copyは従来通りである。
+`SubWithBorrow`の差はprivateなABI Restoreに保持し、従来と同じ順序で差・borrowを配送する。
+
+同一operand、global/ABI/aggregate element、experimental static framesの固定contextでは
+従来のScratch0..3方式を使う。公開バイナリCIRはflat frame全体を一つのaggregateとして保存するため、
+**この入力経路の比較には直接比較を適用しない**。連続領域へのportal accessやaggregate copyの
+意味を保つための制約である。直接比較の追加cellとchunk内のpaddingはframe容量の検査に含める。
+
+Anchor16では、従来のstatic prefixの後にstride `S=17`間隔で16個のanchorを置く。
+globalとremote-copy scratchのabsolute positionは従来通りで、static領域は255 cells増える。
+canonical anchorは左端、stack開始位置を決める`anchor_head`は右端とする。
+全anchorのheadは0に保ち、起動時に次の二つのlaneを初期化する。
+
+- `anchor[i]+1`は全て1。globalへ向かう際に到着した位相のcellだけ0にし、復帰時に1へ戻す。
+- `anchor[i]+2`は`i=0`だけ0、それ以外は1。canonical anchorまでのguide走査に使う。
+
+contextからglobalへは、現在のframe内の最上位の使用済みheadから`16*S=272`刻みでbankへ走査し、
+位相を記録してguide laneでcanonical anchorへ移動する。
+globalからの復帰では位相の0を探して1へ戻し、その位相のhead列を272刻みで走査してfrontierを求める。
+call/returnが管理する通常の使用済みhead=1/free head=0をそのまま使い、stack側へ新しいheaderは追加しない。
+anchor bank全体とその後のmain frameをテープ容量の検査に含める。
+`--experimental-static-frames`との併用はcodegen errorとする。公開CIRにもAnchor16は適用できる。
+
+これらは論理RLE op数を減らすための選択肢である。
+frameの拡大は初期化・掃除・navigationの費用を変え、直接比較と新navigationは既存interpreterの
+Compare/RemoteTransfer認識から外れる場合がある。今回のcompiler入力では併用によりRLE opが減った一方、
+全最適化ONのnative実時間は増えた。実測条件は[比較＋Anchor16の記録](optimize_logs/RUST_INPLACE_COMPARE_ANCHOR_20261005.md)を参照。
+
 ## Function frame
 
 各関数について、compilerは`FunctionDescriptor`とそこから構築する`FrameLayout`で次を管理する。

@@ -66,18 +66,7 @@ fn binary_cir_relations_cover_every_pair() {
     }
     input.push(0);
     let program = bfc::lower_selfhost_cir(&cir).unwrap();
-    {
-        let chunk = 16;
-        let bf = bfc::optimize_bf(
-            &bfc::lower_continuations_with_config(&program, bfc::AbiConfig::new(chunk).unwrap())
-                .unwrap(),
-        )
-        .to_source();
-        assert_eq!(
-            bf_interpreter::run(bf.as_bytes(), &input).unwrap(),
-            expected
-        );
-    }
+    check_bf(&program, &input, &expected);
 }
 
 #[test]
@@ -129,20 +118,7 @@ fn all_unsigned_pairs_preserve_source_operands_and_relational_results() {
         )
         .unwrap();
         assert_eq!(actual, expected);
-        {
-            let chunk = 16;
-            let bf = bfc::optimize_bf(
-                &bfc::lower_continuations_with_config(
-                    &program,
-                    bfc::AbiConfig::new(chunk).unwrap(),
-                )
-                .unwrap(),
-            );
-            assert_eq!(
-                bf_interpreter::run(bf.to_source().as_bytes(), b"").unwrap(),
-                expected
-            );
-        }
+        check_bf(&program, b"", &expected);
     }
 }
 
@@ -218,13 +194,26 @@ fn compare_snapshots_allow_aliases_and_clear_operands_before_writing_result() {
         )],
     )
     .unwrap();
-    {
-        let chunk = 16;
+    check_bf(&program, b"", &expected);
+}
+
+fn check_bf(program: &bfc::ContinuationProgram, input: &[u8], expected: &[u8]) {
+    for inplace_compare in [false, true] {
         let bf = bfc::optimize_bf(
-            &bfc::lower_continuations_with_config(&program, bfc::AbiConfig::new(chunk).unwrap())
-                .unwrap(),
+            &bfc::lower_continuations_with_codegen_options(
+                program,
+                bfc::AbiCodegenOptions {
+                    inplace_compare,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
         )
         .to_source();
-        assert_eq!(bf_interpreter::run(bf.as_bytes(), b"").unwrap(), expected);
+        assert_eq!(
+            bf_interpreter::run(bf.as_bytes(), input).unwrap(),
+            expected,
+            "in-place comparison={inplace_compare}"
+        );
     }
 }

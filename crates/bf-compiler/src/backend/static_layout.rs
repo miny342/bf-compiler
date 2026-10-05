@@ -26,9 +26,12 @@ pub struct StaticLayout {
     scalar_cells: usize,
     remote_copy_scratch_start: Option<usize>,
     anchor_head: usize,
+    anchor_bank_base: usize,
+    anchor_group: usize,
 }
 
 pub(crate) const REMOTE_COPY_SCRATCH_CELLS: usize = 9;
+const ANCHOR_BANK_GROUP: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GlobalLayout {
@@ -59,20 +62,29 @@ impl StaticLayout {
         config: AbiConfig,
         descriptors: &[GlobalDescriptor],
     ) -> Result<Self, StaticLayoutError> {
-        Self::new_with_capacity_check(config, descriptors, true)
+        Self::new_with_capacity_check(config, descriptors, true, false)
     }
 
     pub(crate) fn new_unbounded(
         config: AbiConfig,
         descriptors: &[GlobalDescriptor],
     ) -> Result<Self, StaticLayoutError> {
-        Self::new_with_capacity_check(config, descriptors, false)
+        Self::new_with_capacity_check(config, descriptors, false, false)
+    }
+
+    pub(crate) fn new_with_anchor_bank(
+        config: AbiConfig,
+        descriptors: &[GlobalDescriptor],
+        check_capacity: bool,
+    ) -> Result<Self, StaticLayoutError> {
+        Self::new_with_capacity_check(config, descriptors, check_capacity, true)
     }
 
     fn new_with_capacity_check(
         config: AbiConfig,
         descriptors: &[GlobalDescriptor],
         check_capacity: bool,
+        anchor_bank: bool,
     ) -> Result<Self, StaticLayoutError> {
         validate_descriptors(descriptors)?;
 
@@ -130,12 +142,26 @@ impl StaticLayout {
             .checked_add(REMOTE_COPY_SCRATCH_CELLS)
             .ok_or(StaticLayoutError::SizeOverflow)?;
 
+        let anchor_bank_base = next_head;
+        let anchor_group = if anchor_bank { ANCHOR_BANK_GROUP } else { 1 };
+        // The public anchor head remains the last bank head: the dynamic
+        // stack begins one stride after it. Globals keep their old addresses.
+        next_head = next_head
+            .checked_add(
+                (anchor_group - 1)
+                    .checked_mul(config.stride())
+                    .ok_or(StaticLayoutError::SizeOverflow)?,
+            )
+            .ok_or(StaticLayoutError::SizeOverflow)?;
+
         let layout = Self {
             config,
             globals,
             scalar_cells,
             remote_copy_scratch_start,
             anchor_head: next_head,
+            anchor_bank_base,
+            anchor_group,
         };
         if check_capacity {
             layout.validate_capacity()?;
@@ -160,6 +186,16 @@ impl StaticLayout {
     /// Absolute position of the stack anchor head.
     pub const fn anchor_head(&self) -> usize {
         self.anchor_head
+    }
+
+    /// Canonical (leftmost) bank head and number of phase anchors. A single
+    /// anchor follows any storage reserved by experimental static frames.
+    pub(crate) const fn anchor_bank(&self) -> (usize, usize) {
+        if self.anchor_group == 1 {
+            (self.anchor_head, 1)
+        } else {
+            (self.anchor_bank_base, self.anchor_group)
+        }
     }
 
     /// Reserve compiler-owned static storage before the dynamic stack anchor.

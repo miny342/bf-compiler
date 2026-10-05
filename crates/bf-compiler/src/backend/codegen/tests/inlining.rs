@@ -582,11 +582,8 @@ fn inline_preserves_callee_sources_through_graph_and_arithmetic_fusion() {
     let artifact = lower_continuations_annotated_with_options(
         &after,
         AbiConfig::default(),
-        true,
         ProfileGranularity::Source,
-        false,
-        true,
-        false,
+        AbiCodegenOptions::default(),
     )
     .unwrap()
     .profile_artifact(false);
