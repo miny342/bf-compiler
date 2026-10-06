@@ -20,6 +20,11 @@ impl<'a> AbiEmitter<'a> {
                 value: 0,
             } = instructions[index]
             else {
+                let truth_copy = self.truth_copy_layout(
+                    &instructions[index],
+                    instructions.get(index + 1),
+                    function,
+                )?;
                 let source = sources
                     .and_then(|sources| sources.get(index))
                     .copied()
@@ -27,7 +32,30 @@ impl<'a> AbiEmitter<'a> {
                     .or(self.current_source);
                 self.with_source_span(source, |emitter| {
                     emitter.with_instruction_path(index.to_string(), |emitter| {
-                        emitter.emit_instruction(&instructions[index], function)
+                        if let Some((source, destination, flag, zero)) = truth_copy {
+                            emitter.emit_instruction_site(
+                                &instructions[index],
+                                function,
+                                |emitter| {
+                                    emitter.with_profile_site(
+                                        "abi",
+                                        "abi.frame.truth_copy",
+                                        "preserving truth test",
+                                        |emitter| {
+                                            emitter.emit_truth_copy(
+                                                source,
+                                                destination,
+                                                flag,
+                                                zero,
+                                            );
+                                            Ok(())
+                                        },
+                                    )
+                                },
+                            )
+                        } else {
+                            emitter.emit_instruction(&instructions[index], function)
+                        }
                     })
                 })?;
                 index += 1;
@@ -74,6 +102,74 @@ impl<'a> AbiEmitter<'a> {
             index = end;
         }
         Ok(())
+    }
+
+    fn truth_copy_layout(
+        &self,
+        instruction: &FrameInstruction,
+        next: Option<&FrameInstruction>,
+        function: FunctionId,
+    ) -> Result<Option<(isize, isize, isize, isize)>, AbiCodegenError> {
+        if self.fixed.is_some() || !self.inplace_compare {
+            return Ok(None);
+        }
+        let (
+            FrameInstruction::Copy {
+                src: Address::Frame(source),
+                dst: Address::Frame(destination),
+            },
+            Some(FrameInstruction::Branch { condition, .. }),
+        ) = (instruction, next)
+        else {
+            return Ok(None);
+        };
+        if source == destination
+            || *condition != Address::Frame(*destination)
+            || self.lifetime.dead(instruction, Address::Frame(*source))
+        {
+            return Ok(None);
+        }
+        let frame = &self.layout(function)?.frame;
+        Ok(frame.truth_guards(*source).map(|(flag, zero)| {
+            (
+                frame.frame_offset(*source),
+                frame.frame_offset(*destination),
+                flag,
+                zero,
+            )
+        }))
+    }
+
+    /// The next destructive Branch observes only whether the copy is zero.
+    /// Existing private [value, flag, zero] guards allow testing without moving
+    /// the value. The first loop exits at value=0 or flag=0; >[>] joins at zero.
+    /// Deliver 0/1 to the branch condition and restore both guards to zero.
+    fn emit_truth_copy(&mut self, source: isize, destination: isize, flag: isize, zero: isize) {
+        debug_assert_eq!((flag - source, zero - flag), (1, 1));
+        self.set(destination, 1);
+        self.clear(zero);
+        self.set(flag, 1);
+        self.move_to(source);
+        let test = self.capture_infallible(|emitter| {
+            emitter.move_to(flag);
+            emitter.clear_current();
+        });
+        self.emit_loop(test);
+        self.push_move(1);
+        let site = self.current_profile_site();
+        self.emit_loop(vec![AnnotatedBfInstruction::new(
+            site,
+            AnnotatedBfOperation::Move(1),
+        )]);
+        self.position = zero;
+        self.move_to(flag);
+        let was_zero = self.capture_infallible(|emitter| {
+            emitter.adjust(255);
+            emitter.clear(destination);
+            emitter.move_to(flag);
+        });
+        self.emit_loop(was_zero);
+        self.move_to(0);
     }
 
     pub(super) fn emit_aggregate_clear_range(

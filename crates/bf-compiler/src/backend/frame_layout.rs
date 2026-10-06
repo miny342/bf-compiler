@@ -136,6 +136,7 @@ pub struct FrameLayout {
     value_cells: usize,
     /// Logical data offsets when some scalar slots reserve comparison guards.
     scalar_offsets: Option<Vec<usize>>,
+    compare_slots: BTreeSet<usize>,
     reserved_value_cells: usize,
     outbox_cells: usize,
     route_cells: usize,
@@ -244,6 +245,7 @@ impl FrameLayout {
             config,
             value_cells,
             scalar_offsets: None,
+            compare_slots: BTreeSet::new(),
             reserved_value_cells: value_cells,
             outbox_cells,
             route_cells,
@@ -308,6 +310,7 @@ impl FrameLayout {
         self.value_chunks = new_chunks;
         self.reserved_value_cells = next;
         self.scalar_offsets = Some(offsets);
+        self.compare_slots = slots.clone();
         let minimum_tape_cells = self.minimum_main_tape_cells(0)?;
         if minimum_tape_cells > TAPE_CELLS {
             return Err(FrameLayoutError::FrameTooLarge {
@@ -322,6 +325,15 @@ impl FrameLayout {
 
     pub const fn config(&self) -> AbiConfig {
         self.config
+    }
+
+    /// Existing comparison guards can also support a non-destructive truth
+    /// test. Do not infer private scratch from padding or neighboring values.
+    pub(crate) fn truth_guards(&self, slot: FrameSlot) -> Option<(isize, isize)> {
+        self.compare_slots.contains(&slot.index()).then(|| {
+            let value = self.frame_offset(slot);
+            (value + 1, value + 2)
+        })
     }
 
     pub const fn value_cells(&self) -> usize {

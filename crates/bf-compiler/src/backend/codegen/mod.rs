@@ -77,6 +77,7 @@ pub struct AbiCodegenOptions {
     pub nibble_transfer: bool,
     /// Compare distinct frame operands in their own cells. Reserves private
     /// zero/flag cells only for slots used by Compare or SubWithBorrow.
+    /// Reuse those guards for preserving copies consumed by a following Branch.
     /// Off by default; changes physical frame sizes, not CIR/inlining.
     /// Aggregate elements (including imported flat CIR) retain scratch staging.
     pub inplace_compare: bool,
