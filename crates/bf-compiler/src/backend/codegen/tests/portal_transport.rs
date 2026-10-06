@@ -2,6 +2,144 @@
 use super::*;
 
 #[test]
+fn nibble_global_aggregate_returns_survive_recursive_frames_and_repeated_requests() {
+    let program = crate::lower_source(
+        "struct Item { cell a; cell b; cell c; } Item[17] data; \
+         Item fetch(cell depth, cell index) { cell[19] keep; keep[depth]=depth; \
+         if (depth) { Item value=fetch(depth-1,index); output(keep[depth]); return value; } \
+         return data[index]; } \
+         void main() { cell go=input(); while(go) { cell i=input(); \
+         data[i].a=input(); data[i].b=input(); data[i].c=input(); \
+         Item value=fetch(3,i); output(value.a); output(value.b); output(value.c); \
+         go=input(); } }",
+    )
+    .unwrap();
+    let mut input = Vec::new();
+    let mut expected = Vec::new();
+    for value in 0..=255u8 {
+        let bytes = [value, value.wrapping_mul(17), value.wrapping_add(255)];
+        input.extend([1, value % 17]);
+        input.extend(bytes);
+        expected.extend([1, 2, 3]);
+        expected.extend(bytes);
+    }
+    input.push(0);
+    for options in [
+        AbiCodegenOptions {
+            nibble_transfer: true,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            nibble_transfer: true,
+            anchor_bank: true,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            nibble_transfer: true,
+            static_frames: true,
+            ..Default::default()
+        },
+    ] {
+        let bf = lower_continuations_with_codegen_options(&program, options).unwrap();
+        let mut compressed = Vec::new();
+        optimize_bf(&bf)
+            .write_compressed_source(&mut compressed)
+            .unwrap();
+        assert_eq!(
+            bf_interpreter::run(&compressed, &input).unwrap(),
+            expected,
+            "options={options:?}"
+        );
+    }
+}
+
+#[test]
+fn return_transport_consumes_every_byte_and_clears_shared_scratch() {
+    for (padding, nibble_transfer) in [(16, false), (16, true), (1024, true)] {
+        let program = crate::lower_source("cell[16] data; void main() {}").unwrap();
+        let config = AbiConfig::default();
+        let layouts = build_layouts(&program, config).unwrap();
+        let static_layout = StaticLayout::new(config, program.globals()).unwrap();
+        let portal = PortalPlan::new(&program).unwrap();
+        let mut emitter = AbiEmitter::new(
+            &program,
+            &layouts,
+            &static_layout,
+            &portal,
+            config,
+            ProfileGranularity::Abi,
+        );
+        emitter.nibble_transfer = nibble_transfer;
+        emitter.initialize_main(false).unwrap();
+        let extra_chunks = padding / config.chunk_cells();
+        for chunk in 1..=extra_chunks {
+            emitter.set((chunk * config.stride()) as isize, 1);
+        }
+        emitter.migrate_context((extra_chunks * config.stride()) as isize);
+        let base = static_layout.aggregate_base_head(GlobalId::new(0)).unwrap();
+        let value = emitter.current_abi_offset(AbiField::Value).unwrap();
+        let condition = emitter.current_abi_offset(AbiField::Active).unwrap();
+        emitter.move_to(condition);
+        emitter.emit_operation(AnnotatedBfOperation::Input);
+        let body = emitter
+            .capture(|emitter| {
+                emitter.move_to(0);
+                emitter.emit_context_to_global(base, config.portal_chunks());
+                emitter.move_to(value);
+                emitter.emit_operation(AnnotatedBfOperation::Input);
+                emitter.move_to(0);
+                emitter.move_global_portal_value_to_context(base, value)?;
+                emitter.move_to(value);
+                emitter.emit_operation(AnnotatedBfOperation::Output);
+                emitter.move_to(0);
+                emitter.emit_context_to_global(base, config.portal_chunks());
+                emitter.move_to(value);
+                emitter.emit_operation(AnnotatedBfOperation::Output);
+                for index in 0..9 {
+                    let scratch = static_layout.remote_copy_scratch_position(index).unwrap();
+                    emitter.move_to(scratch as isize - base as isize);
+                    emitter.emit_operation(AnnotatedBfOperation::Output);
+                }
+                emitter.move_to(0);
+                emitter.emit_global_to_context(base, config.portal_chunks());
+                emitter.move_to(condition);
+                emitter.emit_operation(AnnotatedBfOperation::Input);
+                Ok(())
+            })
+            .unwrap();
+        emitter.emit_loop(body);
+        let bf = AnnotatedBfProgram::new(emitter.output, emitter.sites).into_plain();
+        let mut compressed = Vec::new();
+        optimize_bf(&bf)
+            .write_compressed_source(&mut compressed)
+            .unwrap();
+        let mut input = Vec::new();
+        let mut expected = Vec::new();
+        for value in 0..=255u8 {
+            input.extend([1, value]);
+            expected.push(value);
+            expected.extend([0; 10]);
+        }
+        input.push(0);
+        for disabled in [false, true] {
+            let result = bf_interpreter::run_with_options(
+                &compressed,
+                &input,
+                bf_interpreter::RunOptions {
+                    disable_remote_transfer: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                result.output, expected,
+                "padding={padding}, nibble={nibble_transfer}, disabled={disabled}"
+            );
+        }
+    }
+}
+
+#[test]
 fn request_transport_preserves_every_byte_and_profile_structure() {
     for (padding, nibble_transfer) in [(16, false), (16, true), (256, false), (256, true)] {
         let (artifact, _) = transport_fixture(padding, nibble_transfer);

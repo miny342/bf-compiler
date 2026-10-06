@@ -161,6 +161,7 @@ pub fn lower_selfhost_cir_with_options(
             let (function, fused) = crate::cir::arithmetic_fusion::fuse_function(function, body);
             let fused = crate::cir::constant_transfer::fold_continuations(fused);
             let (function, fused) = crate::cir::computation_graph::optimize(function, fused);
+            let (function, fused) = crate::cir::portal_offset::optimize(function, fused);
             let (function, fused) = crate::cir::value_placement::optimize(function, fused);
             continuations.extend(fused);
             function
@@ -824,6 +825,130 @@ mod tests {
         )
         .unwrap();
         output
+    }
+
+    #[test]
+    fn global_offset_forwarding_preserves_binary_cir_snapshots_and_consumption() {
+        use SelfhostCirInstruction as I;
+        for live in [false, true] {
+            let mut instructions = vec![
+                I::Input { destination: 0 },
+                I::Input { destination: 1 },
+                I::Input { destination: 2 },
+                I::Copy {
+                    destination: 3,
+                    source: 0,
+                },
+                I::Copy {
+                    destination: 4,
+                    source: 1,
+                },
+                I::Copy {
+                    destination: 5,
+                    source: 2,
+                },
+                I::Array {
+                    op: SelfhostCirArrayOp::Store,
+                    data: 3,
+                    offset_low: 4,
+                    offset_high: 5,
+                    base: 0,
+                    cells: 256,
+                    storage: SelfhostCirStorage::Global,
+                },
+                I::Copy {
+                    destination: 4,
+                    source: 1,
+                },
+                I::Copy {
+                    destination: 5,
+                    source: 2,
+                },
+                I::Array {
+                    op: SelfhostCirArrayOp::Load,
+                    data: 3,
+                    offset_low: 4,
+                    offset_high: 5,
+                    base: 0,
+                    cells: 256,
+                    storage: SelfhostCirStorage::Global,
+                },
+                I::Output { source: 3 },
+                I::Output { source: 0 },
+                I::Output { source: 4 },
+                I::Output { source: 5 },
+            ];
+            if live {
+                instructions.extend([I::Output { source: 1 }, I::Output { source: 2 }]);
+            }
+            let source = SelfhostCirProgram::new(
+                256,
+                0,
+                vec![SelfhostCirFunction {
+                    id: 0,
+                    entry: 1,
+                    frame_cells: 6,
+                    return_type: SelfhostCirReturnType::Void,
+                    parameters: vec![],
+                }],
+                vec![SelfhostCirContinuation {
+                    id: 1,
+                    function: 0,
+                    instructions,
+                    terminator: SelfhostCirTerminator::Halt,
+                }],
+            )
+            .unwrap();
+            let decoded = SelfhostCirProgram::decode(&source.encode().unwrap()).unwrap();
+            let program = lower_selfhost_cir(&decoded).unwrap();
+            if !live {
+                let offset = program
+                    .continuations()
+                    .iter()
+                    .find_map(|c| {
+                        if let Terminator::AggregateLoad { offset, .. } = c.terminator() {
+                            Some(*offset)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                assert_eq!(offset, LogicalOffset::new(frame(1), frame(2)));
+            }
+            for options in [
+                crate::AbiCodegenOptions::default(),
+                crate::AbiCodegenOptions {
+                    nibble_transfer: true,
+                    anchor_bank: true,
+                    ..Default::default()
+                },
+                crate::AbiCodegenOptions {
+                    static_frames: true,
+                    nibble_transfer: true,
+                    ..Default::default()
+                },
+            ] {
+                let bf =
+                    crate::lower_continuations_with_codegen_options(&program, options).unwrap();
+                let mut compressed = Vec::new();
+                crate::optimize_bf(&bf)
+                    .write_compressed_source(&mut compressed)
+                    .unwrap();
+                for value in 0..=255u8 {
+                    let index = value.wrapping_mul(17);
+                    let input = [value, index, 0];
+                    let mut expected = vec![value, value, 0, 0];
+                    if live {
+                        expected.extend([index, 0]);
+                    }
+                    assert_eq!(
+                        bf_interpreter::run(&compressed, &input).unwrap(),
+                        expected,
+                        "value={value}, live={live}, options={options:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

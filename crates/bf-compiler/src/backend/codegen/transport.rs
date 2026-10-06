@@ -220,20 +220,32 @@ impl<'a> AbiEmitter<'a> {
     /// bounding stack crossings by the sum of those digits (at most 30)
     /// instead of expanding eight separate navigation templates.
     pub(super) fn copy_global_to_relative_bits(&mut self, source: usize, destination: isize) {
+        self.clear(destination);
+        self.emit_context_to_global(source, self.config.portal_chunks());
+        self.global_to_relative_nibbles(source, 0, destination, true);
+    }
+
+    /// The pointer starts at `base` in static storage and finishes at the
+    /// current frame. `source` is relative to that base; the frame destination
+    /// must be zero. Destructive portal returns leave the source zero, while
+    /// ordinary copies restore it during transport. Shared scratch is zero on
+    /// exit in both cases.
+    pub(super) fn global_to_relative_nibbles(
+        &mut self,
+        base: usize,
+        source: isize,
+        destination: isize,
+        restore_source: bool,
+    ) {
         debug_assert!(self.config.chunk_cells() >= 9);
         let context_chunks = self.config.portal_chunks();
-        let source = source as isize;
         let scratch =
             self.static_layout
                 .remote_copy_scratch_position(0)
                 .expect("D=16 static layout must reserve remote-copy scratch") as isize;
-        let temporary = scratch - source;
-        let bits = std::array::from_fn::<_, 8, _>(|index| scratch + 1 + index as isize - source);
-
-        // Destination is frame-relative while the pointer still uses the
-        // current context as its origin.
-        self.clear(destination);
-        self.emit_context_to_global(source as usize, context_chunks);
+        let temporary = scratch - base as isize;
+        let bits =
+            std::array::from_fn::<_, 8, _>(|index| scratch + 1 + index as isize - base as isize);
 
         // Scratch is shared by all copies, so establish and restore its zero
         // contract locally even if public Continuation IR supplied the copy.
@@ -244,10 +256,10 @@ impl<'a> AbiEmitter<'a> {
 
         // Consume the source into an eight-bit counter.  All movement here is
         // within static storage; recursive carry never scans the live stack.
-        self.move_to(0);
+        self.move_to(source);
         let decompose = self.capture_infallible(|emitter| {
             emitter.adjust(255);
-            emitter.increment_bits(&bits, temporary, 0, 0);
+            emitter.increment_bits(&bits, temporary, 0, source);
         });
         self.emit_loop(decompose);
 
@@ -260,25 +272,27 @@ impl<'a> AbiEmitter<'a> {
             self.move_static_value(bits[index], bits[4], 1_u8 << (index - 4));
         }
 
-        // Restore the source and build the destination one nibble unit at a
-        // time.  Only these two loop bodies contain stack-navigation code.
+        // Only these two loop bodies contain stack-navigation code.
         for (digit, contribution) in [(bits[0], 1_u8), (bits[4], 16_u8)] {
             self.move_to(digit);
             let transport = self.capture_infallible(|emitter| {
                 emitter.adjust(255);
+                if restore_source {
+                    emitter.move_to(source);
+                    emitter.adjust(contribution);
+                }
                 emitter.move_to(0);
-                emitter.adjust(contribution);
-                emitter.emit_global_to_context(source as usize, context_chunks);
+                emitter.emit_global_to_context(base, context_chunks);
                 emitter.move_to(destination);
                 emitter.adjust(contribution);
                 emitter.move_to(0);
-                emitter.emit_context_to_global(source as usize, context_chunks);
+                emitter.emit_context_to_global(base, context_chunks);
                 emitter.move_to(digit);
             });
             self.emit_loop(transport);
             self.move_to(0);
         }
-        self.emit_global_to_context(source as usize, context_chunks);
+        self.emit_global_to_context(base, context_chunks);
     }
 
     /// Destructively move one frame-relative byte into a zero static cell.

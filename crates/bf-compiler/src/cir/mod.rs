@@ -12,6 +12,7 @@ pub(crate) mod ir;
 pub(crate) mod operands;
 pub(crate) mod optimizer;
 pub(crate) mod pipeline;
+pub(crate) mod portal_offset;
 pub(crate) mod structure;
 pub(crate) mod value_placement;
 pub(crate) mod virtual_cleanup;

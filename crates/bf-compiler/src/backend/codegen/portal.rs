@@ -14,7 +14,21 @@ impl<'a> AbiEmitter<'a> {
     fn portal_offset_dead(&self, site: PortalSite, address: Address, low: bool) -> bool {
         // The offset is reread between leaves. Word halves and a scalar store
         // value may share a source; consume only the final internal read.
-        if site.next_resume.is_some() || !self.portal_source_dead(site, address) {
+        // A dead static frame field can also be consumed for a single-cell
+        // global access. Frame portals may alias their own index field, and
+        // multi-leaf portals must retain it until the final request.
+        let dead_field = self.fixed.is_none()
+            && matches!(site.region, AggregateRegion::Global(_))
+            && site.cells == 1
+            && matches!(
+                address,
+                Address::ArrayElement {
+                    array: AggregateRegion::Frame(_),
+                    ..
+                }
+            )
+            && self.lifetime.terminal_dead(site.origin, address);
+        if site.next_resume.is_some() || !(self.portal_source_dead(site, address) || dead_field) {
             return false;
         }
         if low
@@ -24,10 +38,11 @@ impl<'a> AbiEmitter<'a> {
             return false;
         }
         if site.cells == 1
-            && let PortalOperation::Store {
-                source: ValueOperand::Cell(value),
-            } = site.operation
-            && value == address
+            && let PortalOperation::Store { source } = site.operation
+            && self
+                .value_operand_element_location(source, 0, site.function)
+                .ok()
+                == self.address_location(address, site.function).ok()
         {
             return false;
         }
@@ -777,6 +792,10 @@ impl<'a> AbiEmitter<'a> {
         self.emit_context_to_global(base, context_chunks);
 
         let value = self.current_abi_offset(AbiField::Value)?;
+        if self.nibble_transfer && self.fixed_context.is_none() {
+            self.global_to_relative_nibbles(base, value, destination, false);
+            return Ok(());
+        }
         self.move_to(value);
         let body = self.capture(|emitter| {
             emitter.adjust(255);

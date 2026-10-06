@@ -3,6 +3,137 @@ use crate::Program;
 use crate::cell::continuation_adapter::adapt_flat_program;
 
 #[test]
+fn portal_field_offsets_preserve_live_fields_and_frame_or_payload_aliases() {
+    let main = FunctionId::new(0);
+    let region = AggregateRegion::Frame(crate::FrameAggregateId::new(0));
+    let field = |index| Address::ArrayElement {
+        array: region,
+        index,
+    };
+    let result = Address::Frame(FrameSlot::new(0));
+    // The low offset is itself the cell selected by the frame load. A store
+    // also reads that field through an Aggregate operand rather than Cell.
+    let offset = LogicalOffset::new(field(1), field(2));
+    for global in [false, true] {
+        for store in [false, true] {
+            for live in [false, true] {
+                let target = if global {
+                    AggregateRegion::Global(GlobalId::new(0))
+                } else {
+                    region
+                };
+                let terminal = if store {
+                    Terminator::AggregateStore {
+                        destination: target,
+                        offset,
+                        source: ValueOperand::Aggregate {
+                            region,
+                            offset: 1,
+                            cells: 1,
+                        },
+                        cells: 1,
+                        return_to: id(2),
+                    }
+                } else {
+                    Terminator::AggregateLoad {
+                        source: target,
+                        offset,
+                        destination: ValueOperand::Cell(result),
+                        cells: 1,
+                        return_to: id(2),
+                    }
+                };
+                let mut outputs = if store {
+                    vec![FrameInstruction::Output {
+                        src: Address::ArrayElement {
+                            array: target,
+                            index: 1,
+                        },
+                    }]
+                } else {
+                    vec![FrameInstruction::Output { src: result }]
+                };
+                if live {
+                    outputs.push(FrameInstruction::Output { src: field(1) });
+                }
+                let program = ContinuationProgram::new_with_globals(
+                    main,
+                    vec![crate::GlobalDescriptor::aggregate(GlobalId::new(0), 4)],
+                    vec![FunctionDescriptor::new_aggregates(
+                        main,
+                        vec![],
+                        1,
+                        vec![crate::FrameAggregateDescriptor::new(
+                            crate::FrameAggregateId::new(0),
+                            4,
+                        )],
+                        0,
+                        ValueType::Void,
+                        id(1),
+                    )],
+                    vec![
+                        Continuation::new(
+                            id(1),
+                            main,
+                            vec![
+                                FrameInstruction::Set {
+                                    dst: field(1),
+                                    value: 1,
+                                },
+                                FrameInstruction::Set {
+                                    dst: field(2),
+                                    value: 0,
+                                },
+                                FrameInstruction::Set {
+                                    dst: Address::ArrayElement {
+                                        array: AggregateRegion::Global(GlobalId::new(0)),
+                                        index: 1,
+                                    },
+                                    value: 211,
+                                },
+                            ],
+                            terminal,
+                        ),
+                        Continuation::new(id(2), main, outputs, Terminator::Halt),
+                    ],
+                )
+                .unwrap();
+                let mut expected = Vec::new();
+                crate::run_continuations_with_io(
+                    &program,
+                    &mut &[][..],
+                    &mut expected,
+                    Default::default(),
+                    |_| {},
+                )
+                .unwrap();
+                for options in [
+                    AbiCodegenOptions::default(),
+                    AbiCodegenOptions {
+                        nibble_transfer: true,
+                        anchor_bank: true,
+                        ..Default::default()
+                    },
+                    AbiCodegenOptions {
+                        static_frames: true,
+                        ..Default::default()
+                    },
+                ] {
+                    let bf = lower_continuations_with_codegen_options(&program, options).unwrap();
+                    let mut compressed = Vec::new();
+                    bf.write_compressed_source(&mut compressed).unwrap();
+                    assert_eq!(
+                        run(&compressed, &[]).unwrap(),
+                        expected,
+                        "global={global}, store={store}, live={live}, options={options:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn portal_ids_avoid_user_ids_and_report_exhaustion() {
     let source = "void main() { cell[2] values; cell i = 1; values[i] = 7; output(values[i]); }";
     let program = crate::lower_source(source).unwrap();
