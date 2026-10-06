@@ -632,18 +632,19 @@ mod tests {
 
     #[test]
     fn whole_initializations_allow_aggregate_reuse_but_partial_writes_do_not_kill() {
+        // Dynamic reads retain the full regions through dead-storage cleanup.
         let source = r"
             void main() {
-                { cell[3] a; a[1] = 7; output(a[1]); }
-                { cell[3] b; output(b[1]); b[2] = 8; output(b[2]); }
-                { cell[3] c; c[0] = 9; output(c[0]); }
+                { cell[3] a; a[1] = 7; output(a[input()]); }
+                { cell[3] b; output(b[input()]); b[2] = 8; output(b[input()]); }
+                { cell[3] c; c[0] = 9; output(c[input()]); }
             }
         ";
         let original = lower(source, false, false);
         let allocated = lower(source, false, true);
         assert_eq!(original.functions()[0].frame_aggregates().len(), 3);
         assert_eq!(allocated.functions()[0].frame_aggregates().len(), 1);
-        check(source, b"", &[7, 0, 8, 9]);
+        check(source, &[1, 1, 2, 0], &[7, 0, 8, 9]);
     }
 
     #[test]
@@ -745,8 +746,9 @@ mod tests {
 
     #[test]
     fn global_free_inline_may_grow_caller_storage() {
+        // Keep the payload live so this exercises inline frame growth.
         let source = r"
-            void large() { cell[100] scratch; scratch[0] = 7; output(scratch[0]); }
+            void large() { cell[100] scratch; cell i=input(); scratch[i] = 7; output(scratch[i]); }
             void main() { large(); }
         ";
         let program = lower(source, true, true);
@@ -764,9 +766,10 @@ mod tests {
 
     #[test]
     fn global_using_callers_still_reject_frame_growth() {
+        // Keep the payload live so cleanup cannot avoid the frame-growth limit.
         let source = r"
             cell global;
-            void large() { cell[100] scratch; scratch[0] = 7; output(scratch[0]); }
+            void large() { cell[100] scratch; cell i=input(); scratch[i] = 7; output(scratch[i]); }
             void main() { large(); global = 1; output(global); }
         ";
         let program = lower(source, true, true);

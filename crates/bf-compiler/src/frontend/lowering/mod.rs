@@ -1846,7 +1846,8 @@ mod tests {
 
     #[test]
     fn scalar_copies_remain_nondestructive_copy_instructions() {
-        let program = lower("cell source; void main() { cell destination = source; }");
+        let program =
+            lower("cell source; void main() { cell destination = source; output(destination); }");
         assert!(program.continuations().iter().any(|continuation| {
             continuation.body().iter().any(|instruction| {
                 matches!(

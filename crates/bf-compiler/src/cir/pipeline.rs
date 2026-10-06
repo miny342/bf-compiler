@@ -53,7 +53,9 @@ pub(crate) fn allocate(
         let fused = crate::cir::constant_transfer::fold_continuations(fused);
         let (descriptor, fused) = crate::cir::computation_graph::optimize(descriptor, fused);
         let (descriptor, allocated) = if reuse_slots {
-            crate::cir::frame_allocation::allocate(descriptor, fused)
+            let (descriptor, fused) = crate::cir::value_placement::optimize(descriptor, fused);
+            let (descriptor, allocated) = crate::cir::frame_allocation::allocate(descriptor, fused);
+            crate::cir::value_placement::finish(descriptor, allocated)
         } else {
             (descriptor, fused)
         };

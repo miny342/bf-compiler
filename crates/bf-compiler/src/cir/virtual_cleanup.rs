@@ -201,7 +201,7 @@ fn terminal_live(
     result
 }
 
-fn clean_function(
+pub(super) fn clean_function(
     f: &FunctionDescriptor,
     nodes: &[Continuation],
 ) -> (FunctionDescriptor, Vec<Continuation>) {

@@ -13,5 +13,6 @@ pub(crate) mod operands;
 pub(crate) mod optimizer;
 pub(crate) mod pipeline;
 pub(crate) mod structure;
+pub(crate) mod value_placement;
 pub(crate) mod virtual_cleanup;
 pub(crate) mod vm;
