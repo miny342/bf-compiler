@@ -2,6 +2,93 @@
 use super::*;
 
 #[test]
+fn sliding_byte_decomposition_preserves_guards_for_every_byte() {
+    let program = crate::lower_source("void main() {}").unwrap();
+    let config = AbiConfig::default();
+    let layouts = build_layouts(&program, config).unwrap();
+    let static_layout = StaticLayout::new(config, program.globals()).unwrap();
+    let portal = PortalPlan::new(&program).unwrap();
+    for source in [1, 300] {
+        let mut emitter = AbiEmitter::new(
+            &program,
+            &layouts,
+            &static_layout,
+            &portal,
+            config,
+            ProfileGranularity::Abi,
+        );
+        let zero = 8;
+        let bits = std::array::from_fn(|index| zero + 1 + index as isize);
+        // Nonzero neighbours catch either slide crossing the scratch boundary.
+        emitter.set(zero - 1, 53);
+        emitter.set(bits[7] + 1, 107);
+        emitter.move_to(0);
+        emitter.emit_operation(AnnotatedBfOperation::Input);
+        let body = emitter.capture_infallible(|emitter| {
+            emitter.move_to(source);
+            emitter.emit_operation(AnnotatedBfOperation::Input);
+            for offset in std::iter::once(zero).chain(bits) {
+                emitter.set(offset, 173);
+                emitter.clear(offset);
+            }
+            emitter.move_to(source);
+            let decompose = emitter.capture_infallible(|emitter| {
+                emitter.adjust(255);
+                emitter.increment_contiguous_byte_bits(&bits, zero, source);
+            });
+            emitter.emit_loop(decompose);
+            emitter.move_to(0);
+            for index in 1..4 {
+                emitter.move_static_value(bits[index], bits[0], 1 << index);
+            }
+            for index in 5..8 {
+                emitter.move_static_value(bits[index], bits[4], 1 << (index - 4));
+            }
+            for offset in [source, zero]
+                .into_iter()
+                .chain(bits)
+                .chain([zero - 1, bits[7] + 1])
+            {
+                emitter.move_to(offset);
+                emitter.emit_operation(AnnotatedBfOperation::Output);
+            }
+            emitter.move_to(0);
+            emitter.emit_operation(AnnotatedBfOperation::Input);
+        });
+        emitter.emit_loop(body);
+        let bf = optimize_annotated_bf(&AnnotatedBfProgram::new(emitter.output, emitter.sites))
+            .to_source();
+        let mut input = Vec::new();
+        let mut expected = Vec::new();
+        for value in 0..=255u8 {
+            input.extend([1, value]);
+            expected.extend([0, 0, value % 16, 0, 0, 0, value / 16, 0, 0, 0, 53, 107]);
+        }
+        input.push(0);
+        for disabled in [false, true] {
+            let result = bf_interpreter::run_with_options(
+                bf.as_bytes(),
+                &input,
+                bf_interpreter::RunOptions {
+                    disable_clear: disabled,
+                    disable_scan: disabled,
+                    disable_transfer: disabled,
+                    disable_countdown: disabled,
+                    disable_remote_transfer: disabled,
+                    disable_compare: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                result.output, expected,
+                "source={source}, rle_only={disabled}"
+            );
+        }
+    }
+}
+
+#[test]
 fn nibble_global_aggregate_returns_survive_recursive_frames_and_repeated_requests() {
     let program = crate::lower_source(
         "struct Item { cell a; cell b; cell c; } Item[17] data; \

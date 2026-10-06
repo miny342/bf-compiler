@@ -215,8 +215,8 @@ impl<'a> AbiEmitter<'a> {
     }
 
     /// Copy one static byte into the current frame without crossing the live
-    /// stack once per source unit.  Nine shared static cells hold a temporary
-    /// carry and eight binary digits.  The bits are folded into two nibbles,
+    /// stack once per source unit. Nine shared static cells hold a zero guard
+    /// and eight binary digits. The bits are folded into two nibbles,
     /// bounding stack crossings by the sum of those digits (at most 30)
     /// instead of expanding eight separate navigation templates.
     pub(super) fn copy_global_to_relative_bits(&mut self, source: usize, destination: isize) {
@@ -243,23 +243,23 @@ impl<'a> AbiEmitter<'a> {
             self.static_layout
                 .remote_copy_scratch_position(0)
                 .expect("D=16 static layout must reserve remote-copy scratch") as isize;
-        let temporary = scratch - base as isize;
+        let zero = scratch - base as isize;
         let bits =
             std::array::from_fn::<_, 8, _>(|index| scratch + 1 + index as isize - base as isize);
 
         // Scratch is shared by all copies, so establish and restore its zero
         // contract locally even if public Continuation IR supplied the copy.
-        self.clear(temporary);
+        self.clear(zero);
         for bit in bits {
             self.clear(bit);
         }
 
         // Consume the source into an eight-bit counter.  All movement here is
-        // within static storage; recursive carry never scans the live stack.
+        // within static storage; bit slides never scan the live stack.
         self.move_to(source);
         let decompose = self.capture_infallible(|emitter| {
             emitter.adjust(255);
-            emitter.increment_bits(&bits, temporary, 0, source);
+            emitter.increment_contiguous_byte_bits(&bits, zero, source);
         });
         self.emit_loop(decompose);
 
@@ -296,7 +296,7 @@ impl<'a> AbiEmitter<'a> {
     }
 
     /// Destructively move one frame-relative byte into a zero static cell.
-    /// The otherwise unused lanes in the D=16 route chunk hold a carry and
+    /// The otherwise unused lanes in the D=16 route chunk hold a zero guard and
     /// eight bits, bounding live-stack crossings by two nibble values (at
     /// most 30) instead of the source byte (at most 255).
     pub(super) fn move_relative_to_global_nibbles(
@@ -305,17 +305,17 @@ impl<'a> AbiEmitter<'a> {
         destination: usize,
     ) -> Result<(), AbiCodegenError> {
         debug_assert!(self.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS);
-        let Location::Relative(temporary) = self.route_location(ROUTE_SCRATCH_START)? else {
+        let Location::Relative(zero) = self.route_location(ROUTE_SCRATCH_START)? else {
             unreachable!("route scratch is frame-relative")
         };
-        let bits = std::array::from_fn::<_, 8, _>(|index| temporary + 1 + index as isize);
+        let bits = std::array::from_fn::<_, 8, _>(|index| zero + 1 + index as isize);
 
         self.with_profile_site_infallible(
             "abi",
             "abi.portal.route.decompose",
             "abi.portal.route.decompose",
             |emitter| {
-                emitter.clear(temporary);
+                emitter.clear(zero);
                 for bit in bits {
                     emitter.clear(bit);
                 }
@@ -323,7 +323,7 @@ impl<'a> AbiEmitter<'a> {
                 emitter.move_to(source);
                 let decompose = emitter.capture_infallible(|emitter| {
                     emitter.adjust(255);
-                    emitter.increment_bits(&bits, temporary, 0, source);
+                    emitter.increment_contiguous_byte_bits(&bits, zero, source);
                 });
                 emitter.emit_loop(decompose);
                 emitter.move_to(0);
@@ -378,9 +378,35 @@ impl<'a> AbiEmitter<'a> {
         self.move_to(0);
     }
 
+    /// Increment contiguous Boolean bits without moving their old values into
+    /// a carry cell. `[>]` finds the first zero, `++[-<]` sets it to one and
+    /// clears the trailing ones, exiting at the zero guard before bit zero.
+    /// The counter must be below 255: byte decomposition starts at zero and
+    /// increments at most 255 times, so the scan never leaves the eight bits.
+    pub(super) fn increment_contiguous_byte_bits(
+        &mut self,
+        bits: &[isize; 8],
+        zero: isize,
+        return_to: isize,
+    ) {
+        debug_assert_eq!(bits[0], zero + 1);
+        debug_assert!(bits.windows(2).all(|pair| pair[1] == pair[0] + 1));
+        self.move_to(bits[0]);
+        self.navigation_scan(1);
+        self.adjust(2);
+        let site = self.current_profile_site();
+        self.emit_loop(vec![
+            AnnotatedBfInstruction::new(site, AnnotatedBfOperation::Add(255)),
+            AnnotatedBfInstruction::new(site, AnnotatedBfOperation::Move(-1)),
+        ]);
+        self.position = zero;
+        self.move_to(return_to);
+    }
+
     /// Increment a little-endian Boolean bit vector. The temporary is zero on
     /// entry and exit; `return_to` is the pointer offset required by the
     /// surrounding BF loop.
+    #[cfg(test)]
     pub(super) fn increment_bits(
         &mut self,
         bits: &[isize; 8],
