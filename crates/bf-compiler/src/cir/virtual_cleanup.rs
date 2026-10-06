@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Live {
+pub(super) struct Live {
     scalars: BTreeSet<FrameSlot>,
     aggregates: HashMap<FrameAggregateId, Intervals>,
 }
@@ -43,7 +43,7 @@ fn local(operand: V, f: &FunctionDescriptor) -> Local {
     }
 }
 impl Live {
-    fn read(&mut self, operand: V, f: &FunctionDescriptor) {
+    pub(super) fn read(&mut self, operand: V, f: &FunctionDescriptor) {
         match local(operand, f) {
             Local::Scalar(slot) => {
                 self.scalars.insert(slot);
@@ -54,7 +54,7 @@ impl Live {
             _ => {}
         }
     }
-    fn write(&mut self, operand: V, f: &FunctionDescriptor) {
+    pub(super) fn write(&mut self, operand: V, f: &FunctionDescriptor) {
         match local(operand, f) {
             Local::Scalar(slot) => {
                 self.scalars.remove(&slot);
@@ -70,7 +70,7 @@ impl Live {
             Local::External => {}
         }
     }
-    fn observed(&self, operand: V, f: &FunctionDescriptor) -> bool {
+    pub(super) fn observed(&self, operand: V, f: &FunctionDescriptor) -> bool {
         match local(operand, f) {
             Local::Scalar(slot) => self.scalars.contains(&slot),
             Local::Range(a, start, end) => self
@@ -80,7 +80,7 @@ impl Live {
             Local::External => true,
         }
     }
-    fn union(&mut self, other: &Self) {
+    pub(super) fn union(&mut self, other: &Self) {
         self.scalars.extend(other.scalars.iter().copied());
         for (&a, intervals) in &other.aggregates {
             for &(start, end) in &intervals.0 {
@@ -88,7 +88,7 @@ impl Live {
             }
         }
     }
-    fn effects(&mut self, effects: &[Effect], f: &FunctionDescriptor) {
+    pub(super) fn effects(&mut self, effects: &[Effect], f: &FunctionDescriptor) {
         // Inputs are snapshots; all definitions kill BEFORE any read is added.
         for effect in effects {
             match *effect {
@@ -205,35 +205,11 @@ fn clean_function(
     f: &FunctionDescriptor,
     nodes: &[Continuation],
 ) -> (FunctionDescriptor, Vec<Continuation>) {
-    let entries: HashMap<_, _> = nodes.iter().enumerate().map(|(i, c)| (c.id(), i)).collect();
-    let mut predecessors = vec![Vec::new(); nodes.len()];
-    for (i, c) in nodes.iter().enumerate() {
-        for (target, _) in c.terminator().edges() {
-            predecessors[entries[&target]].push(i);
-        }
-    }
-    let mut live = vec![Live::default(); nodes.len()];
-    let mut pending: VecDeque<_> = (0..nodes.len()).rev().collect();
-    let mut queued = vec![true; nodes.len()];
-    while let Some(index) = pending.pop_front() {
-        queued[index] = false;
-        let c = &nodes[index];
-        let out = terminal_live(c, &entries, &live, f);
-        let (next, _, _) = body_liveness(c.body(), &[], out, f, false);
-        if live[index] != next {
-            live[index] = next;
-            for &predecessor in &predecessors[index] {
-                if !queued[predecessor] {
-                    queued[predecessor] = true;
-                    pending.push_back(predecessor);
-                }
-            }
-        }
-    }
+    let exits = function_exits(f, nodes);
     let rewritten = nodes
         .iter()
-        .map(|c| {
-            let out = terminal_live(c, &entries, &live, f);
+        .zip(exits)
+        .map(|(c, out)| {
             let (_, body, sources) = body_liveness(c.body(), c.body_sources(), out, f, true);
             Continuation::new(c.id(), c.function(), body, c.terminator().clone())
                 .with_source_spans(sources, c.terminator_source())
@@ -369,6 +345,42 @@ pub(crate) fn cleanup(
         nodes,
     )
     .map(|p| p.with_source_files(program.source_files().to_vec()))
+}
+
+pub(super) fn function_exits(f: &FunctionDescriptor, nodes: &[Continuation]) -> Vec<Live> {
+    let entries: HashMap<_, _> = nodes.iter().enumerate().map(|(i, c)| (c.id(), i)).collect();
+    let mut predecessors = vec![Vec::new(); nodes.len()];
+    for (i, c) in nodes.iter().enumerate() {
+        for (target, _) in c.terminator().edges() {
+            predecessors[entries[&target]].push(i);
+        }
+    }
+    let mut live = vec![Live::default(); nodes.len()];
+    let mut pending: VecDeque<_> = (0..nodes.len()).rev().collect();
+    let mut queued = vec![true; nodes.len()];
+    while let Some(index) = pending.pop_front() {
+        queued[index] = false;
+        let c = &nodes[index];
+        let out = terminal_live(c, &entries, &live, f);
+        let (next, _, _) = body_liveness(c.body(), &[], out, f, false);
+        if live[index] != next {
+            live[index] = next;
+            for &predecessor in &predecessors[index] {
+                if !queued[predecessor] {
+                    queued[predecessor] = true;
+                    pending.push_back(predecessor);
+                }
+            }
+        }
+    }
+    nodes
+        .iter()
+        .map(|c| terminal_live(c, &entries, &live, f))
+        .collect()
+}
+
+pub(super) fn body_entry(body: &[I], live: Live, f: &FunctionDescriptor) -> Live {
+    body_liveness(body, &[], live, f, false).0
 }
 
 #[cfg(test)]

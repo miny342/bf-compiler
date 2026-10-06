@@ -51,6 +51,7 @@ pub(crate) fn allocate(
         let (descriptor, fused) =
             crate::cir::arithmetic_fusion::fuse_function(function.clone(), body);
         let fused = crate::cir::constant_transfer::fold_continuations(fused);
+        let (descriptor, fused) = crate::cir::computation_graph::optimize(descriptor, fused);
         let (descriptor, allocated) = if reuse_slots {
             crate::cir::frame_allocation::allocate(descriptor, fused)
         } else {

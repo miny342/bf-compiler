@@ -2,6 +2,7 @@
 
 pub(crate) mod analysis;
 pub(crate) mod arithmetic_fusion;
+pub(crate) mod computation_graph;
 pub(crate) mod constant_transfer;
 pub(crate) mod effects;
 pub(crate) mod frame_allocation;

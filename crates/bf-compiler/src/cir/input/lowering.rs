@@ -160,6 +160,7 @@ pub fn lower_selfhost_cir_with_options(
             let body = by_function.remove(&function.id()).unwrap_or_default();
             let (function, fused) = crate::cir::arithmetic_fusion::fuse_function(function, body);
             let fused = crate::cir::constant_transfer::fold_continuations(fused);
+            let (function, fused) = crate::cir::computation_graph::optimize(function, fused);
             continuations.extend(fused);
             function
         })
