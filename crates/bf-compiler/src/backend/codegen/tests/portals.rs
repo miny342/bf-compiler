@@ -475,3 +475,202 @@ fn version_one_source_accessor_plan_stays_compact() {
         );
     }
 }
+
+#[test]
+fn page_digit_jumps_and_walk_fallback_restore_fields_and_origin() {
+    let program = adapt_flat_program(&Program::new(1, vec![]).unwrap()).unwrap();
+    let config = AbiConfig::new(16).unwrap();
+    let layouts = build_layouts(&program, config).unwrap();
+    let static_layout = StaticLayout::new(config, program.globals()).unwrap();
+    let portal = PortalPlan::new(&program).unwrap();
+    for pages in [1, 16] {
+        for maximum in [0, 1, 7, 15] {
+            let mut emitter = AbiEmitter::new(
+                &program,
+                &layouts,
+                &static_layout,
+                &portal,
+                config,
+                ProfileGranularity::Abi,
+            );
+            let counter = emitter.current_abi_offset(AbiField::Scratch1).unwrap();
+            emitter.move_to(counter);
+            emitter.emit_operation(AnnotatedBfOperation::Input);
+            emitter.move_to(0);
+            emitter.copy(
+                counter,
+                emitter.current_abi_offset(AbiField::Restore).unwrap(),
+                emitter.current_abi_offset(AbiField::Scratch0).unwrap(),
+            );
+            emitter.set_abi_field(AbiField::PcLow, 43).unwrap();
+            emitter.set_abi_field(AbiField::Index, 251).unwrap();
+            emitter.set_abi_field(AbiField::Value, 255).unwrap();
+            emitter.set_abi_field(AbiField::Scratch3, 253).unwrap();
+            emitter.set_abi_field(AbiField::Branch, 1).unwrap();
+            let delta = aggregate_page_portal_offset(pages, config).unwrap() as isize;
+            emitter
+                .emit_page_portal_jump_level(
+                    AbiField::Scratch1,
+                    delta,
+                    &[
+                        AbiField::Index,
+                        AbiField::Value,
+                        AbiField::Restore,
+                        AbiField::Scratch1,
+                        AbiField::Scratch3,
+                    ],
+                    maximum,
+                    0,
+                )
+                .unwrap();
+            for field in [
+                AbiField::Index,
+                AbiField::Value,
+                AbiField::Scratch3,
+                AbiField::Scratch1,
+                AbiField::Restore,
+            ] {
+                emitter.move_to(emitter.current_abi_offset(field).unwrap());
+                emitter.emit_operation(AnnotatedBfOperation::Output);
+            }
+            emitter.move_to(0);
+            emitter.set_abi_field(AbiField::Branch, 1).unwrap();
+            emitter
+                .emit_page_portal_jump_level(
+                    AbiField::Restore,
+                    -delta,
+                    &[AbiField::Index, AbiField::Value, AbiField::Scratch3],
+                    maximum,
+                    0,
+                )
+                .unwrap();
+            for field in [
+                AbiField::Index,
+                AbiField::Value,
+                AbiField::Scratch3,
+                AbiField::Scratch1,
+                AbiField::Restore,
+                AbiField::Branch,
+                AbiField::PcLow,
+            ] {
+                emitter.move_to(emitter.current_abi_offset(field).unwrap());
+                emitter.emit_operation(AnnotatedBfOperation::Output);
+            }
+            let source = AnnotatedBfProgram::new(emitter.output, emitter.sites)
+                .profile_artifact(true)
+                .source;
+            for digit in 0..16u8 {
+                let actual = bf_interpreter::run_with_options(
+                    source.as_bytes(),
+                    &[digit],
+                    bf_interpreter::RunOptions {
+                        unbounded_tape: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    actual.output,
+                    [251, 255, 253, 0, digit, 251, 255, 253, 0, 0, 0, 43],
+                    "pages={pages}, maximum={maximum}, digit={digit}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn portal_last_use_preserves_a_store_value_aliasing_its_byte_index() {
+    let main = FunctionId::new(0);
+    let root = crate::FrameAggregateId::new(0);
+    let region = AggregateRegion::Frame(root);
+    let source = Address::Frame(FrameSlot::new(0));
+    let result = Address::Frame(FrameSlot::new(1));
+    let function = FunctionDescriptor::new_aggregates(
+        main,
+        vec![],
+        2,
+        vec![crate::FrameAggregateDescriptor::new(root, 256)],
+        0,
+        ValueType::Void,
+        id(1),
+    );
+    let program = ContinuationProgram::new(
+        main,
+        vec![function],
+        vec![
+            Continuation::new(
+                id(1),
+                main,
+                vec![FrameInstruction::Set {
+                    dst: source,
+                    value: 15,
+                }],
+                Terminator::ArrayStore {
+                    array: region,
+                    index: source,
+                    value: source,
+                    return_to: id(2),
+                },
+            ),
+            Continuation::new(
+                id(2),
+                main,
+                // The old source dies at the store, despite reusing its cell.
+                vec![FrameInstruction::Set {
+                    dst: source,
+                    value: 15,
+                }],
+                Terminator::ArrayLoad {
+                    array: region,
+                    index: source,
+                    destination: result,
+                    return_to: id(3),
+                },
+            ),
+            Continuation::new(
+                id(3),
+                main,
+                vec![
+                    FrameInstruction::Output { src: result },
+                    FrameInstruction::Output {
+                        src: Address::ArrayElement {
+                            array: region,
+                            index: 15,
+                        },
+                    },
+                    FrameInstruction::Output {
+                        src: Address::ArrayElement {
+                            array: region,
+                            index: 0,
+                        },
+                    },
+                ],
+                Terminator::Halt,
+            ),
+        ],
+    )
+    .unwrap();
+    for options in [
+        AbiCodegenOptions::default(),
+        AbiCodegenOptions {
+            nibble_transfer: true,
+            inplace_compare: true,
+            anchor_bank: true,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            static_frames: true,
+            ..Default::default()
+        },
+    ] {
+        let generated = lower_continuations_with_codegen_options(&program, options).unwrap();
+        let mut compressed = Vec::new();
+        generated.write_compressed_source(&mut compressed).unwrap();
+        assert_eq!(
+            run(&compressed, &[]).unwrap(),
+            [15, 15, 0],
+            "options={options:?}"
+        );
+    }
+}

@@ -28,6 +28,7 @@ mod dispatch;
 mod instructions;
 mod lifetime;
 mod portal;
+mod portal_page;
 mod portal_plan;
 mod provenance;
 mod region_emission;

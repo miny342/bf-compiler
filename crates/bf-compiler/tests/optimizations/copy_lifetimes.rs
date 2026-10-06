@@ -4,7 +4,7 @@ use bf_compiler as bfc;
 #[test]
 fn copy_lifetimes_preserve_branches_loops_calls_portals_and_global_returns() {
     let helpers = "struct Pair {cell x;cell y;}
-        cell g; Pair global_pair;
+        cell g; Pair global_pair; Pair[130] global_values;
         cell get(){return g;}
         Pair get_pair(){return global_pair;}
         Pair change(Pair p){p.x+=1;p.y-=1;return p;}
@@ -20,6 +20,8 @@ fn copy_lifetimes_preserve_branches_loops_calls_portals_and_global_returns() {
         "Pair p;p.x=a;p.y=b;Pair q=change(p);output(q.x);output(q.y);output(p.x);output(p.y);",
         "Pair[2] p;p[0].x=a;p[0].y=b;p[1].x=c;Pair q=p[0];output(q.x);output(q.y);output(p[1].x);",
         "cell[2] p;p[0]=a;p[1]=b;cell i=c!=0;output(p[i]);p[i]=c;output(p[0]);output(p[1]);",
+        "Pair[130] p;cell i=c;if(i>=130){i-=130;}Pair q;q.x=a;q.y=b;p[i]=q;Pair r=p[i];output(r.x);output(r.y);output(q.x);output(q.y);",
+        "cell i=c;if(i>=130){i-=130;}Pair q;q.x=a;q.y=b;global_values[i]=q;Pair r=global_values[i];output(r.x);output(r.y);output(global_values[i].x);output(q.x);output(q.y);",
         "g=b;global_pair.x=a;global_pair.y=c;output(get());output(g);Pair p=get_pair();output(p.x);output(p.y);output(global_pair.x);output(global_pair.y);",
     ];
     let mut input = Vec::new();

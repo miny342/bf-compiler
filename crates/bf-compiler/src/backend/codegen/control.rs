@@ -183,7 +183,7 @@ impl<'a> AbiEmitter<'a> {
             }
             let left = remaining.get_mut(&src).unwrap();
             *left -= 1;
-            if *left == 0 && call.is_some_and(|call| self.lifetime.call_dead(call, address)) {
+            if *left == 0 && call.is_some_and(|call| self.lifetime.terminal_dead(call, address)) {
                 self.move_location_to_zero(src, dst);
             } else {
                 self.copy_locations_to_zeroed_destination(src, dst, restore);

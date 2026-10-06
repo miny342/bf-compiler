@@ -1,6 +1,6 @@
 //! Decide when local copy sources may be consumed instead of restored.
 //!
-//! Analyze the allocated CIR, including structured control and call resume
+//! Analyze the allocated CIR, including structured control, call and portal resume
 //! edges. Aggregate liveness uses intervals, not one set entry per payload cell.
 //! Globals remain observable even when no subsequent caller instruction reads
 //! them. Fixed-storage instructions and argument bridges conservatively keep
@@ -114,7 +114,7 @@ struct Node {
     defs: Live,
     next: Vec<usize>,
     instruction: Option<*const FrameInstruction>,
-    call: Option<ContinuationId>,
+    origin: Option<ContinuationId>,
 }
 
 impl Node {
@@ -208,7 +208,7 @@ fn live_out(node: &Node, live: &[Live]) -> Live {
 /// synthesized instruction has no entry and conservatively preserves sources.
 pub(super) struct Plan<'a> {
     out: HashMap<*const FrameInstruction, Live>,
-    calls: HashMap<ContinuationId, Live>,
+    terminal_out: HashMap<ContinuationId, Live>,
     program: PhantomData<&'a ContinuationProgram>,
 }
 
@@ -216,7 +216,7 @@ impl<'a> Plan<'a> {
     pub(super) fn new(p: &'a ContinuationProgram) -> Self {
         let mut plan = Self {
             out: HashMap::new(),
-            calls: HashMap::new(),
+            terminal_out: HashMap::new(),
             program: PhantomData,
         };
         let mut functions = HashMap::<FunctionId, Vec<&Continuation>>::new();
@@ -233,8 +233,15 @@ impl<'a> Plan<'a> {
                 terminal
                     .next
                     .extend(c.terminator().edges().map(|(id, _)| entries[&id]));
-                if matches!(c.terminator(), Terminator::Call { .. }) {
-                    terminal.call = Some(c.id());
+                if matches!(
+                    c.terminator(),
+                    Terminator::Call { .. }
+                        | Terminator::ArrayLoad { .. }
+                        | Terminator::ArrayStore { .. }
+                        | Terminator::AggregateLoad { .. }
+                        | Terminator::AggregateStore { .. }
+                ) {
+                    terminal.origin = Some(c.id());
                 }
                 let last = nodes.len();
                 nodes.push(terminal);
@@ -270,8 +277,8 @@ impl<'a> Plan<'a> {
                 if let Some(instruction) = node.instruction {
                     plan.out.insert(instruction, live_out(node, &live));
                 }
-                if let Some(call) = node.call {
-                    plan.calls.insert(call, live_out(node, &live));
+                if let Some(origin) = node.origin {
+                    plan.terminal_out.insert(origin, live_out(node, &live));
                 }
             }
         }
@@ -286,13 +293,13 @@ impl<'a> Plan<'a> {
                 .is_some_and(|live| !live.contains(source))
     }
 
-    pub(super) fn call_dead(&self, call: ContinuationId, source: Address) -> bool {
+    pub(super) fn terminal_dead(&self, continuation: ContinuationId, source: Address) -> bool {
         // Inspect resume liveness before removing ABI result definitions. This
-        // conservatively preserves arguments whose cells receive new results.
+        // conservatively preserves sources whose cells receive new results.
         local(source)
             && self
-                .calls
-                .get(&call)
+                .terminal_out
+                .get(&continuation)
                 .is_some_and(|live| !live.contains(source))
     }
 }

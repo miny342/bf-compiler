@@ -3,6 +3,49 @@
 use super::*;
 
 impl<'a> AbiEmitter<'a> {
+    fn portal_source_dead(&self, site: PortalSite, address: Address) -> bool {
+        // Only ordinary frame scalars: aggregate index aliasing can change a
+        // value that the runtime-selected access has not read yet.
+        self.fixed.is_none()
+            && matches!(address, Address::Frame(_))
+            && self.lifetime.terminal_dead(site.origin, address)
+    }
+
+    fn portal_offset_dead(&self, site: PortalSite, address: Address, low: bool) -> bool {
+        // The offset is reread between leaves. Word halves and a scalar store
+        // value may share a source; consume only the final internal read.
+        if site.next_resume.is_some() || !self.portal_source_dead(site, address) {
+            return false;
+        }
+        if low
+            && let PortalOffset::Word(offset) = site.offset
+            && offset.high == address
+        {
+            return false;
+        }
+        if site.cells == 1
+            && let PortalOperation::Store {
+                source: ValueOperand::Cell(value),
+            } = site.operation
+            && value == address
+        {
+            return false;
+        }
+        true
+    }
+
+    fn consume_portal_payload(&self, site: PortalSite) -> bool {
+        let PortalOperation::Store { source } = site.operation else {
+            return false;
+        };
+        // Multi-leaf stores read a private snapshot buffer. Each leaf is sent
+        // exactly once and is never observed by the source program.
+        if site.cells > 1 {
+            return true;
+        }
+        matches!(source, ValueOperand::Cell(address) if self.portal_source_dead(site, address))
+    }
+
     pub(super) fn emit_portal_start(&mut self, site: PortalSite) -> Result<(), AbiCodegenError> {
         self.with_profile_site("abi", "abi.portal.start", "portal start", |emitter| {
             emitter.emit_portal_start_inner(site)
@@ -71,13 +114,25 @@ impl<'a> AbiEmitter<'a> {
         match site.offset {
             PortalOffset::Byte(index) => {
                 let source = self.address_location(index, site.function)?;
-                self.copy_locations_to_zeroed_destination(source, offset_low, restore);
+                if self.portal_offset_dead(site, index, true) {
+                    self.move_location_to_zero(source, offset_low);
+                } else {
+                    self.copy_locations_to_zeroed_destination(source, offset_low, restore);
+                }
             }
             PortalOffset::Word(offset) => {
                 let low = self.address_location(offset.low, site.function)?;
                 let high = self.address_location(offset.high, site.function)?;
-                self.copy_locations_to_zeroed_destination(low, offset_low, restore);
-                self.copy_locations_to_zeroed_destination(high, offset_high, restore);
+                if self.portal_offset_dead(site, offset.low, true) {
+                    self.move_location_to_zero(low, offset_low);
+                } else {
+                    self.copy_locations_to_zeroed_destination(low, offset_low, restore);
+                }
+                if self.portal_offset_dead(site, offset.high, false) {
+                    self.move_location_to_zero(high, offset_high);
+                } else {
+                    self.copy_locations_to_zeroed_destination(high, offset_high, restore);
+                }
             }
         }
         if let PortalOperation::Store { source } = site.operation {
@@ -88,7 +143,11 @@ impl<'a> AbiEmitter<'a> {
             };
             let value_port =
                 self.portal_field_location(site.region, AbiField::Value, site.function)?;
-            self.copy_locations_to_zeroed_destination(value_source, value_port, restore);
+            if self.consume_portal_payload(site) {
+                self.move_location_to_zero(value_source, value_port);
+            } else {
+                self.copy_locations_to_zeroed_destination(value_source, value_port, restore);
+            }
         }
         self.set_location(
             self.portal_field_location(site.region, AbiField::Active, site.function)?,
@@ -128,14 +187,26 @@ impl<'a> AbiEmitter<'a> {
                 match site.offset {
                     PortalOffset::Byte(index) => {
                         let source = emitter.address_location(index, site.function)?;
-                        emitter.copy_locations_with_zeroed_restore(source, route_low, restore);
+                        if emitter.portal_offset_dead(site, index, true) {
+                            emitter.move_location(source, route_low);
+                        } else {
+                            emitter.copy_locations_with_zeroed_restore(source, route_low, restore);
+                        }
                         emitter.clear_location(route_high);
                     }
                     PortalOffset::Word(offset) => {
                         let low = emitter.address_location(offset.low, site.function)?;
                         let high = emitter.address_location(offset.high, site.function)?;
-                        emitter.copy_locations_with_zeroed_restore(low, route_low, restore);
-                        emitter.copy_locations_with_zeroed_restore(high, route_high, restore);
+                        if emitter.portal_offset_dead(site, offset.low, true) {
+                            emitter.move_location(low, route_low);
+                        } else {
+                            emitter.copy_locations_with_zeroed_restore(low, route_low, restore);
+                        }
+                        if emitter.portal_offset_dead(site, offset.high, false) {
+                            emitter.move_location(high, route_high);
+                        } else {
+                            emitter.copy_locations_with_zeroed_restore(high, route_high, restore);
+                        }
                     }
                 }
 
@@ -153,11 +224,15 @@ impl<'a> AbiEmitter<'a> {
                     } else {
                         emitter.value_operand_element_location(source, site.leaf, site.function)?
                     };
-                    emitter.copy_locations_with_zeroed_restore(
-                        value_source,
-                        emitter.route_location(ROUTE_VALUE)?,
-                        restore,
-                    );
+                    if emitter.consume_portal_payload(site) {
+                        emitter.move_location(value_source, emitter.route_location(ROUTE_VALUE)?);
+                    } else {
+                        emitter.copy_locations_with_zeroed_restore(
+                            value_source,
+                            emitter.route_location(ROUTE_VALUE)?,
+                            restore,
+                        );
+                    }
                 } else {
                     emitter.clear_location(emitter.route_location(ROUTE_VALUE)?);
                 }
@@ -452,163 +527,6 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
-    pub(super) fn emit_page_portal_accessor(
-        &mut self,
-        kind: PortalAccessKind,
-    ) -> Result<(), AbiCodegenError> {
-        self.with_profile_site(
-            "abi",
-            "abi.portal.page",
-            "page portal resolver",
-            |emitter| {
-                let page_span = aggregate_page_portal_offset(1, emitter.config)? as isize;
-                let sixteen_page_span = aggregate_page_portal_offset(16, emitter.config)? as isize;
-
-                // Split the page byte into base-16 digits.  Moving the request
-                // through sixteen pages at once avoids repeating the payload
-                // transfer for every individual page.  The low and high
-                // digits are kept in the current portal while the resolver
-                // advances; Restore and Scratch3 hold their copies for the
-                // reverse trip.
-                emitter.split_abi_nibbles(
-                    AbiField::Scratch0,
-                    AbiField::Scratch1,
-                    AbiField::Scratch2,
-                )?;
-                emitter.copy(
-                    emitter.current_abi_offset(AbiField::Scratch1)?,
-                    emitter.current_abi_offset(AbiField::Restore)?,
-                    emitter.current_abi_offset(AbiField::Scratch0)?,
-                );
-                emitter.copy(
-                    emitter.current_abi_offset(AbiField::Scratch2)?,
-                    emitter.current_abi_offset(AbiField::Scratch3)?,
-                    emitter.current_abi_offset(AbiField::Scratch0)?,
-                );
-
-                let high_fields: &[AbiField] = match kind {
-                    PortalAccessKind::Load => &[
-                        AbiField::Index,
-                        AbiField::Restore,
-                        AbiField::Scratch1,
-                        AbiField::Scratch2,
-                        AbiField::Scratch3,
-                    ],
-                    PortalAccessKind::Store => &[
-                        AbiField::Index,
-                        AbiField::Value,
-                        AbiField::Restore,
-                        AbiField::Scratch1,
-                        AbiField::Scratch2,
-                        AbiField::Scratch3,
-                    ],
-                };
-                emitter.emit_page_portal_digit(
-                    AbiField::Scratch2,
-                    sixteen_page_span,
-                    high_fields,
-                )?;
-                let low_fields: &[AbiField] = match kind {
-                    PortalAccessKind::Load => &[
-                        AbiField::Index,
-                        AbiField::Restore,
-                        AbiField::Scratch1,
-                        AbiField::Scratch3,
-                    ],
-                    PortalAccessKind::Store => &[
-                        AbiField::Index,
-                        AbiField::Value,
-                        AbiField::Restore,
-                        AbiField::Scratch1,
-                        AbiField::Scratch3,
-                    ],
-                };
-                emitter.emit_page_portal_digit(AbiField::Scratch1, page_span, low_fields)?;
-
-                // The low-byte direct resolver is emitted once. The moving
-                // page portal makes its relative payload offsets identical
-                // for every selected page.
-                emitter.emit_direct_payload_countdown(kind)?;
-
-                emitter.emit_page_portal_digit_reverse(
-                    AbiField::Restore,
-                    page_span,
-                    kind,
-                    &[AbiField::Scratch3],
-                )?;
-                emitter.emit_page_portal_digit_reverse(
-                    AbiField::Scratch3,
-                    sixteen_page_span,
-                    kind,
-                    &[],
-                )?;
-
-                Ok(())
-            },
-        )
-    }
-
-    pub(super) fn emit_page_portal_digit(
-        &mut self,
-        counter: AbiField,
-        delta: isize,
-        carried: &[AbiField],
-    ) -> Result<(), AbiCodegenError> {
-        let counter_offset = self.current_abi_offset(counter)?;
-        self.move_to(counter_offset);
-        let body = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            for field in carried {
-                emitter.move_page_portal_field(*field, delta)?;
-            }
-            emitter.migrate_context(delta);
-            emitter.move_to(counter_offset);
-            Ok(())
-        })?;
-        self.emit_loop(body);
-        self.move_to(0);
-        Ok(())
-    }
-
-    pub(super) fn emit_page_portal_digit_reverse(
-        &mut self,
-        counter: AbiField,
-        delta: isize,
-        kind: PortalAccessKind,
-        carried: &[AbiField],
-    ) -> Result<(), AbiCodegenError> {
-        let counter_offset = self.current_abi_offset(counter)?;
-        self.move_to(counter_offset);
-        let body = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            if kind == PortalAccessKind::Load {
-                emitter.move_page_portal_field(AbiField::Value, -delta)?;
-            }
-            for field in carried {
-                emitter.move_page_portal_field(*field, -delta)?;
-            }
-            emitter.move_page_portal_field(counter, -delta)?;
-            emitter.migrate_context(-delta);
-            emitter.move_to(counter_offset);
-            Ok(())
-        })?;
-        self.emit_loop(body);
-        self.move_to(0);
-        Ok(())
-    }
-
-    pub(super) fn move_page_portal_field(
-        &mut self,
-        field: AbiField,
-        delta: isize,
-    ) -> Result<(), AbiCodegenError> {
-        let field = self.current_abi_offset(field)?;
-        self.move_value(field, delta + field);
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(super) fn abi_field_offsets(
         &self,
@@ -789,21 +707,15 @@ impl<'a> AbiEmitter<'a> {
             if let PortalOperation::Load { destination } = site.operation
                 && site.cells > 1
             {
-                let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
-                self.clear_location(restore);
                 for leaf in 0..site.cells {
                     let source = self.portal_temporary_location(site.function, leaf)?;
                     let destination =
                         self.value_operand_element_location(destination, leaf, site.function)?;
-                    self.copy_locations_with_zeroed_restore(source, destination, restore);
+                    self.move_location(source, destination);
                 }
             }
-            if site.cells > 1 {
-                for leaf in 0..site.cells {
-                    let temporary = self.portal_temporary_location(site.function, leaf)?;
-                    self.clear_location(temporary);
-                }
-            }
+            // Store staging and final load delivery consume every private
+            // buffer leaf, so the buffer is already zero for the next request.
             self.set_next_pc(site.return_to)
         }
     }

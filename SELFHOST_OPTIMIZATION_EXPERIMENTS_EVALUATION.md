@@ -6,6 +6,7 @@
 
 | 案 | 判断 | 根拠と制約 |
 |---|---|---|
+| Rustのportal最終使用消費＋page digit一括jump | 採用（既定ON） | 死ぬFrame scalar添字・store値とprivate bufferを消費し、page間搬送を共有accessorの定数距離jumpへ変更。配列幅で分岐表を縮め、表外はwalkへ戻す。寿命最適化採用後の固定compiler BFでmedium/large64の論理RLE opは通常−3.60%/−4.50%、nibble＋直接比較＋Anchor16で−12.08%/−17.60%。large64の全ON execute中央値（各3組）は通常1.048→1.007秒、併用2.229→2.183秒。併用の素BF量＋3.11%、圧縮量＋0.092%。公開CIR 12条件・profile・390テスト・fmt/clippyを確認。selfhost移植・全段時間は未測定。[取り込み記録](optimize_logs/RUST_PORTAL_TRANSFER_ADOPTION_20261006.md)。 |
 | Rustの寿命に基づくcopy保存省略＋全体aggregate copyの領域共有 | 採用（既定ON） | scalar/aggregate copy・call引数・returnで死んだlocalを消費し、同幅の全体コピーを安全に共有。global・部分的なlive値・重複引数は保存。固定compiler BFのmedium/large64で通常設定の論理RLE op−20.09%/−21.32%、native op−21.32%/−26.04%、全ON execute中央値（各3回）−18.93%/−22.50%、BF量−18.58%。nibble＋直接比較＋Anchor16でもRLE−38.98%/−41.63%で試作と全counter一致。公開CIR・profile/embedded・388テスト・clippyを確認。加算の並び専用変換は採用しない。selfhostへの移植・全段時間は未検証。[取り込み記録](optimize_logs/RUST_LIFETIME_COPY_ADOPTION_20261006.md)。 |
 | Rustの比較slot限定直接比較＋Anchor16 | 採用（独立フラグ・既定OFF） | `--enable-inplace-compare`/`--enable-anchor-bank`、nibbleと併用可。同じCIRのmedium/large64で併用の論理RLE opは通常56.40%/61.65%、nibble35.63%/45.90%減、通常BF量は2.47%/2.01%増。全ONのnative時間は悪化。公開CIRにはAnchor16を適用し、flat aggregateの直接比較は従来方式。全byte pair・alias・再帰位相・配列/call・出力形式・容量境界を検証。[本体取り込み](optimize_logs/RUST_COMPARE_ANCHOR_ADOPTION_20261005.md)。 |
 | selfhostの選択式nibble搬送 | 採用（既定OFF） | concatの`--enable-nibble-transfer`でglobal copy・portal offset low/payloadを分解。frame幅を保ち、static scratchを6 cell追加し、load結果はpage headerで直接分解。全256値・再帰・BF/CIR・出力形式を照合。RLE op数を減らす選択肢で、全ONの時間改善は前提にしない。 |

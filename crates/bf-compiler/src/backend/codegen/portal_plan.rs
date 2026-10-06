@@ -37,6 +37,8 @@ pub(super) struct PortalAccessor {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PortalSite {
+    /// Original terminator whose resume liveness covers every hidden leaf.
+    pub(super) origin: ContinuationId,
     pub(super) resume: ContinuationId,
     pub(super) accessor: ContinuationId,
     pub(super) function: FunctionId,
@@ -163,6 +165,7 @@ impl PortalPlan {
             let first_site = ordered_sites.len();
             for (leaf, &resume) in resumes.iter().enumerate() {
                 let site = PortalSite {
+                    origin: continuation.id(),
                     resume,
                     accessor,
                     function: continuation.function(),
