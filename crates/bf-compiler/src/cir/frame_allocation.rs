@@ -282,6 +282,20 @@ fn build_body(
 ) -> usize {
     let mut end = body.len();
     while end > 0 {
+        if let Some((start, region)) = full_field_copy(body, end, function) {
+            let mut node = Node::new(function);
+            node.successors.push(next);
+            node.write_region(region, true);
+            for instruction in &body[start..end] {
+                if let FrameInstruction::Copy { src, .. } = instruction {
+                    node.read(*src);
+                }
+            }
+            next = nodes.len();
+            nodes.push(node);
+            end = start;
+            continue;
+        }
         // Lowering clears aggregates with a contiguous run of element sets.
         // Treat a full run as one definition so stale contents are not live.
         if let Some((start, region)) = full_initialization(body, end, function) {
@@ -482,6 +496,45 @@ fn full_initialization(
     }).then_some((start, region))
 }
 
+/// Scalar replacement can leave a contiguous field-copy sequence populating
+/// an ABI aggregate. The old destination is dead at a complete overwrite;
+/// treating each leaf as a partial write would keep every staging region live
+/// back to function entry. Same-region reads retain sequential copy semantics.
+fn full_field_copy(
+    body: &[FrameInstruction],
+    end: usize,
+    function: &FunctionDescriptor,
+) -> Option<(usize, AggregateRegion)> {
+    let FrameInstruction::Copy {
+        dst:
+            Address::ArrayElement {
+                array: AggregateRegion::Frame(id),
+                index,
+            },
+        ..
+    } = &body[end - 1]
+    else {
+        return None;
+    };
+    let cells = function.frame_aggregate(*id)?.cells();
+    if cells == 0 || *index + 1 != cells || end < cells {
+        return None;
+    }
+    let start = end - cells;
+    let region = AggregateRegion::Frame(*id);
+    body[start..end]
+        .iter()
+        .enumerate()
+        .all(|(index, instruction)| {
+            matches!(instruction, FrameInstruction::Copy {
+            src,
+            dst: Address::ArrayElement { array, index: actual },
+        } if *array == region && *actual == index
+            && !matches!(src, Address::ArrayElement { array, .. } if *array == region))
+        })
+        .then_some((start, region))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +542,69 @@ mod tests {
     use crate::{
         AbiConfig, ContinuationProgram, ContinuationRunOptions, run_continuations_with_io,
     };
+
+    #[test]
+    fn complete_field_copies_kill_old_payload_but_partial_copies_preserve_it() {
+        let main = crate::FunctionId::new(0);
+        let entry = ContinuationId::new(1).unwrap();
+        let region = |n| AggregateRegion::Frame(FrameAggregateId::new(n));
+        let field = |n, index| Address::ArrayElement {
+            array: region(n),
+            index,
+        };
+        let source = Address::Frame(FrameSlot::new(0));
+        for cells in [2, 3] {
+            let f = FunctionDescriptor::new_aggregates(
+                main,
+                vec![],
+                1,
+                (0..2)
+                    .map(|n| FrameAggregateDescriptor::new(FrameAggregateId::new(n), 3))
+                    .collect(),
+                0,
+                crate::ValueType::Void,
+                entry,
+            );
+            let mut body = vec![FrameInstruction::Input { dst: source }];
+            for (n, count) in [(0, 3), (1, cells)] {
+                body.extend((0..count).map(|index| FrameInstruction::Copy {
+                    src: source,
+                    dst: field(n, index),
+                }));
+                body.push(FrameInstruction::Output { src: field(n, 2) });
+            }
+            let original = ContinuationProgram::new(
+                main,
+                vec![f.clone()],
+                vec![Continuation::new(
+                    entry,
+                    main,
+                    body.clone(),
+                    Terminator::Halt,
+                )],
+            )
+            .unwrap();
+            assert!(full_field_copy(&body, 4, &f).is_some());
+            let mut overlapping = body.clone();
+            overlapping[2] = FrameInstruction::Copy {
+                src: field(0, 0),
+                dst: field(0, 1),
+            };
+            assert!(full_field_copy(&overlapping, 4, &f).is_none());
+            let (f, nodes) = allocate(f, original.continuations().to_vec());
+            assert_eq!(f.frame_aggregates().len(), if cells == 3 { 1 } else { 2 });
+            let allocated = ContinuationProgram::new(main, vec![f], nodes).unwrap();
+            let bf = crate::compile_continuations(&allocated).unwrap();
+            for value in 0..=255u8 {
+                let expected = execute(&original, &[value]);
+                assert_eq!(execute(&allocated, &[value]), expected);
+                assert_eq!(
+                    bf_interpreter::run(bf.as_bytes(), &[value]).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
 
     fn lower(source: &str, inline: bool, reuse: bool) -> ContinuationProgram {
         let ast = parser::parse(lexer::lex(source).unwrap()).unwrap();

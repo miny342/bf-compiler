@@ -1908,7 +1908,14 @@ mod tests {
 
     #[test]
     fn strings_become_exact_aggregate_initializers() {
-        let program = lower("void main() { cell[] value = \"a\\0b\"; output(value[1]); }");
+        // Check the lowering representation before scalar replacement and
+        // dead-field elimination can remove unused string characters.
+        let ast = parser::parse(
+            lexer::lex("void main() { cell[] value = \"a\\0b\"; output(value[1]); }").unwrap(),
+        )
+        .unwrap();
+        let hir = semantic::analyze(&ast).unwrap();
+        let program = lower_hir_unallocated(&hir).unwrap();
         let main = program.function(ContinuationFunctionId::new(0)).unwrap();
         assert!(
             main.frame_aggregates()

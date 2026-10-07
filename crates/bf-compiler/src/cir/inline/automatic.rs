@@ -107,8 +107,8 @@ fn allocated_costs(
     program: &ContinuationProgram,
     options: ContinuationOptimizationOptions,
 ) -> Result<HashMap<FunctionId, usize>, String> {
-    let (allocated, _) =
-        crate::cir::pipeline::optimize_and_allocate(program, options).map_err(|e| e.to_string())?;
+    let (allocated, _) = crate::cir::pipeline::optimize_for_inline_cost(program, options)
+        .map_err(|e| e.to_string())?;
     crate::backend::layout_plan::estimated_frame_chunks(&allocated).map_err(|e| e.to_string())
 }
 
@@ -124,7 +124,7 @@ fn caller_cost(
     let projection = graph.clone().materialize_caller(original, caller)?;
     let projection =
         crate::cir::virtual_cleanup::cleanup(&projection).map_err(|e| e.to_string())?;
-    let (allocated, _) = crate::cir::pipeline::optimize_and_allocate(&projection, options)
+    let (allocated, _) = crate::cir::pipeline::optimize_for_inline_cost(&projection, options)
         .map_err(|e| e.to_string())?;
     let costs =
         crate::backend::layout_plan::estimated_frame_chunks_with_route(&allocated, global_portal)

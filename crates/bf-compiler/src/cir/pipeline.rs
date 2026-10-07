@@ -13,8 +13,27 @@ pub(crate) fn optimize_and_allocate(
     program: &ContinuationProgram,
     options: ContinuationOptimizationOptions,
 ) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationIrError> {
+    optimize_impl(program, options, true)
+}
+
+/// Keep inline trials conservative: scalar replacement is a final storage
+/// optimization after inline sites have been chosen. Crediting its smaller
+/// frame here can authorize more calls to be expanded, increasing generated BF
+/// and runtime work despite the reduced storage estimate.
+pub(crate) fn optimize_for_inline_cost(
+    program: &ContinuationProgram,
+    options: ContinuationOptimizationOptions,
+) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationIrError> {
+    optimize_impl(program, options, false)
+}
+
+fn optimize_impl(
+    program: &ContinuationProgram,
+    options: ContinuationOptimizationOptions,
+    fields: bool,
+) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationIrError> {
     let (graph, mut stats) = optimize_continuations_with_options(program, options)?;
-    let allocated = allocate(&graph, true)?;
+    let allocated = allocate_impl(&graph, true, fields)?;
     // Frame fusion may empty a body. Thread those edges after allocation, but
     // never duplicate or reconstruct control using the reused physical slots.
     let (cleaned, cleanup) = optimize_continuations_with_options(
@@ -35,9 +54,18 @@ pub(crate) fn optimize_and_allocate(
     Ok((cleaned, stats))
 }
 
+#[cfg(test)]
 pub(crate) fn allocate(
     program: &ContinuationProgram,
     reuse_slots: bool,
+) -> Result<ContinuationProgram, ContinuationIrError> {
+    allocate_impl(program, reuse_slots, true)
+}
+
+fn allocate_impl(
+    program: &ContinuationProgram,
+    reuse_slots: bool,
+    fields: bool,
 ) -> Result<ContinuationProgram, ContinuationIrError> {
     let mut functions = Vec::with_capacity(program.functions().len());
     let mut continuations = Vec::with_capacity(program.continuations().len());
@@ -48,8 +76,12 @@ pub(crate) fn allocate(
             .filter(|c| c.function() == function.id())
             .cloned()
             .collect();
-        let (descriptor, fused) =
-            crate::cir::arithmetic_fusion::fuse_function(function.clone(), body);
+        let (descriptor, body) = if fields {
+            crate::cir::aggregate_fields::scalarize(function.clone(), body)
+        } else {
+            (function.clone(), body)
+        };
+        let (descriptor, fused) = crate::cir::arithmetic_fusion::fuse_function(descriptor, body);
         let fused = crate::cir::constant_transfer::fold_continuations(fused);
         let (descriptor, fused) = crate::cir::computation_graph::optimize(descriptor, fused);
         let (descriptor, fused) = crate::cir::portal_offset::optimize(descriptor, fused);
