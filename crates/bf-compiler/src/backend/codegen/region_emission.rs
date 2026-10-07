@@ -132,6 +132,19 @@ impl AbiEmitter<'_> {
             unreachable!("region branch");
         };
         let function = continuation.function();
+        if self.inplace_compare
+            && self.fixed_context.is_none()
+            && let Address::Frame(slot) = condition
+            && let Some((flag, zero)) = self.layout(function)?.frame.truth_guards(*slot)
+        {
+            let value = self.layout(function)?.frame.frame_offset(*slot);
+            return self.emit_slide_region_branch(
+                (value, flag, zero),
+                then_node,
+                else_node,
+                selector,
+            );
+        }
         let condition = self.address_location(*condition, function)?;
         let then_gate = Location::Relative(self.acquire_branch_temporary(function)?);
         let else_gate = Location::Relative(self.acquire_branch_temporary(function)?);
@@ -163,6 +176,55 @@ impl AbiEmitter<'_> {
         self.emit_loop(body);
         self.move_location_to_context(else_gate);
         self.branch_temporary_depth -= 2;
+        Ok(())
+    }
+
+    /// Consume the condition in place, then close the taken loop at its private
+    /// zero flag. Successors may reuse the condition as a new live value. The
+    /// skipped path remains at value=0; >[>] joins both paths at the zero guard.
+    /// Existing comparison guards suffice, without widening the frame.
+    fn emit_slide_region_branch(
+        &mut self,
+        guards: (isize, isize, isize),
+        then_node: &RegionNode,
+        else_node: &RegionNode,
+        selector: Location,
+    ) -> Result<(), AbiCodegenError> {
+        let (value, flag, zero) = guards;
+        debug_assert_eq!((flag - value, zero - flag), (1, 1));
+        // Every operation using private comparison guards leaves them zero.
+        self.move_to(flag);
+        self.adjust(1);
+        self.move_to(value);
+        let body = self.capture(|emitter| {
+            emitter.clear_current();
+            emitter.move_to(flag);
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.emit_region_node(then_node, selector)?;
+            // Nested comparisons can reuse these guards, but leave them zero.
+            // Close at the flag, preserving any new value in the condition.
+            emitter.move_to(flag);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.push_move(1);
+        let site = self.current_profile_site();
+        self.emit_loop(vec![AnnotatedBfInstruction::new(
+            site,
+            AnnotatedBfOperation::Move(1),
+        )]);
+        self.position = zero;
+        self.move_to(flag);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.emit_region_node(else_node, selector)?;
+            emitter.move_to(flag);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
         Ok(())
     }
 

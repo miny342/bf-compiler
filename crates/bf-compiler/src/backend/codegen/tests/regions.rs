@@ -491,7 +491,16 @@ fn soft_cycle_executes_in_one_dispatcher_visit() {
             Continuation::new(
                 id(1),
                 main,
-                vec![FrameInstruction::Input { dst: slot(0) }],
+                vec![
+                    FrameInstruction::Compare {
+                        left: slot(0),
+                        right: slot(1),
+                        dst: slot(1),
+                        true_value: 1,
+                        false_value: 0,
+                    },
+                    FrameInstruction::Input { dst: slot(0) },
+                ],
                 Terminator::Goto { target: id(2) },
             ),
             Continuation::new(
@@ -526,11 +535,40 @@ fn soft_cycle_executes_in_one_dispatcher_visit() {
     let plan = RegionPlan::new(&program);
     assert_eq!(plan.entries, HashSet::from([id(1)]));
     assert_eq!(plan.bounded_fallbacks, 0);
+    let bf = lower_continuations_with_codegen_options(
+        &program,
+        AbiCodegenOptions {
+            inplace_compare: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut compressed = Vec::new();
+    crate::optimize_bf(&bf)
+        .write_compressed_source(&mut compressed)
+        .unwrap();
     for n in [0, 1, 3, 255] {
         let before = measure(&program, &[n], false);
         let after = measure(&program, &[n], true);
         assert_eq!(before.visits.values().sum::<u64>(), 3 + 2 * u64::from(n));
         assert_eq!(after.visits.values().sum::<u64>(), 1);
+        for disabled in [false, true] {
+            let actual = bf_interpreter::run_with_options(
+                &compressed,
+                &[n],
+                bf_interpreter::RunOptions {
+                    disable_clear: disabled,
+                    disable_scan: disabled,
+                    disable_transfer: disabled,
+                    disable_countdown: disabled,
+                    disable_remote_transfer: disabled,
+                    disable_compare: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(actual.output, before.output);
+        }
     }
 }
 
@@ -1095,4 +1133,183 @@ fn default_regions_fall_back_when_scratch_exceeds_frame_capacity() {
         bf_interpreter::run(default.to_source().as_bytes(), &[]).unwrap(),
         b""
     );
+}
+
+#[test]
+fn slide_branches_preserve_reused_conditions_and_nested_private_guards() {
+    use FrameInstruction as I;
+    let main = FunctionId::new(0);
+    let helper = FunctionId::new(1);
+    let terminal_body = |base| {
+        vec![
+            I::Input { dst: slot(0) },
+            I::Copy {
+                src: slot(0),
+                dst: slot(3),
+            },
+            I::Branch {
+                condition: slot(3),
+                then_body: vec![I::Set {
+                    dst: slot(0),
+                    value: 3,
+                }],
+                else_body: vec![I::Set {
+                    dst: slot(0),
+                    value: 4,
+                }],
+            },
+            // Reuse the outer branch's guards as comparison scratch; overwrite
+            // its condition with the result, then keep it live across a call.
+            I::Compare {
+                left: slot(0),
+                right: slot(1),
+                dst: slot(0),
+                true_value: 1,
+                false_value: 0,
+            },
+            I::AddConst {
+                dst: slot(0),
+                value: base,
+            },
+        ]
+    };
+    let call = Terminator::Call {
+        callee: helper,
+        arguments: vec![ValueOperand::Cell(slot(0))],
+        return_to: id(6),
+    };
+    let p = ContinuationProgram::new(
+        main,
+        vec![
+            FunctionDescriptor::new(main, vec![], 4, ValueType::Void, id(1)),
+            FunctionDescriptor::new(helper, vec![FrameSlot::new(0)], 1, ValueType::Cell, id(7)),
+        ],
+        vec![
+            Continuation::new(
+                id(1),
+                main,
+                vec![
+                    // Reserve private guards without restricting the branch's byte.
+                    I::Compare {
+                        left: slot(0),
+                        right: slot(1),
+                        dst: slot(3),
+                        true_value: 1,
+                        false_value: 0,
+                    },
+                    I::Input { dst: slot(0) },
+                    I::Input { dst: slot(1) },
+                ],
+                Terminator::Branch {
+                    condition: slot(0),
+                    then_target: id(2),
+                    else_target: id(5),
+                },
+            ),
+            Continuation::new(
+                id(2),
+                main,
+                vec![I::Input { dst: slot(0) }],
+                Terminator::Branch {
+                    condition: slot(0),
+                    then_target: id(3),
+                    else_target: id(4),
+                },
+            ),
+            Continuation::new(id(3), main, terminal_body(40), call.clone()),
+            Continuation::new(id(4), main, terminal_body(70), call.clone()),
+            Continuation::new(id(5), main, terminal_body(100), call),
+            Continuation::new(
+                id(6),
+                main,
+                vec![
+                    I::Output {
+                        src: Address::AbiValue,
+                    },
+                    I::Output { src: slot(0) },
+                ],
+                Terminator::Halt,
+            ),
+            Continuation::new(
+                id(7),
+                helper,
+                vec![],
+                Terminator::Return {
+                    value: Some(ValueOperand::Cell(slot(0))),
+                },
+            ),
+        ],
+    )
+    .unwrap();
+    for options in [
+        AbiCodegenOptions {
+            inplace_compare: true,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            inplace_compare: true,
+            nibble_transfer: true,
+            anchor_bank: true,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            inplace_compare: true,
+            region_emission: false,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            inplace_compare: true,
+            static_frames: true,
+            ..Default::default()
+        },
+    ] {
+        let bf = lower_continuations_with_codegen_options(&p, options).unwrap();
+        let mut compressed = Vec::new();
+        crate::optimize_bf(&bf)
+            .write_compressed_source(&mut compressed)
+            .unwrap();
+        for value in 0..=255u8 {
+            for inner in [0, 1, 255] {
+                let input = [value, value.wrapping_mul(37), inner, value & 1];
+                let mut expected = Vec::new();
+                crate::run_continuations_with_io(
+                    &p,
+                    &mut &input[..],
+                    &mut expected,
+                    Default::default(),
+                    |_| {},
+                )
+                .unwrap();
+                let mut counts = None;
+                for disabled in [true, false] {
+                    let actual = bf_interpreter::run_with_options(
+                        &compressed,
+                        &input,
+                        bf_interpreter::RunOptions {
+                            disable_clear: disabled,
+                            disable_scan: disabled,
+                            disable_transfer: disabled,
+                            disable_countdown: disabled,
+                            disable_remote_transfer: disabled,
+                            disable_compare: disabled,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let logical = (
+                        actual.stats.executed_instructions,
+                        actual.stats.executed_rle_instructions,
+                    );
+                    if let Some(previous) = counts {
+                        assert_eq!(logical, previous);
+                    }
+                    counts = Some(logical);
+                    assert_eq!(
+                        actual.output, expected,
+                        "options={options:?}, input={input:?}, rle={disabled}"
+                    );
+                }
+            }
+        }
+    }
 }
