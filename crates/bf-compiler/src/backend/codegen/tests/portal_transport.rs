@@ -2,6 +2,171 @@
 use super::*;
 
 #[test]
+fn page_selectors_materialize_outward_and_return_digits_for_every_byte() {
+    let program = crate::lower_source("void main() {}").unwrap();
+    let config = AbiConfig::default();
+    let layouts = build_layouts(&program, config).unwrap();
+    let static_layout = StaticLayout::new(config, program.globals()).unwrap();
+    let portal = PortalPlan::new(&program).unwrap();
+    let make_source = |direct| {
+        let mut emitter = AbiEmitter::new(
+            &program,
+            &layouts,
+            &static_layout,
+            &portal,
+            config,
+            ProfileGranularity::Abi,
+        );
+        for offset in 1..17 {
+            emitter.set(offset, 31 + offset as u8);
+        }
+        emitter.move_to(0);
+        emitter.emit_operation(AnnotatedBfOperation::Input);
+        let body = emitter
+            .capture(|emitter| {
+                emitter.move_to(emitter.current_abi_offset(AbiField::Scratch0)?);
+                emitter.emit_operation(AnnotatedBfOperation::Input);
+                for field in [
+                    AbiField::Scratch1,
+                    AbiField::Scratch2,
+                    AbiField::Restore,
+                    AbiField::Scratch3,
+                    AbiField::Branch,
+                ] {
+                    emitter.set_abi_field(field, 173)?;
+                }
+                if direct {
+                    emitter.split_page_selectors()?;
+                } else {
+                    emitter.split_abi_nibbles(
+                        AbiField::Scratch0,
+                        AbiField::Scratch1,
+                        AbiField::Scratch2,
+                    )?;
+                    emitter.copy(
+                        emitter.current_abi_offset(AbiField::Scratch1)?,
+                        emitter.current_abi_offset(AbiField::Restore)?,
+                        emitter.current_abi_offset(AbiField::Scratch0)?,
+                    );
+                    emitter.copy(
+                        emitter.current_abi_offset(AbiField::Scratch2)?,
+                        emitter.current_abi_offset(AbiField::Scratch3)?,
+                        emitter.current_abi_offset(AbiField::Scratch0)?,
+                    );
+                    emitter.clear_abi_field(AbiField::Branch)?;
+                }
+                for offset in 0..17 {
+                    emitter.move_to(offset);
+                    emitter.emit_operation(AnnotatedBfOperation::Output);
+                }
+                emitter.move_to(0);
+                emitter.emit_operation(AnnotatedBfOperation::Input);
+                Ok(())
+            })
+            .unwrap();
+        emitter.emit_loop(body);
+        optimize_annotated_bf(&AnnotatedBfProgram::new(emitter.output, emitter.sites)).to_source()
+    };
+    let mut input = Vec::new();
+    let mut expected = Vec::new();
+    for value in 0..=255u8 {
+        input.extend([1, value]);
+        let mut fields: Vec<u8> = (0..17).map(|offset| 31 + offset).collect();
+        fields[0] = 1;
+        fields[8] = value % 16;
+        fields[9] = 0;
+        fields[13] = 0;
+        fields[14] = value % 16;
+        fields[15] = value / 16;
+        fields[16] = value / 16;
+        expected.extend(fields);
+    }
+    input.push(0);
+    let old = make_source(false);
+    let new = make_source(true);
+    for disabled in [false, true] {
+        let options = bf_interpreter::RunOptions {
+            disable_clear: disabled,
+            disable_scan: disabled,
+            disable_transfer: disabled,
+            disable_countdown: disabled,
+            disable_remote_transfer: disabled,
+            disable_compare: disabled,
+            ..Default::default()
+        };
+        let reference =
+            bf_interpreter::run_with_options(old.as_bytes(), &input, options.clone()).unwrap();
+        let actual = bf_interpreter::run_with_options(new.as_bytes(), &input, options).unwrap();
+        assert_eq!(reference.output, expected);
+        assert_eq!(actual.output, expected, "rle_only={disabled}");
+        eprintln!(
+            "page selectors rle_only={disabled}: RLE {} -> {}, native {} -> {}, transfer {} -> {}, BF {} -> {}",
+            reference.stats.executed_rle_instructions,
+            actual.stats.executed_rle_instructions,
+            reference.stats.optimization.executed_native_operations,
+            actual.stats.optimization.executed_native_operations,
+            reference.stats.optimization.transfer_iterations,
+            actual.stats.optimization.transfer_iterations,
+            old.len(),
+            new.len()
+        );
+    }
+}
+
+#[test]
+fn page_selector_round_trips_cross_both_digits_and_reuse_portals() {
+    let program = crate::lower_source(
+        "cell[256][256] data; void main() { cell go=input(); while(go) { \
+         cell hi=input(); cell lo=input(); cell value=input(); \
+         data[hi][lo]=value; output(data[hi][lo]); go=input(); } }",
+    )
+    .unwrap();
+    let mut input = Vec::new();
+    let mut expected = Vec::new();
+    for value in [0, 1, 173, 255] {
+        for (hi, lo) in [(0, 0), (0, 255), (1, 0), (15, 255), (16, 0), (255, 255)] {
+            input.extend([1, hi, lo, value]);
+            expected.push(value);
+        }
+    }
+    input.push(0);
+    for options in [
+        AbiCodegenOptions {
+            unlimited_tape: true,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            unlimited_tape: true,
+            nibble_transfer: true,
+            inplace_compare: true,
+            anchor_bank: true,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            unlimited_tape: true,
+            static_frames: true,
+            ..Default::default()
+        },
+    ] {
+        let bf = lower_continuations_with_codegen_options(&program, options).unwrap();
+        let mut compressed = Vec::new();
+        optimize_bf(&bf)
+            .write_compressed_source(&mut compressed)
+            .unwrap();
+        let actual = bf_interpreter::run_with_options(
+            &compressed,
+            &input,
+            bf_interpreter::RunOptions {
+                unbounded_tape: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(actual.output, expected, "options={options:?}");
+    }
+}
+
+#[test]
 fn portal_high_zero_test_preserves_every_byte_and_all_live_protocol_fields() {
     let program = crate::lower_source("void main() {}").unwrap();
     let config = AbiConfig::default();

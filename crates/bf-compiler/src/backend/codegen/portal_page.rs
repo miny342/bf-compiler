@@ -19,21 +19,7 @@ impl<'a> AbiEmitter<'a> {
                 // selector is consumed before moving the request directly to
                 // its chosen portal, rather than carrying Index/Value once per
                 // digit unit. Restore and Scratch3 hold the return selectors.
-                emitter.split_abi_nibbles(
-                    AbiField::Scratch0,
-                    AbiField::Scratch1,
-                    AbiField::Scratch2,
-                )?;
-                emitter.copy(
-                    emitter.current_abi_offset(AbiField::Scratch1)?,
-                    emitter.current_abi_offset(AbiField::Restore)?,
-                    emitter.current_abi_offset(AbiField::Scratch0)?,
-                );
-                emitter.copy(
-                    emitter.current_abi_offset(AbiField::Scratch2)?,
-                    emitter.current_abi_offset(AbiField::Scratch3)?,
-                    emitter.current_abi_offset(AbiField::Scratch0)?,
-                );
+                emitter.split_page_selectors()?;
 
                 let high_fields: &[AbiField] = match kind {
                     PortalAccessKind::Load => &[
@@ -94,6 +80,57 @@ impl<'a> AbiEmitter<'a> {
                 Ok(())
             },
         )
+    }
+
+    /// The countdown depth is the consumed byte's value. Materialize both
+    /// outward and return digits once at its selected level instead of updating
+    /// a nibble on every decrement and copying it for the return trip.
+    pub(super) fn split_page_selectors(&mut self) -> Result<(), AbiCodegenError> {
+        for field in [
+            AbiField::Scratch1,
+            AbiField::Scratch2,
+            AbiField::Restore,
+            AbiField::Scratch3,
+        ] {
+            self.clear_abi_field(field)?;
+        }
+        self.set_abi_field(AbiField::Branch, 1)?;
+        self.split_page_selector_level(0)?;
+        self.move_to(0);
+        Ok(())
+    }
+
+    fn split_page_selector_level(&mut self, level: u8) -> Result<(), AbiCodegenError> {
+        let source = self.current_abi_offset(AbiField::Scratch0)?;
+        if level < u8::MAX {
+            self.move_to(source);
+            let body = self.capture(|emitter| {
+                emitter.adjust(255);
+                emitter.split_page_selector_level(level + 1)?;
+                emitter.move_to(source);
+                Ok(())
+            })?;
+            self.emit_loop(body);
+        }
+        let branch = self.current_abi_offset(AbiField::Branch)?;
+        self.move_to(branch);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            for (field, digit) in [
+                (AbiField::Scratch1, level % 16),
+                (AbiField::Restore, level % 16),
+                (AbiField::Scratch2, level / 16),
+                (AbiField::Scratch3, level / 16),
+            ] {
+                if digit != 0 {
+                    emitter.add_abi_field(field, digit)?;
+                }
+            }
+            emitter.move_to(branch);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        Ok(())
     }
 
     /// Limit the shared jump table using declared payload sizes. The walk

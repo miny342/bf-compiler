@@ -597,6 +597,7 @@ impl<'a> AbiEmitter<'a> {
     /// Consume a byte with a bounded countdown. Each entered level updates
     /// the result directly; after the source reaches zero, all enclosing
     /// loops exit without touching it. No binary carry scratch cells are needed.
+    #[cfg(test)]
     pub(super) fn split_abi_nibbles(
         &mut self,
         source: AbiField,
@@ -613,6 +614,7 @@ impl<'a> AbiEmitter<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn split_nibble_level(&mut self, source: isize, low: isize, high: isize, level: u8) {
         self.move_to(source);
         let body = self.capture_infallible(|emitter| {
