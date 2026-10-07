@@ -52,6 +52,13 @@ BFCソース
 スロット割り当てまでを受け持ち、インライン候補の試行評価からも利用する。
 `frontend/lowering/` はHIRから仮想CIRへの変換のみを担当する。
 
+[cir/scaled_offset.rs](src/cir/scaled_offset.rs) は、配列offsetの小さい定数倍を
+インライン選択後に最適化する。係数2〜8で初期low byteが分かる場合、lowへの定数倍Transferと
+最大8回のcarry閾値比較へ置換する。sourceが0なら処理を飛ばし、最初の閾値未満では後続比較も省く。
+公開binary CIRの `OffsetAddScaled` にも適用し、9以上・unknown low・alias・生存scratchは従来経路に戻す。
+既定ON。公開CIR形式とABIは維持する。
+
+
 共通の呼び出しグラフ解析（再帰判定・callee順序）は [cir/analysis/](src/cir/analysis/mod.rs)、
 フレーム配置とコスト見積もりは [backend/layout_plan.rs](src/backend/layout_plan.rs) に置く。
 インライン化の採否判定とBF生成はこの配置計算を共有し、BF emitter内部には依存しない。

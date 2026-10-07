@@ -14,3 +14,5 @@ mod structured_control;
 mod copy_lifetimes;
 #[path = "optimizations/guarded_compare.rs"]
 mod guarded_compare;
+#[path = "optimizations/scaled_offsets.rs"]
+mod scaled_offsets;

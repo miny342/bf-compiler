@@ -16,10 +16,10 @@ pub(crate) fn optimize_and_allocate(
     optimize_impl(program, options, true)
 }
 
-/// Keep inline trials conservative: scalar replacement is a final storage
-/// optimization after inline sites have been chosen. Crediting its smaller
-/// frame here can authorize more calls to be expanded, increasing generated BF
-/// and runtime work despite the reduced storage estimate.
+/// Keep inline trials conservative: scalar replacement and bounded carry
+/// expansion run after inline sites have been chosen. Crediting their smaller
+/// frames or bodies here can expand more calls, increasing generated BF and
+/// runtime copies despite the cheaper local estimate.
 pub(crate) fn optimize_for_inline_cost(
     program: &ContinuationProgram,
     options: ContinuationOptimizationOptions,
@@ -77,7 +77,8 @@ fn allocate_impl(
             .cloned()
             .collect();
         let (descriptor, body) = if fields {
-            crate::cir::aggregate_fields::scalarize(function.clone(), body)
+            let (descriptor, body) = crate::cir::scaled_offset::optimize(function.clone(), body);
+            crate::cir::aggregate_fields::scalarize(descriptor, body)
         } else {
             (function.clone(), body)
         };
