@@ -3,7 +3,104 @@
 use super::provenance::terminator_kind;
 use super::*;
 
+/// A copied local aggregate that is returned immediately needs no intermediate
+/// storage. Keep the original body slice so lifetime-plan instruction identities
+/// and source paths remain valid. No calls, writes or control edges are crossed.
+fn aggregate_return_source(c: &Continuation) -> Option<(usize, ValueOperand)> {
+    let Terminator::Return {
+        value:
+            Some(ValueOperand::Aggregate {
+                region,
+                offset,
+                cells,
+            }),
+    } = *c.terminator()
+    else {
+        return None;
+    };
+    if !matches!(region, AggregateRegion::Frame(_)) {
+        return None;
+    }
+    let mut end = c.body().len();
+    loop {
+        let instruction = c.body().get(end.checked_sub(1)?)?;
+        match instruction {
+            FrameInstruction::AggregateCopy { src, dst, .. } if src == dst => end -= 1,
+            FrameInstruction::Copy { src, dst } if src == dst => end -= 1,
+            FrameInstruction::AggregateCopy {
+                src,
+                dst,
+                cells: copied,
+            } if *dst == region
+                && offset + cells <= *copied
+                && matches!(src, AggregateRegion::Frame(_) | AggregateRegion::Outbox) =>
+            {
+                return Some((
+                    end - 1,
+                    ValueOperand::Aggregate {
+                        region: *src,
+                        offset,
+                        cells,
+                    },
+                ));
+            }
+            _ => break,
+        }
+    }
+    // Imported flat CIR represents the same copy as individual leaves. Only
+    // distinct regions with matching contiguous offsets can form this snapshot.
+    if cells == 0 || cells > 16 || end < cells {
+        return None;
+    }
+    let mut seen = [false; 16];
+    let mut origin = None;
+    for instruction in &c.body()[end - cells..end] {
+        let FrameInstruction::Copy {
+            src:
+                Address::ArrayElement {
+                    array: src,
+                    index: source,
+                },
+            dst:
+                Address::ArrayElement {
+                    array: dst,
+                    index: destination,
+                },
+        } = *instruction
+        else {
+            return None;
+        };
+        let index = destination.checked_sub(offset)?;
+        if dst != region
+            || src == region
+            || index >= cells
+            || seen[index]
+            || !matches!(src, AggregateRegion::Frame(_) | AggregateRegion::Outbox)
+        {
+            return None;
+        }
+        let source_offset = source.checked_sub(index)?;
+        if origin.is_some_and(|origin| origin != (src, source_offset)) {
+            return None;
+        }
+        origin = Some((src, source_offset));
+        seen[index] = true;
+    }
+    let (region, offset) = origin?;
+    Some((
+        end - cells,
+        ValueOperand::Aggregate {
+            region,
+            offset,
+            cells,
+        },
+    ))
+}
+
 impl<'a> AbiEmitter<'a> {
+    pub(super) fn return_body_length(&self, c: &Continuation) -> usize {
+        aggregate_return_source(c).map_or(c.body().len(), |(end, _)| end)
+    }
     pub(super) fn emit_terminator(
         &mut self,
         continuation: &Continuation,
@@ -62,7 +159,12 @@ impl<'a> AbiEmitter<'a> {
                 arguments,
                 *return_to,
             )?,
-            Terminator::Return { value } => self.emit_return(continuation.function(), *value)?,
+            Terminator::Return { value } => self.emit_return(
+                continuation.function(),
+                aggregate_return_source(continuation)
+                    .map(|(_, value)| value)
+                    .or(*value),
+            )?,
             Terminator::ArrayLoad {
                 array: _,
                 index: _,

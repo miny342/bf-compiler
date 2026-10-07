@@ -665,7 +665,7 @@ impl<'a> AbiEmitter<'a> {
     ) -> Result<(), AbiCodegenError> {
         self.branch_temporary_depth = 0;
         self.emit_all(
-            continuation.body(),
+            &continuation.body()[..self.return_body_length(continuation)],
             continuation.function(),
             Some(continuation.body_sources()),
         )?;

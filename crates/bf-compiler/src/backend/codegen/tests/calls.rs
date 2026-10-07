@@ -1,6 +1,375 @@
 use super::*;
 
 #[test]
+fn immediate_aggregate_returns_preserve_subranges_snapshots_and_reused_frames() {
+    let main = FunctionId::new(0);
+    let wrapper = FunctionId::new(1);
+    let producer = FunctionId::new(2);
+    let region = AggregateRegion::Frame(crate::FrameAggregateId::new(0));
+    let element = |array, index| Address::ArrayElement { array, index };
+    let mut input = Vec::new();
+    for value in 0..=255u8 {
+        input.extend([
+            1,
+            value,
+            value.wrapping_mul(7),
+            value.wrapping_sub(1),
+            value ^ 173,
+        ]);
+    }
+    input.push(0);
+    for shape in 0..5 {
+        let (mut body, offset) = if shape == 0 {
+            (
+                vec![FrameInstruction::AggregateCopy {
+                    src: AggregateRegion::Outbox,
+                    dst: region,
+                    cells: 4,
+                }],
+                1,
+            )
+        } else {
+            (
+                (0..3)
+                    .map(|index| FrameInstruction::Copy {
+                        src: element(AggregateRegion::Outbox, index + 1),
+                        dst: element(region, index + 2),
+                    })
+                    .collect(),
+                2,
+            )
+        };
+        match shape {
+            0 | 1 => body.push(FrameInstruction::Copy {
+                src: element(region, 2),
+                dst: element(region, 2),
+            }),
+            // The source changes after the snapshot: this cannot be forwarded.
+            2 => body.push(FrameInstruction::Set {
+                dst: element(AggregateRegion::Outbox, 2),
+                value: 77,
+            }),
+            // A hole in the returned range must retain its prior zero.
+            3 => {
+                body[1] = FrameInstruction::Copy {
+                    src: element(AggregateRegion::Outbox, 2),
+                    dst: element(region, 2),
+                }
+            }
+            // Same-region copies have sequential, overlapping semantics.
+            _ => body.extend((2..5).map(|index| FrameInstruction::Copy {
+                src: element(region, index - 1),
+                dst: element(region, index),
+            })),
+        }
+        let program = ContinuationProgram::new(
+            main,
+            vec![
+                FunctionDescriptor::new_aggregates(
+                    main,
+                    vec![],
+                    1,
+                    vec![],
+                    3,
+                    ValueType::Void,
+                    id(1),
+                ),
+                FunctionDescriptor::new_aggregates(
+                    wrapper,
+                    vec![],
+                    0,
+                    vec![crate::FrameAggregateDescriptor::new(
+                        crate::FrameAggregateId::new(0),
+                        6,
+                    )],
+                    4,
+                    ValueType::Aggregate { cells: 3 },
+                    id(4),
+                ),
+                FunctionDescriptor::new_aggregates(
+                    producer,
+                    vec![],
+                    0,
+                    vec![crate::FrameAggregateDescriptor::new(
+                        crate::FrameAggregateId::new(0),
+                        6,
+                    )],
+                    0,
+                    ValueType::Aggregate { cells: 4 },
+                    id(6),
+                ),
+            ],
+            vec![
+                Continuation::new(
+                    id(1),
+                    main,
+                    vec![FrameInstruction::Input {
+                        dst: Address::Frame(FrameSlot::new(0)),
+                    }],
+                    Terminator::Branch {
+                        condition: Address::Frame(FrameSlot::new(0)),
+                        then_target: id(2),
+                        else_target: id(7),
+                    },
+                ),
+                Continuation::new(
+                    id(2),
+                    main,
+                    vec![],
+                    Terminator::Call {
+                        callee: wrapper,
+                        arguments: vec![],
+                        return_to: id(3),
+                    },
+                ),
+                Continuation::new(
+                    id(3),
+                    main,
+                    (0..3)
+                        .map(|index| FrameInstruction::Output {
+                            src: element(AggregateRegion::Outbox, index),
+                        })
+                        .collect(),
+                    Terminator::Goto { target: id(1) },
+                ),
+                Continuation::new(
+                    id(4),
+                    wrapper,
+                    vec![],
+                    Terminator::Call {
+                        callee: producer,
+                        arguments: vec![],
+                        return_to: id(5),
+                    },
+                ),
+                Continuation::new(
+                    id(5),
+                    wrapper,
+                    body,
+                    Terminator::Return {
+                        value: Some(ValueOperand::Aggregate {
+                            region,
+                            offset,
+                            cells: 3,
+                        }),
+                    },
+                ),
+                Continuation::new(
+                    id(6),
+                    producer,
+                    (1..5)
+                        .map(|index| FrameInstruction::Input {
+                            dst: element(region, index),
+                        })
+                        .collect(),
+                    Terminator::Return {
+                        value: Some(ValueOperand::Aggregate {
+                            region,
+                            offset: 1,
+                            cells: 4,
+                        }),
+                    },
+                ),
+                Continuation::new(id(7), main, vec![], Terminator::Halt),
+            ],
+        )
+        .unwrap();
+        let mut expected = Vec::new();
+        crate::run_continuations_with_io(
+            &program,
+            &mut &input[..],
+            &mut expected,
+            Default::default(),
+            |_| {},
+        )
+        .unwrap();
+        for options in [
+            AbiCodegenOptions::default(),
+            AbiCodegenOptions {
+                region_emission: false,
+                ..Default::default()
+            },
+            AbiCodegenOptions {
+                nibble_transfer: true,
+                inplace_compare: true,
+                anchor_bank: true,
+                ..Default::default()
+            },
+            AbiCodegenOptions {
+                static_frames: true,
+                ..Default::default()
+            },
+        ] {
+            let bf = lower_continuations_with_codegen_options(&program, options).unwrap();
+            let mut compressed = Vec::new();
+            optimize_bf(&bf)
+                .write_compressed_source(&mut compressed)
+                .unwrap();
+            for disabled in [false, true] {
+                let result = bf_interpreter::run_with_options(
+                    &compressed,
+                    &input,
+                    bf_interpreter::RunOptions {
+                        disable_clear: disabled,
+                        disable_scan: disabled,
+                        disable_transfer: disabled,
+                        disable_countdown: disabled,
+                        disable_remote_transfer: disabled,
+                        disable_compare: disabled,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    result.output, expected,
+                    "shape={shape}, options={options:?}, rle_only={disabled}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn binary_cir_aggregate_return_forwarding_keeps_outbox_subranges() {
+    use crate::{
+        SelfhostCirContinuation as C, SelfhostCirFunction as F, SelfhostCirInstruction as I,
+        SelfhostCirProgram as P, SelfhostCirReturnType as R, SelfhostCirTerminator as T,
+    };
+    let functions = [
+        (0, 1, 1, R::Void),
+        (1, 4, 5, R::Aggregate(3)),
+        (2, 6, 5, R::Aggregate(4)),
+    ]
+    .into_iter()
+    .map(|(id, entry, frame_cells, return_type)| F {
+        id,
+        entry,
+        frame_cells,
+        return_type,
+        parameters: vec![],
+    })
+    .collect();
+    let source = P::new(
+        0,
+        0,
+        functions,
+        vec![
+            C {
+                id: 1,
+                function: 0,
+                instructions: vec![I::Input { destination: 0 }],
+                terminator: T::Branch {
+                    condition: 0,
+                    then_target: 2,
+                    else_target: 7,
+                },
+            },
+            C {
+                id: 2,
+                function: 0,
+                instructions: vec![],
+                terminator: T::Call {
+                    callee: 1,
+                    arguments: vec![],
+                    return_to: 3,
+                },
+            },
+            C {
+                id: 3,
+                function: 0,
+                instructions: (0..3)
+                    .flat_map(|index| {
+                        [
+                            I::CopyOutbox {
+                                destination: 0,
+                                index,
+                            },
+                            I::Output { source: 0 },
+                        ]
+                    })
+                    .collect(),
+                terminator: T::Goto { target: 1 },
+            },
+            C {
+                id: 4,
+                function: 1,
+                instructions: vec![],
+                terminator: T::Call {
+                    callee: 2,
+                    arguments: vec![],
+                    return_to: 5,
+                },
+            },
+            C {
+                id: 5,
+                function: 1,
+                instructions: (0..3)
+                    .map(|index| I::CopyOutbox {
+                        destination: index + 2,
+                        index: index + 1,
+                    })
+                    .collect(),
+                terminator: T::ReturnAggregate {
+                    source: 2,
+                    cells: 3,
+                },
+            },
+            C {
+                id: 6,
+                function: 2,
+                instructions: (1..5).map(|destination| I::Input { destination }).collect(),
+                terminator: T::ReturnAggregate {
+                    source: 1,
+                    cells: 4,
+                },
+            },
+            C {
+                id: 7,
+                function: 0,
+                instructions: vec![],
+                terminator: T::Halt,
+            },
+        ],
+    )
+    .unwrap();
+    let decoded = P::decode(&source.encode().unwrap()).unwrap();
+    let program = crate::lower_selfhost_cir(&decoded).unwrap();
+    let mut input = Vec::new();
+    let mut expected = Vec::new();
+    for value in 0..=255u8 {
+        let returned = [value.wrapping_mul(7), value.wrapping_sub(1), value ^ 173];
+        input.extend([1, value]);
+        input.extend(returned);
+        expected.extend(returned);
+    }
+    input.push(0);
+    for options in [
+        AbiCodegenOptions::default(),
+        AbiCodegenOptions {
+            nibble_transfer: true,
+            inplace_compare: true,
+            anchor_bank: true,
+            ..Default::default()
+        },
+        AbiCodegenOptions {
+            static_frames: true,
+            ..Default::default()
+        },
+    ] {
+        let bf = lower_continuations_with_codegen_options(&program, options).unwrap();
+        let mut compressed = Vec::new();
+        optimize_bf(&bf)
+            .write_compressed_source(&mut compressed)
+            .unwrap();
+        assert_eq!(
+            run(&compressed, &input).unwrap(),
+            expected,
+            "options={options:?}"
+        );
+    }
+}
+
+#[test]
 fn direct_recursion_and_caller_locals_survive_with_sixteen_cell_chunks() {
     let program = recursive_countdown_program();
     {

@@ -96,7 +96,7 @@ impl AbiEmitter<'_> {
             .expect("validated region node");
         self.with_continuation_site(continuation, |emitter| {
             emitter.emit_all(
-                continuation.body(),
+                &continuation.body()[..emitter.return_body_length(continuation)],
                 continuation.function(),
                 Some(continuation.body_sources()),
             )?;
