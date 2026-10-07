@@ -2,6 +2,82 @@
 use super::*;
 
 #[test]
+fn portal_high_zero_test_preserves_every_byte_and_all_live_protocol_fields() {
+    let program = crate::lower_source("void main() {}").unwrap();
+    let config = AbiConfig::default();
+    let layouts = build_layouts(&program, config).unwrap();
+    let static_layout = StaticLayout::new(config, program.globals()).unwrap();
+    let portal = PortalPlan::new(&program).unwrap();
+    let mut emitter = AbiEmitter::new(
+        &program,
+        &layouts,
+        &static_layout,
+        &portal,
+        config,
+        ProfileGranularity::Abi,
+    );
+    for offset in 1..17 {
+        emitter.set(offset, 31 + offset as u8);
+    }
+    emitter.move_to(0);
+    emitter.emit_operation(AnnotatedBfOperation::Input);
+    let body = emitter
+        .capture(|emitter| {
+            emitter.move_to(emitter.current_abi_offset(AbiField::Scratch0)?);
+            emitter.emit_operation(AnnotatedBfOperation::Input);
+            // Explicitly initialize dirty scratch on every request, including after
+            // the previous test left Condition/Branch set on the direct path.
+            for field in [AbiField::Restore, AbiField::Scratch1, AbiField::Scratch2] {
+                emitter.set_abi_field(field, 173)?;
+            }
+            emitter.emit_portal_direct_test()?;
+            for offset in 0..17 {
+                emitter.move_to(offset);
+                emitter.emit_operation(AnnotatedBfOperation::Output);
+            }
+            emitter.move_to(0);
+            emitter.emit_operation(AnnotatedBfOperation::Input);
+            Ok(())
+        })
+        .unwrap();
+    emitter.emit_loop(body);
+    let bf =
+        optimize_annotated_bf(&AnnotatedBfProgram::new(emitter.output, emitter.sites)).to_source();
+    let mut input = Vec::new();
+    let mut expected = Vec::new();
+    for value in 0..=255u8 {
+        input.extend([1, value]);
+        let mut fields: Vec<u8> = (0..17).map(|offset| 31 + offset).collect();
+        fields[0] = 1;
+        fields[7] = u8::from(value == 0);
+        fields[8] = 0;
+        fields[9] = u8::from(value == 0);
+        fields[13] = value;
+        fields[14] = 0;
+        fields[15] = 0;
+        expected.extend(fields);
+    }
+    input.push(0);
+    for disabled in [false, true] {
+        let result = bf_interpreter::run_with_options(
+            bf.as_bytes(),
+            &input,
+            bf_interpreter::RunOptions {
+                disable_clear: disabled,
+                disable_scan: disabled,
+                disable_transfer: disabled,
+                disable_countdown: disabled,
+                disable_remote_transfer: disabled,
+                disable_compare: disabled,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.output, expected, "rle_only={disabled}");
+    }
+}
+
+#[test]
 fn sliding_byte_decomposition_preserves_guards_for_every_byte() {
     let program = crate::lower_source("void main() {}").unwrap();
     let config = AbiConfig::default();

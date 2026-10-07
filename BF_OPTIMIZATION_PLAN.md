@@ -5,6 +5,10 @@
 この文書は、Rust版`bf-compiler`が生成するBrainfuckを高速化し、その結果を後から
 BFC製self-host compilerへ移植するための実装計画を定める。
 
+現在のselfhost候補・試作結果・採否・Rustからの移植待ちは
+[optimize_logs/SELFHOST_CANDIDATES.md](optimize_logs/SELFHOST_CANDIDATES.md)へ集約した。
+今後selfhostの件は集約先を更新し、以下の過去計画とRust側の設計から区別する。
+
 個別のBrainfuck template候補、既存peephole optimizationの測定値、参考アルゴリズムは
 [BF_OPTIMIZATION_NOTES.md](BF_OPTIMIZATION_NOTES.md)に記録する。実時間profilingのartifact、
 計測mode、provenanceの仕様は[BF_PROFILING_DESIGN.md](BF_PROFILING_DESIGN.md)に定める。
@@ -242,7 +246,8 @@ profile結果によっては次をABI versionとして検討する。
 
 小さいglobal aggregateの近接配置だけを実装・検証し、以降のABI変更は保留する。
 以下の番号はfull38調査時の候補番号であり、実装順序や着手予定を表さない。
-候補と再検討条件はこの文書を正とし、一時artifactがなくても設計判断を参照できるようにする。
+以下は当時の候補と再検討条件。現在のselfhost候補は上記集約先を正とし、
+一時artifactがなくても設計判断を参照できるようにする。
 
 候補1は`ee4fa7e`で実装済み。16セル以下のaggregateを大きいaggregateの後、scalar globalsの
 直前へ移し、各群の宣言逆順、portal prefix、anchor位置、総容量を維持した。full38との比較で

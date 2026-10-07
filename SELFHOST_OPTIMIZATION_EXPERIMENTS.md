@@ -5,7 +5,9 @@
 ## 目的と記録方針
 
 生成BFによるselfhostの実行時間を短縮する。
-計画・現状は本書、採否と当該コミットの検証結果は
+今後のselfhost候補・試作結果・採否・移植待ちは
+[optimize_logs/SELFHOST_CANDIDATES.md](optimize_logs/SELFHOST_CANDIDATES.md)へ集約する。
+以下の計画・現状は実験当時の履歴。採用と当該コミットの検証結果は
 `SELFHOST_OPTIMIZATION_EXPERIMENTS_EVALUATION.md`に記す。
 検証済みの採用・不採用案と理由・制約は残す。ログの場所、統計、artifact hash、
 実行ごとの表は各コミットの作業結果だけに置き換え、過去の詳細はGit履歴で参照する。

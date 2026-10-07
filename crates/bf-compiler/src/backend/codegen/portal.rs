@@ -432,15 +432,7 @@ impl<'a> AbiEmitter<'a> {
         &mut self,
         kind: PortalAccessKind,
     ) -> Result<(), AbiCodegenError> {
-        // Preserve the high byte while using Condition as a destructive
-        // zero-test.  Branch is left set exactly when the high byte is zero.
-        self.copy_abi_field(AbiField::Scratch0, AbiField::Condition)?;
-        self.set_abi_field(AbiField::Branch, 1)?;
-        self.clear_branch_on_nonzero(AbiField::Condition)?;
-
-        // Keep a copy of the direct-path decision.  The first guarded body
-        // consumes Branch; the second one needs the inverse decision.
-        self.copy_abi_field(AbiField::Branch, AbiField::Condition)?;
+        self.emit_portal_direct_test()?;
 
         let branch = self.current_abi_offset(AbiField::Branch)?;
         self.move_to(branch);
@@ -468,6 +460,32 @@ impl<'a> AbiEmitter<'a> {
             Ok(())
         })?;
         self.emit_loop(page);
+        self.move_to(0);
+        Ok(())
+    }
+
+    pub(super) fn emit_portal_direct_test(&mut self) -> Result<(), AbiCodegenError> {
+        // Scratch0 holds the high byte, which the page resolver still needs.
+        // Its adjacent Scratch1/2 are private until that resolver splits it.
+        // Use the two possible loop exits instead of saving/restoring high.
+        for field in [AbiField::Condition, AbiField::Restore, AbiField::Branch] {
+            self.clear_abi_field(field)?;
+        }
+        let source = self.current_abi_offset(AbiField::Scratch0)?;
+        let flag = self.current_abi_offset(AbiField::Scratch1)?;
+        let zero = self.current_abi_offset(AbiField::Scratch2)?;
+        self.emit_preserving_zero_test(source, flag, zero);
+        self.move_to(flag);
+        let direct = self.capture(|emitter| {
+            emitter.adjust(255);
+            // Keep the decision across the first guarded body, which consumes
+            // Branch. The second guarded body observes its inverse.
+            emitter.add_abi_field(AbiField::Branch, 1)?;
+            emitter.add_abi_field(AbiField::Condition, 1)?;
+            emitter.move_to(flag);
+            Ok(())
+        })?;
+        self.emit_loop(direct);
         self.move_to(0);
         Ok(())
     }
