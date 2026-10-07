@@ -523,7 +523,8 @@ fn request_transport_preserves_every_byte_and_profile_structure() {
                 if disabled {
                     0
                 } else {
-                    256 * if nibble_transfer { 10 } else { 7 }
+                    // Four nibble fields use two loops each; three unary fields use one.
+                    256 * if nibble_transfer { 11 } else { 7 }
                 }
             );
             assert_eq!(run.stats.optimization.remote_transfer_fallbacks, 0);
@@ -539,6 +540,160 @@ fn request_transport_preserves_every_byte_and_profile_structure() {
                 json.contains(key),
                 nibble_transfer || key.ends_with("unary")
             );
+        }
+    }
+}
+
+#[test]
+fn frame_retained_portal_pcs_cover_all_selectors_and_mixed_frame_portals() {
+    use crate::{FrameAggregateDescriptor, FrameAggregateId};
+    use FrameInstruction as I;
+    let main = FunctionId::new(0);
+    let slot = |n| Address::Frame(FrameSlot::new(n));
+    let local = AggregateRegion::Frame(FrameAggregateId::new(0));
+    let fixture = |count: usize| {
+        let globals = (0..count)
+            .map(|i| crate::GlobalDescriptor::new(GlobalId::new(i), ValueType::Array(1)))
+            .collect();
+        let mut start = vec![
+            I::Set {
+                dst: slot(2),
+                value: 173,
+            },
+            I::Set {
+                dst: Address::ArrayElement {
+                    array: local,
+                    index: 0,
+                },
+                value: 113,
+            },
+        ];
+        for i in 0..count {
+            start.push(I::Set {
+                dst: Address::ArrayElement {
+                    array: AggregateRegion::Global(GlobalId::new(i)),
+                    index: 0,
+                },
+                value: i as u8,
+            });
+        }
+        let mut nodes = vec![Continuation::new(
+            id(1),
+            main,
+            start,
+            Terminator::Goto { target: id(2) },
+        )];
+        for i in 0..count {
+            let load = id((2 + 2 * i) as u16);
+            let resume = id((3 + 2 * i) as u16);
+            nodes.push(Continuation::new(
+                load,
+                main,
+                vec![],
+                Terminator::ArrayLoad {
+                    array: AggregateRegion::Global(GlobalId::new(i)),
+                    index: slot(0),
+                    destination: slot(1),
+                    return_to: resume,
+                },
+            ));
+            nodes.push(Continuation::new(
+                resume,
+                main,
+                vec![I::Output { src: slot(1) }, I::Output { src: slot(2) }],
+                Terminator::Goto {
+                    target: id((4 + 2 * i) as u16),
+                },
+            ));
+        }
+        nodes.push(Continuation::new(
+            id((2 + 2 * count) as u16),
+            main,
+            vec![],
+            Terminator::ArrayLoad {
+                array: local,
+                index: slot(0),
+                destination: slot(1),
+                return_to: id((3 + 2 * count) as u16),
+            },
+        ));
+        nodes.push(Continuation::new(
+            id((3 + 2 * count) as u16),
+            main,
+            vec![I::Output { src: slot(1) }],
+            Terminator::Halt,
+        ));
+        ContinuationProgram::new_with_globals(
+            main,
+            globals,
+            vec![FunctionDescriptor::new_aggregates(
+                main,
+                vec![],
+                3,
+                vec![FrameAggregateDescriptor::new(FrameAggregateId::new(0), 1)],
+                0,
+                ValueType::Void,
+                id(1),
+            )],
+            nodes,
+        )
+        .unwrap()
+    };
+    let program = fixture(256);
+    let plan = PortalPlan::with_frame_returns(&program, true).unwrap();
+    assert!(plan.frame_returns);
+    assert_eq!(plan.return_globals.len(), 256);
+    assert_eq!(plan.routers.last().unwrap().return_selector, Some(255));
+    let ids: Vec<_> = plan
+        .accessors
+        .iter()
+        .map(|a| a.id)
+        .chain(plan.routers.iter().map(|r| r.id))
+        .chain(plan.ordered_sites.iter().map(|s| s.resume))
+        .collect();
+    assert_eq!(ids.iter().collect::<HashSet<_>>().len(), ids.len());
+    let fallback = PortalPlan::with_frame_returns(&fixture(257), true).unwrap();
+    assert!(!fallback.frame_returns);
+    assert!(fallback.return_globals.is_empty());
+    let expected: Vec<_> = (0..=255u8).flat_map(|n| [n, 173]).chain([113]).collect();
+    for options in [
+        AbiCodegenOptions::default(),
+        AbiCodegenOptions {
+            nibble_transfer: true,
+            anchor_bank: true,
+            ..Default::default()
+        },
+    ] {
+        let bf = lower_continuations_with_codegen_options(&program, options).unwrap();
+        let mut compressed = Vec::new();
+        optimize_bf(&bf)
+            .write_compressed_source(&mut compressed)
+            .unwrap();
+        let mut counts = None;
+        for disabled in [false, true] {
+            let actual = bf_interpreter::run_with_options(
+                &compressed,
+                &[],
+                bf_interpreter::RunOptions {
+                    disable_clear: disabled,
+                    disable_scan: disabled,
+                    disable_transfer: disabled,
+                    disable_countdown: disabled,
+                    disable_remote_transfer: disabled,
+                    disable_compare: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(actual.output, expected);
+            let logical = (
+                actual.stats.executed_instructions,
+                actual.stats.executed_rle_instructions,
+            );
+            if let Some(previous) = counts {
+                assert_eq!(logical, previous);
+            }
+            counts = Some(logical);
         }
     }
 }

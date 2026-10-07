@@ -12,7 +12,8 @@ BFC製backendとの物理ABIの一致を表さない。このversion番号もRus
 dispatch、call/return、直接・相互再帰、static global、array portal、aggregate argument/returnに加え、
 enum、struct、任意要素型・多次元固定長配列のlogical aggregate layout、16-bit offset portal、
 任意のactivationからの`abort`を使用する。定数offsetはlayoutから直接解決し、動的offsetは
-local/globalに共通のportal accessorを使用する。version 1の大きなaggregateは256-cell pageごとに
+local/globalともportal accessorを使用する。payload処理は共通だが、通常の動的global用accessorは
+caller内の復帰PCを使うためlocal用と分かれる。version 1の大きなaggregateは256-cell pageごとに
 page-local portalを持つ。sourceのmethod call、macro、文字列、`len`はfrontendで
 消費されるためABI機能を追加しない。
 
@@ -256,9 +257,11 @@ while current_flag != 0:
 Rust backendは既定でunary搬送を生成する。interpreterのRemoteTransferは
 Scanを含む転送loopを一括実行するため、byteの分解と転送loopの本数を減らせる。
 `bfc --enable-nibble-transfer`で従来の方式を選択できる。
-global scalarからframeへのcopy、およびglobal portal要求のoffset/accessor/resumeの
-low byteを二つのnibbleへ分解し、値に依存するstack往復を最大30回に抑える。
-他の要求byteは従来通りunaryのままとする。
+global scalarからframeへのcopy、global portalのload返値、および要求offsetのlow/high byteを
+二つのnibbleへ分解し、各byteの値に依存するstack往復を最大30回に抑える。
+汎用portal経路ではaccessor/resumeのlow PC byteにも適用する。
+store payloadと汎用経路のhigh PC byteはunaryのままとする。
+小さいhigh byteでは分解費用が増えるため、nibbleは引き続き選択式とする。
 RemoteTransferのない実行系でBF命令数を抑えるための選択肢であり、
 実行時間の優劣は値と移動距離に依存する。
 
@@ -383,14 +386,25 @@ route base head = C - Q * S
 0  OFFSET_LOW
 1  OFFSET_HIGH
 2  VALUE
-3  ACCESSOR_LOW
-4  ACCESSOR_HIGH
+3  reserved (generic protocol: ACCESSOR_LOW)
+4  reserved (generic protocol: ACCESSOR_HIGH)
 5  RESUME_LOW
 6  RESUME_HIGH
 7..15 transfer scratch
 ```
 
-callerが要求をここへ構築し、対象globalごとのrouter continuationがroot portalへmoveする。
+callerが要求をここへ構築する。通常の動的frameでは、対象globalとload/store種別ごとのrouterが
+OFFSET_LOW/HIGHとVALUEの3 byteだけをroot portalへmoveする。RESUME_LOW/HIGHはcaller内に残す。
+routerはglobal側で既知の共有accessor PCとglobal選択番号を設定する。
+共有accessorはpayload処理後、その選択番号から局所countdownでglobal固有の復帰処理を選ぶ。
+復帰処理がcallerへ戻って保持したresume PCをNEXT_PCへ移し、site固有のdelivery/advanceを再開する。
+全体dispatcherへの追加訪問やglobalごとのpayload resolver複製は必要ない。
+選択表のloop gateにはPcLow/Conditionを使い、callerのactivation ReturnPcを保持する。
+
+static frames、対象globalが257個以上、または追加hidden IDが収まらない場合は、
+ACCESSOR/RESUMEの4 PC byteも送る汎用protocolへ戻る。
+route予約量は両方式とも16 cellsである。global側のRETURN_PC_LOWは新方式では0..255の
+global選択番号、汎用方式ではresume PC低byteを表す。frame/local portalのreturn PC解釈は従来通り。
 この領域はoutboxとcontextの間に入るため、outbox位置の計算にも`Q`を含める。
 
 `V = ceil(value_cells / D)`、`O = outbox_chunks`とすると、scalar `FrameSlot(i)`の位置は
@@ -558,10 +572,11 @@ accessorは次を満たさなければならない。
 - storeは選択要素だけを上書きする。
 - source上のindexを保存する必要がある場合、frontendが一時cellへcopyする。
 - helper自身がindex一時値を消費してよい。
-- helperはreturn continuation PCをaccessor側の`PC`へ戻す。
+- 汎用helperはreturn continuation PCをaccessor側の`PC`へ戻す。動的global用helperは
+  前述の局所global選択表でcallerへ戻し、保持したresume PCで再開する。
 - helper終了時のpointerは、array regionに規定されたdispatch位置へ置く。
 
-loadの制御遷移は次とする。
+汎用経路のload制御遷移は次とする。通常の動的globalは前述のPC保持方式を使う。
 
 ```text
 caller continuation at frame:
@@ -1048,8 +1063,9 @@ loop end:               pointer = next dispatch context ACTIVE
 
 call、return、portalでcontextが変わるときは、emitterの相対位置の原点も移す。
 通常のinstructionが一つ終わるごとに`C`や`F`まで移動する必要はなく、追跡した位置から次の操作へ進める。
-portal resumeは`VALUE_PORT`を回収してframe contextへ戻す。globalではanchorとfrontierのscanを
-使い、current-frame localでは既知のcontext間距離を使える。frontier相対の式が必要な場合は
+汎用portal resumeは`VALUE_PORT`を回収してframe contextへ戻す。通常の動的globalは
+共有accessor末尾のglobal選択表が回収・復帰を行い、site resumeは既にcaller contextで始まる。
+globalの復帰にはanchorとfrontierのscanを使い、current-frame localでは既知のcontext間距離を使える。frontier相対の式が必要な場合は
 `C = F - P * S`で変換する。
 
 ## 初期化と終了

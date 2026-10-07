@@ -271,7 +271,17 @@ fn lower_continuations_annotated_with_options(
         }
         Err(error) => return Err(error),
     };
-    let portal = PortalPlan::new(program)?;
+    let portal =
+        PortalPlan::with_frame_returns(program, !options.static_frames).or_else(|error| {
+            if !options.static_frames && matches!(error, AbiCodegenError::ContinuationIdsExhausted)
+            {
+                // Extra load/store routers and scoped accessors must not reject a
+                // program that fits the generic protocol's hidden-ID budget.
+                PortalPlan::with_frame_returns(program, false)
+            } else {
+                Err(error)
+            }
+        })?;
     let fixed = options
         .static_frames
         .then(|| {

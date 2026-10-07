@@ -618,8 +618,12 @@ impl<'a> AbiEmitter<'a> {
             DispatchEntry::PortalAccessor(accessor) => {
                 self.fixed_context = None;
                 self.emit_aggregate_accessor(accessor)?;
-                self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
-                self.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
+                if accessor.frame_return {
+                    self.emit_global_return_selector(accessor.kind)?;
+                } else {
+                    self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
+                    self.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
+                }
                 Ok(())
             }
             DispatchEntry::PortalResume(site) => {

@@ -278,7 +278,11 @@ impl<'a> AbiEmitter<'a> {
                         (emitter.dispatch_encoding.encode(site.resume) >> 8) as u8,
                     ),
                 ] {
-                    emitter.set_location(emitter.route_location(index)?, value);
+                    if !emitter.portal.frame_returns
+                        || matches!(index, ROUTE_RESUME_LOW | ROUTE_RESUME_HIGH)
+                    {
+                        emitter.set_location(emitter.route_location(index)?, value);
+                    }
                 }
 
                 Ok(())
@@ -287,13 +291,13 @@ impl<'a> AbiEmitter<'a> {
         if self.fixed_context.is_some() {
             // The route is already at a known absolute position. Perform its
             // transfer directly instead of redispatching through a dynamic router.
-            self.emit_global_portal_router_inner(GlobalPortalRouter {
-                id: router,
-                global: match site.region {
-                    AggregateRegion::Global(global) => global,
-                    _ => unreachable!("global route"),
-                },
-            })
+            let router = *self
+                .portal
+                .routers
+                .iter()
+                .find(|r| r.id == router)
+                .expect("validated global router");
+            self.emit_global_portal_router_inner(router)
         } else {
             self.set_next_pc(router)
         }
@@ -314,6 +318,24 @@ impl<'a> AbiEmitter<'a> {
         router: GlobalPortalRouter,
     ) -> Result<(), AbiCodegenError> {
         let region = AggregateRegion::Global(router.global);
+        if let Some(selector) = router.return_selector {
+            self.move_global_portal_request_fields(region, false)?;
+            // PC constants stay at the selected static portal. Only a compact
+            // global selector is retained there; the site PC stays in the frame.
+            self.enter_portal(region, self.program.main())?;
+            let accessor = self
+                .portal
+                .accessors
+                .iter()
+                .find(|a| a.kind == router.kind && a.frame_return)
+                .expect("validated global accessor")
+                .id;
+            let accessor = self.dispatch_encoding.encode(accessor);
+            self.set_abi_field(AbiField::NextPcLow, accessor as u8)?;
+            self.set_abi_field(AbiField::NextPcHigh, (accessor >> 8) as u8)?;
+            self.set_abi_field(AbiField::ReturnPcLow, selector)?;
+            return self.set_abi_field(AbiField::Active, 1);
+        }
         self.move_global_portal_request(region)?;
         self.set_location(
             self.portal_field_location(region, AbiField::Active, self.program.main())?,
@@ -322,16 +344,25 @@ impl<'a> AbiEmitter<'a> {
         self.enter_portal(region, self.program.main())
     }
 
-    // Kept separate so the compact transport fixture exercises precisely the
-    // production request path, with controlled bytes independent of PC layout.
+    // The generic transport also supports fixed frames and the controlled
+    // seven-byte fixture. Dynamic global routing uses only its data fields.
     pub(super) fn move_global_portal_request(
         &mut self,
         region: AggregateRegion,
     ) -> Result<(), AbiCodegenError> {
+        self.move_global_portal_request_fields(region, true)
+    }
+
+    fn move_global_portal_request_fields(
+        &mut self,
+        region: AggregateRegion,
+        transport_pc: bool,
+    ) -> Result<(), AbiCodegenError> {
         // A static portal starts zero and its resume path clears every protocol
         // field after each access. Route staging is single-use, so moving the
-        // seven request bytes is both smaller and cheaper than seven restored
-        // cross-stack copies plus sixteen redundant remote clears.
+        // request bytes is cheaper than restored cross-stack copies and remote
+        // clears. Dynamic global routes send only offset halves and payload;
+        // fixed-frame routes also send the four PC bytes.
         for (route, field) in [
             (ROUTE_OFFSET_LOW, AbiField::Index),
             (ROUTE_OFFSET_HIGH, AbiField::Scratch0),
@@ -341,6 +372,9 @@ impl<'a> AbiEmitter<'a> {
             (ROUTE_RESUME_LOW, AbiField::ReturnPcLow),
             (ROUTE_RESUME_HIGH, AbiField::ReturnPcHigh),
         ] {
+            if !transport_pc && route >= ROUTE_ACCESSOR_LOW {
+                continue;
+            }
             self.with_profile_site(
                 "abi",
                 format!(
@@ -360,15 +394,18 @@ impl<'a> AbiEmitter<'a> {
                     let source = emitter.route_location(route)?;
                     let destination =
                         emitter.portal_field_location(region, field, emitter.program.main())?;
-                    // Each nibble transport duplicates the long navigation template.
-                    // Restrict it to dynamic low bytes, where the bounded crossings
-                    // repay that source-size cost; high bytes and payload values use
-                    // the compact unary move.
+                    // Bound both offset bytes: large arenas can make the high
+                    // byte expensive too. Generic routes also bound low PC bytes;
+                    // retained-PC routes never transport those fields. Payload
+                    // and generic high PC bytes keep compact unary transport.
                     let use_nibbles = emitter.nibble_transfer
                         && emitter.fixed_context.is_none()
                         && matches!(
                             route,
-                            ROUTE_OFFSET_LOW | ROUTE_ACCESSOR_LOW | ROUTE_RESUME_LOW
+                            ROUTE_OFFSET_LOW
+                                | ROUTE_OFFSET_HIGH
+                                | ROUTE_ACCESSOR_LOW
+                                | ROUTE_RESUME_LOW
                         );
                     if use_nibbles {
                         let Location::Relative(source) = source else {
@@ -392,6 +429,98 @@ impl<'a> AbiEmitter<'a> {
                 },
             )?;
         }
+        Ok(())
+    }
+
+    /// Common static return handler. Site-specific resume PCs remain in the
+    /// suspended caller's route and are consumed only after returning there.
+    fn emit_global_portal_return(
+        &mut self,
+        global: GlobalId,
+        kind: PortalAccessKind,
+    ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site(
+            "abi",
+            "abi.portal.return.common",
+            "common global portal return",
+            |emitter| {
+                let load = kind == PortalAccessKind::Load;
+                for field in AbiField::ALL {
+                    if !load || field != AbiField::Value {
+                        emitter.clear_abi_field(field)?;
+                    }
+                }
+                let base = emitter.static_layout.aggregate_base_head(global)?;
+                if load {
+                    let value = emitter.current_abi_offset(AbiField::Value)?;
+                    emitter.move_global_portal_value_to_context(base, value)?;
+                } else {
+                    emitter.emit_global_to_context(base, emitter.config.portal_chunks());
+                }
+                for (route, field) in [
+                    (ROUTE_RESUME_LOW, AbiField::NextPcLow),
+                    (ROUTE_RESUME_HIGH, AbiField::NextPcHigh),
+                ] {
+                    emitter.move_location(
+                        emitter.route_location(route)?,
+                        Location::Relative(emitter.current_abi_offset(field)?),
+                    );
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Shared accessor returns directly, using a small local selector rather
+    /// than another full dispatcher visit or one payload resolver per global.
+    pub(super) fn emit_global_return_selector(
+        &mut self,
+        kind: PortalAccessKind,
+    ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site(
+            "abi",
+            "abi.portal.return.select",
+            "global return selection",
+            |emitter| {
+                emitter.move_abi_field(AbiField::ReturnPcLow, AbiField::PcLow);
+                emitter.set_abi_field(AbiField::Condition, 1)?;
+                emitter.emit_global_return_level(kind, 0)
+            },
+        )
+    }
+
+    fn emit_global_return_level(
+        &mut self,
+        kind: PortalAccessKind,
+        level: usize,
+    ) -> Result<(), AbiCodegenError> {
+        let pc = self.current_abi_offset(AbiField::PcLow)?;
+        if level + 1 < self.portal.return_globals.len() {
+            self.move_to(pc);
+            let body = self.capture(|emitter| {
+                emitter.adjust(255);
+                emitter.move_to(0);
+                emitter.emit_global_return_level(kind, level + 1)?;
+                // PcLow was consumed before entering the caller's router and
+                // remains zero there; enclosing countdown loops unwind there.
+                emitter.move_to(pc);
+                Ok(())
+            })?;
+            self.emit_loop(body);
+        }
+        let gate = self.current_abi_offset(AbiField::Condition)?;
+        self.move_to(gate);
+        let body = self.capture(|emitter| {
+            emitter.adjust(255);
+            emitter.move_to(0);
+            emitter.emit_global_portal_return(emitter.portal.return_globals[level], kind)?;
+            // Condition is also zero in the suspended caller. No call return
+            // fields are used as loop gates, so activation links stay intact.
+            emitter.move_to(gate);
+            Ok(())
+        })?;
+        self.emit_loop(body);
+        self.move_to(0);
         Ok(())
     }
 
@@ -646,58 +775,60 @@ impl<'a> AbiEmitter<'a> {
         site: PortalSite,
     ) -> Result<(), AbiCodegenError> {
         let is_load = matches!(site.operation, PortalOperation::Load { .. });
-        self.with_profile_site(
-            "abi",
-            "abi.portal.resume.clear",
-            "abi.portal.resume.clear",
-            |emitter| {
-                for field in AbiField::ALL {
-                    if is_load && field == AbiField::Value {
-                        continue;
-                    }
-                    emitter.clear_abi_field(field)?;
-                }
-
-                Ok(())
-            },
-        )?;
         let frame = self.layout(site.function)?.frame.clone();
-        self.with_profile_site(
-            "abi",
-            "abi.portal.resume.transport",
-            "abi.portal.resume.transport",
-            |emitter| {
-                match site.region {
-                    AggregateRegion::Frame(aggregate) => {
-                        let context_delta = -frame.aggregate_base_offset(aggregate)?;
-                        if is_load {
-                            let source = emitter.current_abi_offset(AbiField::Value)?;
-                            let destination = context_delta + frame.abi_offset(AbiField::Value);
-                            emitter.move_value(source, destination);
+        if !(self.portal.frame_returns && site.router.is_some()) {
+            self.with_profile_site(
+                "abi",
+                "abi.portal.resume.clear",
+                "abi.portal.resume.clear",
+                |emitter| {
+                    for field in AbiField::ALL {
+                        if is_load && field == AbiField::Value {
+                            continue;
                         }
-                        emitter.clear_abi_field(AbiField::Value)?;
-                        emitter.migrate_context(context_delta);
+                        emitter.clear_abi_field(field)?;
                     }
-                    AggregateRegion::Global(global) => {
-                        let base = emitter.static_layout.aggregate_base_head(global)?;
-                        if is_load {
-                            emitter.move_global_portal_value_to_context(
-                                base,
-                                frame.abi_offset(AbiField::Value),
-                            )?;
-                        } else {
-                            emitter.clear_abi_field(AbiField::Value)?;
-                            emitter.emit_global_to_context(base, frame.context_chunks());
-                        }
-                    }
-                    AggregateRegion::Outbox => {
-                        unreachable!("outbox cannot use the aggregate portal")
-                    }
-                }
 
-                Ok(())
-            },
-        )?;
+                    Ok(())
+                },
+            )?;
+            self.with_profile_site(
+                "abi",
+                "abi.portal.resume.transport",
+                "abi.portal.resume.transport",
+                |emitter| {
+                    match site.region {
+                        AggregateRegion::Frame(aggregate) => {
+                            let context_delta = -frame.aggregate_base_offset(aggregate)?;
+                            if is_load {
+                                let source = emitter.current_abi_offset(AbiField::Value)?;
+                                let destination = context_delta + frame.abi_offset(AbiField::Value);
+                                emitter.move_value(source, destination);
+                            }
+                            emitter.clear_abi_field(AbiField::Value)?;
+                            emitter.migrate_context(context_delta);
+                        }
+                        AggregateRegion::Global(global) => {
+                            let base = emitter.static_layout.aggregate_base_head(global)?;
+                            if is_load {
+                                emitter.move_global_portal_value_to_context(
+                                    base,
+                                    frame.abi_offset(AbiField::Value),
+                                )?;
+                            } else {
+                                emitter.clear_abi_field(AbiField::Value)?;
+                                emitter.emit_global_to_context(base, frame.context_chunks());
+                            }
+                        }
+                        AggregateRegion::Outbox => {
+                            unreachable!("outbox cannot use the aggregate portal")
+                        }
+                    }
+
+                    Ok(())
+                },
+            )?;
+        }
         self.with_profile_site(
             "abi",
             "abi.portal.resume.deliver",

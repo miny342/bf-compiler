@@ -33,6 +33,8 @@ impl PortalOperation {
 pub(super) struct PortalAccessor {
     pub(super) id: ContinuationId,
     pub(super) kind: PortalAccessKind,
+    /// Return to the caller using its retained site PC, after a local global selector.
+    pub(super) frame_return: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +58,9 @@ pub(super) struct PortalSite {
 pub(super) struct GlobalPortalRouter {
     pub(super) id: ContinuationId,
     pub(super) global: GlobalId,
+    pub(super) kind: PortalAccessKind,
+    /// None uses the generic seven-byte protocol (fixed frames or capacity fallback).
+    pub(super) return_selector: Option<u8>,
 }
 
 #[derive(Debug)]
@@ -64,10 +69,46 @@ pub(super) struct PortalPlan {
     pub(super) sites: HashMap<ContinuationId, PortalSite>,
     pub(super) ordered_sites: Vec<PortalSite>,
     pub(super) routers: Vec<GlobalPortalRouter>,
+    pub(super) return_globals: Vec<GlobalId>,
+    pub(super) frame_returns: bool,
 }
 
 impl PortalPlan {
+    #[cfg(test)]
     pub(super) fn new(program: &ContinuationProgram) -> Result<Self, AbiCodegenError> {
+        Self::with_frame_returns(program, false)
+    }
+
+    pub(super) fn with_frame_returns(
+        program: &ContinuationProgram,
+        frame_returns: bool,
+    ) -> Result<Self, AbiCodegenError> {
+        // One-byte private return selector; preserve the generic protocol for
+        // unusually many globals rather than truncating the selector.
+        let globals = program
+            .continuations()
+            .iter()
+            .filter_map(|c| match c.terminator() {
+                Terminator::ArrayLoad {
+                    array: AggregateRegion::Global(g),
+                    ..
+                }
+                | Terminator::ArrayStore {
+                    array: AggregateRegion::Global(g),
+                    ..
+                }
+                | Terminator::AggregateLoad {
+                    source: AggregateRegion::Global(g),
+                    ..
+                }
+                | Terminator::AggregateStore {
+                    destination: AggregateRegion::Global(g),
+                    ..
+                } => Some(*g),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let frame_returns = frame_returns && globals.len() <= 256;
         let mut used = program
             .continuations()
             .iter()
@@ -79,6 +120,7 @@ impl PortalPlan {
         let mut ordered_sites = Vec::new();
         let mut routers = Vec::new();
         let mut router_ids = HashMap::new();
+        let mut return_globals = Vec::new();
         for continuation in program.continuations() {
             let (region, offset, operation, cells, return_to) = match *continuation.terminator() {
                 Terminator::ArrayLoad {
@@ -139,24 +181,47 @@ impl PortalPlan {
             };
             let router = match region {
                 AggregateRegion::Global(global) => {
-                    Some(if let Some(id) = router_ids.get(&global).copied() {
+                    let key = (global, frame_returns.then_some(operation.kind()));
+                    Some(if let Some(id) = router_ids.get(&key).copied() {
                         id
                     } else {
                         let id = allocate_hidden_id(&mut used)?;
-                        router_ids.insert(global, id);
-                        routers.push(GlobalPortalRouter { id, global });
+                        router_ids.insert(key, id);
+                        let return_selector = if frame_returns {
+                            let index = return_globals
+                                .iter()
+                                .position(|g| *g == global)
+                                .unwrap_or_else(|| {
+                                    return_globals.push(global);
+                                    return_globals.len() - 1
+                                });
+                            Some(index as u8)
+                        } else {
+                            None
+                        };
+                        routers.push(GlobalPortalRouter {
+                            id,
+                            global,
+                            kind: operation.kind(),
+                            return_selector,
+                        });
                         id
                     })
                 }
                 AggregateRegion::Frame(_) | AggregateRegion::Outbox => None,
             };
-            let key = operation.kind();
+            let frame_return = frame_returns && matches!(region, AggregateRegion::Global(_));
+            let key = (operation.kind(), frame_return);
             let accessor = if let Some(accessor) = accessor_ids.get(&key).copied() {
                 accessor
             } else {
                 let id = allocate_hidden_id(&mut used)?;
                 accessor_ids.insert(key, id);
-                accessors.push(PortalAccessor { id, kind: key });
+                accessors.push(PortalAccessor {
+                    id,
+                    kind: key.0,
+                    frame_return,
+                });
                 id
             };
             let resumes = (0..cells)
@@ -193,6 +258,8 @@ impl PortalPlan {
             sites,
             ordered_sites,
             routers,
+            return_globals,
+            frame_returns,
         })
     }
 }

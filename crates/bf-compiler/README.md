@@ -87,6 +87,11 @@ Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimen
 論理RLE op数の削減を目的とし、全最適化ONのinterpreterの実時間では遅くなる場合もある。
 配置とfallbackの詳細は[Rust ABI](../../ABI-rust.md#選択式の直接比較とanchor16)を参照。
 
+通常の動的global portalは、accessor PCをglobal側で設定し、siteの復帰PCをcaller frameに
+保持する。共有accessorの局所選択表でcallerへ戻るため、4 PC byteのcross-stack搬送を省く。
+公開CIR入力にも同じbackendを適用する。固定frame・global数/hidden ID容量のfallbackは汎用経路。
+詳細と評価は[global portalのPC保持](../../optimize_logs/GLOBAL_PORTAL_PC_EVALUATION_20261007.md)を参照。
+
 ## 名前の近い処理
 
 - `cir/structure.rs`: Continuation IRを書き換え、局所的な分岐・ループを構造化する。
