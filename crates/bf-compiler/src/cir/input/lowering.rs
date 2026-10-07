@@ -161,6 +161,7 @@ pub fn lower_selfhost_cir_with_options(
             let (function, fused) = crate::cir::arithmetic_fusion::fuse_function(function, body);
             let fused = crate::cir::constant_transfer::fold_continuations(fused);
             let (function, fused) = crate::cir::computation_graph::optimize(function, fused);
+            let (function, fused) = crate::cir::boundary_copies::optimize(function, fused);
             let (function, fused) = crate::cir::portal_offset::optimize(function, fused);
             let (function, fused) = crate::cir::value_placement::optimize(function, fused);
             continuations.extend(fused);

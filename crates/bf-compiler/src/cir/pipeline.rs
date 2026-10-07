@@ -84,6 +84,11 @@ fn allocate_impl(
         let (descriptor, fused) = crate::cir::arithmetic_fusion::fuse_function(descriptor, body);
         let fused = crate::cir::constant_transfer::fold_continuations(fused);
         let (descriptor, fused) = crate::cir::computation_graph::optimize(descriptor, fused);
+        let (descriptor, fused) = if fields {
+            crate::cir::boundary_copies::optimize(descriptor, fused)
+        } else {
+            (descriptor, fused)
+        };
         let (descriptor, fused) = crate::cir::portal_offset::optimize(descriptor, fused);
         let (descriptor, allocated) = if reuse_slots {
             let (descriptor, fused) = crate::cir::value_placement::optimize(descriptor, fused);

@@ -3,6 +3,7 @@
 pub(crate) mod aggregate_fields;
 pub(crate) mod analysis;
 pub(crate) mod arithmetic_fusion;
+pub(crate) mod boundary_copies;
 pub(crate) mod computation_graph;
 pub(crate) mod constant_transfer;
 pub(crate) mod effects;
