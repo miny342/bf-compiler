@@ -1243,6 +1243,7 @@ version 1実装は少なくとも次を`D = 16`で検証する。
 
 returnはcalleeのcontextを起点としてcaller専用resumeを選び、callerのcontextへ直接配送する。
 scalarはcalleeのABI Value、aggregateはcalleeごとの小さい固定return bufferに一時保持する。
+void／aggregate returnのABI Valueは既知の0なので、搬送せずcaller側で直接clearする。
 globalの返値は保存し、死ぬlocalの返値は消費できる。callee frameのcleanupをその場で行い、
 callerのoutboxは返値幅の部分だけ上書きする。元のcalleeの違う共通resumeには別の配送gateを置く。
 動的callerへの配送ではstack navigationを使い、固定callerへは定数距離で移動する。
@@ -1250,14 +1251,19 @@ callerのoutboxは返値幅の部分だけ上書きする。元のcalleeの違�
 
 nibble有効時、動的callerからのframe引数は二つのdigitで搬送する。liveな引数はdigitから
 callerの元cellも復元し、重複引数は最後の読み取りまで保存する。scalar/aggregate返値も
-既存static scratchで分解して動的callerへ配送し、callee側の返値は消費する。
+cleanup済みのcallee route scratchで分解して動的callerへ配送し、callee側の返値は消費する。
+routeを持たないcalleeでは既存static scratchを使う。
 動的callerにあるglobal引数はglobal側のstatic scratchでcopyし、unitごとのstack往復を避ける。
 固定context内では選択式の直接比較も使い、予約したguardでoperand搬送を省く。
 
 portalのaccessorは関数ごとに複製しない。固定callerは共有accessorからsite別resumeへ戻り、
-そのresumeがportal結果を所属関数の固定contextへ配送する。動的callerのglobal portalには
+そのresumeがportal結果を所属関数の固定contextへ配送する。固定callerのinline requestは
+offsetとpayloadだけを搬送し、既知のaccessor／resume PCはportal側で直接設定する。
+動的callerのglobal portalには
 既存の復帰PC保持経路を残す。混在時はそれぞれの復帰方式の共有accessorを生成する。
 内部storageは通常のglobalとremote-copy scratchの後、anchorの前に入る。
+固定contextの予約はfunction descriptorの逆順とする。compiler入力で長いMoveを減らした
+配置heuristicであり、すべての入力で生成量を最小化する保証はない。
 寿命によるcopy消費と比較guardによる分岐copy省略も、このoptionで無効にしない。
 
 したがって本optionでは「すべてのframeがanchorの右」「すべてのcall/returnが隣接frameとの転送」
@@ -1265,6 +1271,7 @@ portalのaccessorは関数ごとに複製しない。固定callerは共有access
 portalごとのpayload配置は保つ。selfhost backendのuniform frame方式を選ぶoptionではない。
 Anchor16とも併用できる。生成量とRLE/nativeの順位は入力で異なり、既定ONにしない。
 2026-10-08の再実装と評価は[global context実験](optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)。
+生成量の削減比較は[固定contextの生成量評価](optimize_logs/GLOBAL_CONTEXT_SIZE_EVALUATION_20261008.md)。
 
 ## 実装との照合
 

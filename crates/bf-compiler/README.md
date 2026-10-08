@@ -105,6 +105,9 @@ Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimen
 直接配送する。portal accessorは共有し、固定contextへの配送をsite別resumeへ置く。
 nibble有効時は動的callerとの引数・返値搬送も分解し、liveな引数は元cellへ復元する。
 Anchor16は固定領域の後ろに置き、動的stackとの境界だけに適用する。固定contextでも直接比較を使える。
+固定portalの既知PCは搬送せず定数設定し、返値分解はcallee近傍のroute scratchを再利用する。
+void／aggregate返値のABI Valueはcaller側で直接clearする。固定frameの逆順配置も生成量を減らす
+heuristicとして使う。[生成量の比較](../../optimize_logs/GLOBAL_CONTEXT_SIZE_EVALUATION_20261008.md)を参照。
 通常ABIのCIR・inline判断・言語仕様は変更しない。素BFが大きくなり、nibble併用のcompiler入力では
 論理RLEが増える条件もある。[仕様](../../ABI-rust.md#実験的static-frame)と
 [評価](../../optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)を参照。

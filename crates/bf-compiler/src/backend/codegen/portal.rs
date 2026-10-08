@@ -275,7 +275,10 @@ impl<'a> AbiEmitter<'a> {
                         (emitter.dispatch_encoding.encode(site.resume) >> 8) as u8,
                     ),
                 ] {
-                    if !site.frame_return || matches!(index, ROUTE_RESUME_LOW | ROUTE_RESUME_HIGH) {
+                    if emitter.fixed_context.is_none()
+                        && (!site.frame_return
+                            || matches!(index, ROUTE_RESUME_LOW | ROUTE_RESUME_HIGH))
+                    {
                         emitter.set_location(emitter.route_location(index)?, value);
                     }
                 }
@@ -284,15 +287,31 @@ impl<'a> AbiEmitter<'a> {
             },
         )?;
         if self.fixed_context.is_some() {
-            // The route is already at a known absolute position. Perform its
-            // transfer directly instead of redispatching through a dynamic router.
-            let router = *self
-                .portal
-                .routers
-                .iter()
-                .find(|r| r.id == router)
-                .expect("validated global router");
-            self.emit_global_portal_router_inner(router)
+            // This inline route knows both PCs. Transport only runtime data,
+            // then set the constants once at the selected static portal.
+            self.move_global_portal_request_fields(site.region, false)?;
+            self.enter_portal(site.region, site.function)?;
+            for (field, value) in [
+                (
+                    AbiField::NextPcLow,
+                    self.dispatch_encoding.encode(site.accessor) as u8,
+                ),
+                (
+                    AbiField::NextPcHigh,
+                    (self.dispatch_encoding.encode(site.accessor) >> 8) as u8,
+                ),
+                (
+                    AbiField::ReturnPcLow,
+                    self.dispatch_encoding.encode(site.resume) as u8,
+                ),
+                (
+                    AbiField::ReturnPcHigh,
+                    (self.dispatch_encoding.encode(site.resume) >> 8) as u8,
+                ),
+            ] {
+                self.set_abi_field(field, value)?;
+            }
+            self.set_abi_field(AbiField::Active, 1)
         } else {
             self.set_next_pc(router)
         }
@@ -339,8 +358,8 @@ impl<'a> AbiEmitter<'a> {
         self.enter_portal(region, self.program.main())
     }
 
-    // The generic transport also supports fixed frames and the controlled
-    // seven-byte fixture. Dynamic global routing uses only its data fields.
+    // Keep the generic seven-byte protocol for fallback routing and its
+    // controlled fixture. Inline fixed routes only transport the data fields.
     pub(super) fn move_global_portal_request(
         &mut self,
         region: AggregateRegion,
@@ -356,8 +375,8 @@ impl<'a> AbiEmitter<'a> {
         // A static portal starts zero and its resume path clears every protocol
         // field after each access. Route staging is single-use, so moving the
         // request bytes is cheaper than restored cross-stack copies and remote
-        // clears. Dynamic global routes send only offset halves and payload;
-        // fixed-frame routes also send the four PC bytes.
+        // clears. Retained-PC and inline fixed routes send only offset halves
+        // and payload. Generic fallback routes also send the four PC bytes.
         for (route, field) in [
             (ROUTE_OFFSET_LOW, AbiField::Index),
             (ROUTE_OFFSET_HIGH, AbiField::Scratch0),

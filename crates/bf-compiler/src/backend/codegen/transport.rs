@@ -227,10 +227,17 @@ impl<'a> AbiEmitter<'a> {
 
     /// Destructive counterpart for a fixed callee's return payload. Navigation
     /// uses the suspended dynamic caller; the fixed source is left zero.
-    pub(super) fn move_global_to_relative_nibbles(&mut self, source: usize, destination: isize) {
+    pub(super) fn move_global_to_relative_nibbles(
+        &mut self,
+        source: usize,
+        destination: isize,
+        scratch: Option<usize>,
+    ) {
         self.clear(destination);
         self.emit_context_to_global(source, self.config.portal_chunks());
-        self.global_to_relative_nibbles(source, 0, destination, false);
+        let scratch =
+            scratch.unwrap_or_else(|| self.static_layout.remote_copy_scratch_position(0).unwrap());
+        self.global_to_relative_nibbles_at(source, 0, destination, false, scratch);
     }
 
     /// The pointer starts at `base` in static storage and finishes at the
@@ -245,18 +252,33 @@ impl<'a> AbiEmitter<'a> {
         destination: isize,
         restore_source: bool,
     ) {
+        let scratch = self
+            .static_layout
+            .remote_copy_scratch_position(0)
+            .expect("D=16 static layout must reserve remote-copy scratch");
+        self.global_to_relative_nibbles_at(base, source, destination, restore_source, scratch);
+    }
+
+    /// Fixed returns reuse the cleared callee's route scratch next to the
+    /// payload. Other global copies retain the shared static scratch.
+    fn global_to_relative_nibbles_at(
+        &mut self,
+        base: usize,
+        source: isize,
+        destination: isize,
+        restore_source: bool,
+        scratch: usize,
+    ) {
         debug_assert!(self.config.chunk_cells() >= 9);
         let context_chunks = self.config.portal_chunks();
-        let scratch =
-            self.static_layout
-                .remote_copy_scratch_position(0)
-                .expect("D=16 static layout must reserve remote-copy scratch") as isize;
-        let zero = scratch - base as isize;
-        let bits =
-            std::array::from_fn::<_, 8, _>(|index| scratch + 1 + index as isize - base as isize);
+        let zero = scratch as isize - base as isize;
+        let bits = std::array::from_fn::<_, 8, _>(|index| {
+            scratch as isize + 1 + index as isize - base as isize
+        });
 
-        // Scratch is shared by all copies, so establish and restore its zero
-        // contract locally even if public Continuation IR supplied the copy.
+        // Both shared static scratch and the callee's reused route scratch
+        // must establish and restore their zero contract locally, including
+        // copies supplied by public Continuation IR.
         self.clear(zero);
         for bit in bits {
             self.clear(bit);

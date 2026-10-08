@@ -45,7 +45,10 @@ impl StaticFramePlan {
         let config = storage.config();
         let mut contexts = HashMap::new();
         let mut result_bases = HashMap::new();
-        for function in program.functions() {
+        // Reverse descriptor order puts later-defined helpers near the globals.
+        // This reduces emitted movement on the compiler workload; it is a
+        // placement heuristic, not a change to the call or activation order.
+        for function in program.functions().iter().rev() {
             if !selected.contains(&function.id()) {
                 continue;
             }
@@ -387,6 +390,7 @@ impl<'a> AbiEmitter<'a> {
         let caller = continuation.function();
         let frame = self.layout(caller)?.frame.clone();
         let callee_frame = self.layout(resume.callee)?.frame.clone();
+        let scalar_return = self.function(resume.callee)?.return_type() == ValueType::Cell;
         let base = fixed.contexts[&resume.callee];
         self.fixed_context = Some(base);
         // Clear at the callee before leaving: a dynamic caller would otherwise
@@ -411,11 +415,25 @@ impl<'a> AbiEmitter<'a> {
             self.emit_global_to_context(base, frame.context_chunks());
         }
         self.fixed_context = caller_base;
+        let return_scratch = if callee_frame.route_chunks() > 0 {
+            Some(
+                base.checked_add_signed(callee_frame.route_offset(ROUTE_SCRATCH_START)?)
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
         self.with_profile_site(
             "abi",
             "abi.return.deliver",
             "direct fixed frame result delivery",
             |emitter| {
+                // Aggregate/void returns establish Value=0 at the callee.
+                // Set that known value locally instead of emitting transport
+                // and decomposition templates for a byte that is always zero.
+                if !scalar_return {
+                    emitter.clear(frame.abi_offset(AbiField::Value));
+                }
                 let scalar_source = base
                     .checked_add_signed(callee_frame.abi_offset(AbiField::Value))
                     .unwrap();
@@ -424,7 +442,11 @@ impl<'a> AbiEmitter<'a> {
                         && caller_base.is_none()
                         && emitter.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS
                     {
-                        emitter.move_global_to_relative_nibbles(source, destination);
+                        emitter.move_global_to_relative_nibbles(
+                            source,
+                            destination,
+                            return_scratch,
+                        );
                     } else {
                         emitter.move_location(
                             Location::Global(source),
@@ -432,7 +454,9 @@ impl<'a> AbiEmitter<'a> {
                         );
                     }
                 };
-                deliver(scalar_source, frame.abi_offset(AbiField::Value));
+                if scalar_return {
+                    deliver(scalar_source, frame.abi_offset(AbiField::Value));
+                }
                 for index in 0..resume.cells {
                     deliver(
                         fixed.result_bases[&resume.callee] + index,
@@ -1164,6 +1188,102 @@ mod tests {
                     rle.stats.executed_rle_instructions,
                     optimized.stats.executed_rle_instructions
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn global_contexts_non_scalar_returns_clear_value_and_preserve_outbox_tail() {
+        let p = program(
+            "cell g; struct P { cell a; cell b; } void leaf(cell n) { g = n; } P pair(cell n) { P p; p.a = n; p.b = g; return p; } void recurse(cell n) { leaf(n); P p = pair(n); if (n) { recurse(n - 1); } output(p.a); output(p.b); } void main() { recurse(1); }",
+        );
+        let fixed = crate::cir::analysis::call_graph::global_context_functions(&p);
+        let resumes = p
+            .continuations()
+            .iter()
+            .filter_map(|c| match c.terminator() {
+                Terminator::Call {
+                    callee, return_to, ..
+                } if fixed.contains(callee) => Some(*return_to),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let tail = Address::ArrayElement {
+            array: AggregateRegion::Outbox,
+            index: 2,
+        };
+        let functions = p
+            .functions()
+            .iter()
+            .map(|f| {
+                FunctionDescriptor::new_aggregates(
+                    f.id(),
+                    f.parameter_locations().to_vec(),
+                    f.frame_slots(),
+                    f.frame_aggregates().to_vec(),
+                    f.outbox_cells().max(3),
+                    f.return_type(),
+                    f.entry(),
+                )
+            })
+            .collect();
+        let continuations = p
+            .continuations()
+            .iter()
+            .map(|c| {
+                let mut body = Vec::new();
+                if resumes.contains(&c.id()) {
+                    body.extend([
+                        FrameInstruction::Output {
+                            src: Address::AbiValue,
+                        },
+                        FrameInstruction::Output { src: tail },
+                    ]);
+                }
+                body.extend_from_slice(c.body());
+                if matches!(c.terminator(), Terminator::Call { callee, .. } if fixed.contains(callee)) {
+                    body.extend([
+                        FrameInstruction::Set {
+                            dst: Address::AbiValue,
+                            value: 255,
+                        },
+                        FrameInstruction::Set { dst: tail, value: 81 },
+                    ]);
+                }
+                Continuation::new(c.id(), c.function(), body, c.terminator().clone())
+            })
+            .collect();
+        let p = ContinuationProgram::new_with_globals(
+            p.main(),
+            p.globals().to_vec(),
+            functions,
+            continuations,
+        )
+        .unwrap();
+        for regions in [false, true] {
+            for nibble in [false, true] {
+                for anchor_bank in [false, true] {
+                    let bf = lower_continuations_with_profile_and_codegen_options(
+                        &p,
+                        ProfileGranularity::Abi,
+                        AbiCodegenOptions {
+                            static_frames: true,
+                            region_emission: regions,
+                            nibble_transfer: nibble,
+                            anchor_bank,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let artifact = optimize_annotated_bf(&bf).profile_artifact(true);
+                    let result = bf_interpreter::run_with_options(
+                        artifact.source.as_bytes(),
+                        &[],
+                        RunOptions::default(),
+                    )
+                    .unwrap();
+                    assert_eq!(result.output, [0, 81, 0, 81, 0, 81, 0, 81, 0, 0, 1, 1]);
+                }
             }
         }
     }
