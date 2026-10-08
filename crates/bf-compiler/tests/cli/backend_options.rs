@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn backend_flags_are_opt_in_for_source_cir_and_all_output_formats() {
+fn transport_flags_are_opt_in_for_dynamic_source_cir_and_all_output_formats() {
     use SelfhostCirInstruction as I;
     use bf_compiler::{
         SelfhostCirArrayOp, SelfhostCirBinaryOp, SelfhostCirGlobalOp, SelfhostCirStorage,
@@ -119,6 +119,9 @@ fn backend_flags_are_opt_in_for_source_cir_and_all_output_formats() {
             for flags in 0..8 {
                 let nibble = flags & 1 != 0;
                 let mut arguments = input.clone();
+                // These flags specialize dynamic frame/global crossings.
+                // Fixed contexts are covered separately below.
+                arguments.push("--disable-static-frames");
                 if unbounded {
                     arguments.push("--unlimited-tape");
                 }
@@ -246,6 +249,175 @@ fn backend_flags_are_opt_in_for_source_cir_and_all_output_formats() {
             assert_eq!(
                 run.output,
                 [value, value, 255 - value, u8::from(value < 255 - value)]
+            );
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fixed_contexts_are_default_for_source_cir_and_preserve_ir_mode() {
+    let root = test_root().with_file_name(format!("fixed-default-cli-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("main.bfc"),
+        "cell[256] g; cell leaf(cell i) { g[i] = i; return g[i]; } void recurse(cell n) { cell keep = leaf(n); if (n) { recurse(n - 1); } output(keep); } void main() { recurse(input()); }"
+    ).unwrap();
+    use bf_compiler::{SelfhostCirGlobalOp, SelfhostCirInstruction as I};
+    let cir = SelfhostCirProgram::new(
+        1,
+        0,
+        vec![
+            SelfhostCirFunction {
+                id: 0,
+                entry: 1,
+                frame_cells: 1,
+                return_type: SelfhostCirReturnType::Void,
+                parameters: vec![],
+            },
+            SelfhostCirFunction {
+                id: 1,
+                entry: 2,
+                frame_cells: 1,
+                return_type: SelfhostCirReturnType::Void,
+                parameters: vec![],
+            },
+        ],
+        vec![
+            SelfhostCirContinuation {
+                id: 1,
+                function: 0,
+                instructions: vec![
+                    I::Input { destination: 0 },
+                    I::Global {
+                        op: SelfhostCirGlobalOp::Store,
+                        data: 0,
+                        address: 0,
+                    },
+                ],
+                terminator: SelfhostCirTerminator::Call {
+                    callee: 1,
+                    arguments: vec![],
+                    return_to: 3,
+                },
+            },
+            SelfhostCirContinuation {
+                id: 2,
+                function: 1,
+                instructions: vec![
+                    I::Global {
+                        op: SelfhostCirGlobalOp::Copy,
+                        data: 0,
+                        address: 0,
+                    },
+                    I::Output { source: 0 },
+                ],
+                terminator: SelfhostCirTerminator::ReturnVoid,
+            },
+            SelfhostCirContinuation {
+                id: 3,
+                function: 0,
+                instructions: vec![],
+                terminator: SelfhostCirTerminator::Halt,
+            },
+        ],
+    )
+    .unwrap();
+    fs::write(root.join("main.cir"), cir.encode().unwrap()).unwrap();
+    for input in [
+        vec!["--disable-function-inline", "main.bfc"],
+        vec!["--cir-input", "main.cir"],
+    ] {
+        for compressed in [false, true] {
+            let mut default_identity = None;
+            for flag in [
+                None,
+                Some("--enable-static-frames"),
+                Some("--experimental-static-frames"),
+                Some("--disable-static-frames"),
+            ] {
+                let mut args = input.clone();
+                if let Some(flag) = flag {
+                    args.push(flag);
+                }
+                if compressed {
+                    args.push("--compressed-bf");
+                }
+                args.extend(["--profile-map-output", "map.json", "--embed-profile"]);
+                let bf = run_bfc(&root, &args);
+                assert!(bf.status.success(), "{:?}", bf.stderr);
+                let identity = bf_profiling::bf_identity(&bf.stdout);
+                let map = bf_profiling::ProfileMap::from_json(
+                    &fs::read_to_string(root.join("map.json")).unwrap(),
+                )
+                .unwrap();
+                map.validate_for_source(&bf.stdout).unwrap();
+                assert_eq!(
+                    bf_profiling::embedded_profile_map(&bf.stdout).unwrap(),
+                    Some(map.clone())
+                );
+                let initialization = map
+                    .sites
+                    .iter()
+                    .find(|s| s.stable_key == "abi.initialization")
+                    .unwrap();
+                if flag == Some("--disable-static-frames") {
+                    assert_ne!(Some(identity), default_identity);
+                    assert!(!initialization.attributes.contains_key("static_functions"));
+                } else {
+                    assert!(
+                        initialization.attributes["static_functions"]
+                            .parse::<usize>()
+                            .unwrap()
+                            > 0
+                    );
+                    if let Some(reference) = default_identity {
+                        assert_eq!(identity, reference);
+                    }
+                    default_identity = Some(identity);
+                }
+                for n in [0, 1, 3] {
+                    let result = bf_interpreter::run_with_options(
+                        &bf.stdout,
+                        &[n],
+                        bf_interpreter::RunOptions::default(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        result.output,
+                        if input[0] == "--cir-input" {
+                            vec![n]
+                        } else {
+                            (0..=n).collect::<Vec<_>>()
+                        },
+                        "{args:?}"
+                    );
+                }
+            }
+        }
+        let mut args = input.clone();
+        args.push("--run-ir");
+        let ir = run_bfc_with_stdin(&root, &args, &[3]);
+        assert!(ir.status.success(), "{:?}", ir.stderr);
+        assert_eq!(
+            ir.stdout,
+            if input[0] == "--cir-input" {
+                vec![3]
+            } else {
+                vec![0, 1, 2, 3]
+            }
+        );
+        for flag in [
+            "--enable-static-frames",
+            "--disable-static-frames",
+            "--experimental-static-frames",
+        ] {
+            let mut args = args.clone();
+            args.push(flag);
+            let invalid = run_bfc(&root, &args);
+            assert!(!invalid.status.success());
+            assert!(
+                String::from_utf8_lossy(&invalid.stderr)
+                    .contains("Brainfuck code-generation options")
             );
         }
     }

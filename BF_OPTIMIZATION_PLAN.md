@@ -333,6 +333,11 @@ parse/RSS/executeを分ける。実dispatcher訪問はcounters付きfixtureで�
 
 ### 2026-09-25: 非再帰関数の固定frame実験
 
+2026-10-09更新: 下記は初期実験の計画である。現在は閉じた非再帰global関数群の固定context、
+兄弟storage共有、portal request/return共有へ置き換え、native実測を確認して既定ONにした。
+比較用の動的方式は`--disable-static-frames`で選べる。
+[既定化の評価](optimize_logs/GLOBAL_CONTEXT_DEFAULT_EVALUATION_20261009.md)を参照。
+
 `--experimental-static-frames`で、再帰SCC外の関数ごとにcompiler-ownedな固定領域を割り当てる。
 既定は無効。semantic CIR、inline判断、per-function allocation、B1のregion発見は従来どおりとし、
 まず同じCIRに対する配置・Call/Return・portal接続の差を測る。関数間の領域共有はまだ行わない。

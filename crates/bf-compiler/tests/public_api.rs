@@ -58,7 +58,7 @@ fn profile_artifact_preserves_brainfuck_and_separates_abi_phases() {
             "abi.portal.payload.direct",
             "abi.portal.page",
             "abi.portal.resume",
-            "abi.portal.router.global.0",
+            "abi.portal.fixed.return",
         ] {
             assert!(keys.contains(&key), "missing profile site {key}");
         }
@@ -242,7 +242,9 @@ fn source_profile_maps_frame_and_global_backend_work_to_named_source() {
             .map
             .sites
             .iter()
-            .any(|site| { site.stable_key == "abi.navigation.global" && site.source.is_some() })
+            // Fixed contexts move directly; the global copy retains its source
+            // without creating a stack-navigation profile site.
+            .any(|site| { site.stable_key == "abi.frame.copy" && site.source.is_some() })
     );
     assert!(
         artifact
@@ -268,5 +270,26 @@ fn source_profile_maps_frame_and_global_backend_work_to_named_source() {
             .unwrap()
             .unwrap(),
         artifact.map
+    );
+    let dynamic = bf_compiler::lower_continuations_with_profile_and_codegen_options(
+        &program,
+        ProfileGranularity::Source,
+        bf_compiler::AbiCodegenOptions {
+            static_frames: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dynamic = bf_compiler::optimize_annotated_bf(&dynamic).profile_artifact(false);
+    dynamic
+        .map
+        .validate_for_source(dynamic.source.as_bytes())
+        .unwrap();
+    assert!(
+        dynamic
+            .map
+            .sites
+            .iter()
+            .any(|site| site.stable_key == "abi.navigation.global" && site.source.is_some())
     );
 }

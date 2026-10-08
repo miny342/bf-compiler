@@ -17,7 +17,9 @@ caller内の復帰PCを使うためlocal用と分かれる。version 1の大き�
 page-local portalを持つ。sourceのmethod call、macro、文字列、`len`はfrontendで
 消費されるためABI機能を追加しない。
 
-以下は既定の動的frame方式を対象にする。`--experimental-static-frames`の例外は末尾で説明する。
+以下では再帰等に使う動的frameの基本構造を説明する。既定ではglobalへアクセスする閉じた
+非再帰関数群を固定global contextで実行する。その配置・call/return・portalの例外は末尾で説明する。
+`--disable-static-frames`（`AbiCodegenOptions::static_frames = false`）で全関数を動的frameへ戻せる。
 version 0の配列規約は互換APIと基本構造の説明として残し、大きなaggregateにはversion 1の式を使う。
 具体的な配置の実装は[frame_layout.rs](crates/bf-compiler/src/backend/frame_layout.rs)、
 [static_layout.rs](crates/bf-compiler/src/backend/static_layout.rs)、
@@ -314,7 +316,7 @@ contextからglobalへは、現在のframe内の最上位の使用済みheadか�
 globalからの復帰では位相の0を探して1へ戻し、その位相のhead列を272刻みで走査してfrontierを求める。
 call/returnが管理する通常の使用済みhead=1/free head=0をそのまま使い、stack側へ新しいheaderは追加しない。
 anchor bank全体とその後のmain frameをテープ容量の検査に含める。
-`--experimental-static-frames`とも併用できる。固定領域をbankの前に予約し、bank全体を動的stackの
+既定の固定global contextとも併用できる。固定領域をbankの前に予約し、bank全体を動的stackの
 直前へ移す。固定context間の移動は定数距離のまま、動的stackとの境界だけAnchor16を使う。
 公開CIRにもAnchor16は適用できる。
 
@@ -407,7 +409,7 @@ routerはglobal側で既知の共有accessor PCとglobal選択番号を設定す
 
 動的callerで対象globalが257個以上、または追加hidden IDが収まらない場合は、
 ACCESSOR/RESUMEの4 PC byteも送る汎用protocolへ戻る。
-experimental固定contextの共有request/returnは末尾で説明する。
+固定contextの共有request/returnは末尾で説明する。
 route予約量は両方式とも16 cellsである。global側のRETURN_PC_LOWは新方式では0..255の
 global選択番号、汎用方式ではresume PC低byteを表す。frame/local portalのreturn PC解釈は従来通り。
 この領域はoutboxとcontextの間に入るため、outbox位置の計算にも`Q`を含める。
@@ -1229,9 +1231,13 @@ version 1実装は少なくとも次を`D = 16`で検証する。
 - 直接・相互再帰中の深いactivationから`Abort`するとcallerへ戻らずtrampolineを終了する。
 - version 0の`cell[N]` programがversion 1 backendでも同じbinary outputを生成する。
 
-## 実験的static frame
+<a id="実験的static-frame"></a>
 
-`--experimental-static-frames`（`AbiCodegenOptions::static_frames`）は既定で無効である。
+## 固定global context
+
+`AbiCodegenOptions::static_frames`は既定で有効である。
+CLIの`--disable-static-frames`で従来の動的frame方式を選び、`--enable-static-frames`で戻せる。
+旧`--experimental-static-frames`も有効化の互換aliasとして受理する。
 [static_frames.rs](crates/bf-compiler/src/backend/codegen/static_frames.rs)が、globalへアクセスする
 非再帰call graphのframeへ固定baseを割り当て、anchorより左へ予約する。
 直接またはcallee経由でglobalへアクセスし、到達先に再帰call cycleがない関数を選び、
@@ -1280,10 +1286,16 @@ scratchの前に入る。後者をanchorの隣に保ち、動的callerからの�
 選択された関数群が閉じていて再帰がなく、子関数から動的callerへ再入しないことが前提である。
 寿命によるcopy消費と比較guardによる分岐copy省略も、このoptionで無効にしない。
 
-したがって本optionでは「すべてのframeがanchorの右」「すべてのcall/returnが隣接frameとの転送」
-という既定方式の説明は適用しない。sourceの値渡し・再帰・aggregate returnの意味と、
+したがって固定contextには「すべてのframeがanchorの右」「すべてのcall/returnが隣接frameとの転送」
+という動的frame方式の説明は適用しない。sourceの値渡し・再帰・aggregate returnの意味と、
 portalごとのpayload配置は保つ。selfhost backendのuniform frame方式を選ぶoptionではない。
-Anchor16とも併用できる。生成量とRLE/nativeの順位は入力で異なり、既定ONにしない。
+Anchor16とも併用できる。標準テープの固定領域／main frame容量が不足する場合は、
+元のlayoutから全関数を動的frameとして再生成する。hidden ID予算不足の場合はまず汎用portalへ戻し、
+それでも収まらなければ全関数を動的frameとして再生成する。
+動的方式でも収まらない場合は従来の容量エラーを返す。`--unlimited-tape`ではテープ容量によるfallbackを行わない。
+2026-10-09の通常ABIとの反復測定でnative実時間の改善を確認し、既定ONへ変更した。
+nibble・直接比較・Anchor16は引き続き既定OFFで、入力により生成量とRLE/nativeの順位は異なる。
+採用条件と実測は[既定化の評価](optimize_logs/GLOBAL_CONTEXT_DEFAULT_EVALUATION_20261009.md)を参照。
 2026-10-08の再実装と評価は[global context実験](optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)。
 生成量の削減比較は[固定contextの生成量評価](optimize_logs/GLOBAL_CONTEXT_SIZE_EVALUATION_20261008.md)。
 配置・storage共有の追加評価は[固定context配置の評価](optimize_logs/GLOBAL_CONTEXT_LAYOUT_EVALUATION_20261008.md)。

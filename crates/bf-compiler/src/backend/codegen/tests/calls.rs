@@ -196,7 +196,7 @@ fn immediate_aggregate_returns_preserve_subranges_snapshots_and_reused_frames() 
                 ..Default::default()
             },
             AbiCodegenOptions {
-                static_frames: true,
+                static_frames: false,
                 ..Default::default()
             },
         ] {
@@ -352,7 +352,7 @@ fn binary_cir_aggregate_return_forwarding_keeps_outbox_subranges() {
             ..Default::default()
         },
         AbiCodegenOptions {
-            static_frames: true,
+            static_frames: false,
             ..Default::default()
         },
     ] {

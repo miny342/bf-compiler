@@ -75,14 +75,15 @@ BFCソース
 
 ## 選択式のBF生成option
 
-以下は全て既定OFFで、独立に選択できる。通常/圧縮BFとprofile付き出力に共通である。
+nibble・直接比較・Anchor16は既定OFFで、独立に選択できる。固定global contextは既定ONである。
+通常/圧縮BFとprofile付き出力に共通である。
 
 | CLI | `AbiCodegenOptions` | 動作 |
 |---|---|---|
 | `--enable-nibble-transfer` | `nibble_transfer` | global搬送のbyteをnibbleへ分解する。 |
 | `--enable-inplace-compare` | `inplace_compare` | 比較に使うFrameSlotにzero/flagを予約し、ABI Scratchへのoperand搬送を省く。 |
 | `--enable-anchor-bank` | `anchor_bank` | 16 anchorsを使い、stackのglobal往復を272 cells刻みで走査する。 |
-| `--experimental-static-frames` | `static_frames` | globalへアクセスする閉じた非再帰関数群を、関数ごとの固定contextで実行する。 |
+| `--disable-static-frames` / `--enable-static-frames` | `static_frames`（既定true） | globalへアクセスする閉じた非再帰関数群を、関数ごとの固定contextで実行する。無効化すると全関数を動的frameへ戻す。 |
 
 ```sh
 cargo run --release -p bf-compiler -- \
@@ -90,7 +91,7 @@ cargo run --release -p bf-compiler -- \
 ```
 
 公開CIRはflat frameを連続aggregateとして保つため、直接比較は従来方式へ戻す。
-Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimental-static-frames`も併用できる。
+Anchor16とnibbleは`--cir-input`でも有効である。固定global contextも両入力経路で既定有効で、Anchor16と併用できる。
 これらのoptionはCIR出力・inline判断を変更せず、BFを生成する際だけ使う。
 論理RLE op数の削減を目的とし、全最適化ONのinterpreterの実時間では遅くなる場合もある。
 配置とfallbackの詳細は[Rust ABI](../../ABI-rust.md#選択式の直接比較とanchor16)を参照。
@@ -100,7 +101,7 @@ Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimen
 公開CIR入力にも同じbackendを適用する。固定frame・global数/hidden ID容量のfallbackは汎用経路。
 詳細と評価は[global portalのPC保持](../../optimize_logs/GLOBAL_PORTAL_PC_EVALUATION_20261007.md)を参照。
 
-`--experimental-static-frames`は既存フラグを再利用した実験経路で、到達先に再帰があるcallerは
+固定global contextは到達先に再帰があるcallerを
 動的stackに残す。固定context間のcall/returnは定数距離で移動し、calleeの返値をcaller専用resumeで
 直接配送する。portal accessorは共有し、関数・global・load/store種別ごとの共有returnが
 固定contextのABI Valueまで配送する。site別resumeは局所配送だけを行う。同じ組のleaf requestが
@@ -114,8 +115,11 @@ local領域のcleanupはreturn側へまとめ、小さいglobalと共通scratch�
 [生成量の比較](../../optimize_logs/GLOBAL_CONTEXT_SIZE_EVALUATION_20261008.md)と
 [配置・共有の評価](../../optimize_logs/GLOBAL_CONTEXT_LAYOUT_EVALUATION_20261008.md)、
 [portal共有の評価](../../optimize_logs/GLOBAL_CONTEXT_SHARED_PORTAL_EVALUATION_20261008.md)を参照。
-通常ABIのCIR・inline判断・言語仕様は変更しない。素BFが大きくなり、nibble併用のcompiler入力では
-論理RLEが増える条件もある。[仕様](../../ABI-rust.md#実験的static-frame)と
+標準テープやhidden ID容量に収まらない場合は、全関数を動的frameとして再生成する。
+旧`--experimental-static-frames`は有効化の互換aliasとして残す。
+CIR・inline判断・言語仕様は変更しない。nibble等の三option OFFのcompiler入力で従来の動的ABI比
+native実行中央値−9.42%、三option ONで−38.81%を確認し、既定ONにした。
+[既定化の評価](../../optimize_logs/GLOBAL_CONTEXT_DEFAULT_EVALUATION_20261009.md)、[仕様](../../ABI-rust.md#固定global-context)と
 [評価](../../optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)を参照。
 
 ## 名前の近い処理
@@ -125,7 +129,7 @@ local領域のcleanupはreturn側へまとめ、小さいglobalと共通scratch�
 - `cir/arithmetic_fusion.rs`: 比較・減算などの演算を融合する。
 - `cir/frame_allocation.rs`: 生存期間に応じてスロットやaggregate領域を再利用する。
 - `backend/frame_layout.rs` / `static_layout.rs`: フレーム／グローバル領域の物理配置を計算する。
-- `backend/codegen/static_frames.rs`: 非再帰関数のフレームを固定配置する実験的バックエンド方式。
+- `backend/codegen/static_frames.rs`: globalへアクセスする閉じた非再帰関数群の固定context配置・call/return。
 
 ## テストと設計資料
 

@@ -1,4 +1,4 @@
-//! Experimental global execution contexts for closed, nonrecursive call graphs.
+//! Fixed global execution contexts for closed, nonrecursive call graphs.
 //! Each selected function has a fixed frame; unrelated call paths share storage.
 //! Caller-specific return gates deliver results directly from that frame;
 //! there is no shared return inbox.
@@ -1432,6 +1432,121 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fixed_context_defaults_fall_back_when_reserved_storage_exceeds_tape() {
+        let main = FunctionId::new(0);
+        let leaf = FunctionId::new(1);
+        let id = |n| ContinuationId::new(n).unwrap();
+        let p = ContinuationProgram::new_with_globals(
+            main,
+            vec![crate::GlobalDescriptor::aggregate(GlobalId::new(0), 16_000)],
+            vec![
+                FunctionDescriptor::new(main, vec![], 1, ValueType::Void, id(1)),
+                FunctionDescriptor::new_aggregates(
+                    leaf,
+                    vec![],
+                    0,
+                    vec![crate::FrameAggregateDescriptor::new(
+                        crate::FrameAggregateId::new(0),
+                        13_000,
+                    )],
+                    0,
+                    ValueType::Void,
+                    id(2),
+                ),
+            ],
+            vec![
+                Continuation::new(
+                    id(1),
+                    main,
+                    vec![
+                        FrameInstruction::Set {
+                            dst: Address::Frame(FrameSlot::new(0)),
+                            value: 42,
+                        },
+                        FrameInstruction::Output {
+                            src: Address::Frame(FrameSlot::new(0)),
+                        },
+                    ],
+                    Terminator::Halt,
+                ),
+                // Public CIR can retain an unused function with a large frame.
+                // Its fixed reservation must not reject a valid main program.
+                Continuation::new(
+                    id(2),
+                    leaf,
+                    vec![FrameInstruction::Output {
+                        src: Address::ArrayElement {
+                            array: AggregateRegion::Global(GlobalId::new(0)),
+                            index: 0,
+                        },
+                    }],
+                    Terminator::Return { value: None },
+                ),
+            ],
+        )
+        .unwrap();
+        let options = AbiCodegenOptions::default();
+        assert!(options.static_frames);
+        assert!(matches!(
+            lower_continuations_annotated_with_plans(
+                &p,
+                AbiConfig::default(),
+                ProfileGranularity::Abi,
+                options
+            ),
+            Err(AbiCodegenError::StaticLayout(
+                StaticLayoutError::StaticAreaTooLarge { .. }
+            )) | Err(AbiCodegenError::Layout(
+                FrameLayoutError::MainFrameDoesNotFit { .. }
+            ))
+        ));
+        let automatic = lower_continuations_with_profile_and_codegen_options(
+            &p,
+            ProfileGranularity::Abi,
+            options,
+        )
+        .unwrap();
+        let dynamic = lower_continuations_with_profile_and_codegen_options(
+            &p,
+            ProfileGranularity::Abi,
+            AbiCodegenOptions {
+                static_frames: false,
+                ..options
+            },
+        )
+        .unwrap();
+        let artifact = optimize_annotated_bf(&automatic).profile_artifact(true);
+        assert_eq!(
+            artifact,
+            optimize_annotated_bf(&dynamic).profile_artifact(true)
+        );
+        let result = bf_interpreter::run_with_options(
+            artifact.source.as_bytes(),
+            &[],
+            RunOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.output, [42]);
+        let unbounded = lower_continuations_with_profile_and_codegen_options(
+            &p,
+            ProfileGranularity::Abi,
+            AbiCodegenOptions {
+                unlimited_tape: true,
+                ..options
+            },
+        )
+        .unwrap();
+        let init = unbounded
+            .profile_artifact(true)
+            .map
+            .sites
+            .into_iter()
+            .find(|s| s.stable_key == "abi.initialization")
+            .unwrap();
+        assert_eq!(init.attributes["static_functions"], "1");
     }
 
     #[test]

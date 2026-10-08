@@ -1489,3 +1489,23 @@ target/release/bf-interpreter --unlimited-tape \
 `tmp/full39-static-frames-profile-annotated.bfc`、全variantの比較は
 `tmp/static-frames/comparison.{md,json}`に保存した。workspace testは356 passed / 3 ignored、
 Clippyは`--workspace --all-targets -- -D warnings`で成功。
+
+
+### 2026-10-09: 固定global contextを既定化
+
+`12ac995`のportal request/return共有を含む固定context経路を既定ONにした。
+閉じた非再帰globalアクセス関数群だけを選び、再帰へ到達するcallerは動的stackに残す。
+従来の動的ABIとのnative全ON交互5組で、compilerのexecute中央値は通常設定1.069→0.969秒
+（−9.42%）、nibble＋直接比較＋Anchor16有効時1.992→1.219秒（−38.81%）。
+arena例は通常−4.19%／三option−51.22%。共有化前の固定contextより遅いことと、
+従来の動的ABIより速いことを区別して採用した。生成量の大幅増加も共有化で抑えている。
+三optionは引き続き既定OFFであり、今回は各option単独の採否を変更していない。
+
+CLI／公開API／source／公開binary CIRの既定を揃え、比較用に`--disable-static-frames`を用意した。
+`--enable-static-frames`で有効化でき、旧experimental名は互換aliasとして残す。
+テープ容量／hidden ID不足時は元layoutから動的方式へ再生成し、既定化で従来の有効programを拒否しない。
+`--run-ir`は既定変更によってBF optionを明示した扱いにせず、従来どおり使える。
+
+444テスト・fmt/clippy・公開CIR48条件・新旧8artifactのbyte一致を確認した。
+selfhost backend自体は変更していない。full stage2/3の実時間は未測定。
+[詳細・再現artifact](optimize_logs/GLOBAL_CONTEXT_DEFAULT_EVALUATION_20261009.md)を参照。

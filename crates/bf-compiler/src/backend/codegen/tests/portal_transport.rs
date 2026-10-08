@@ -657,7 +657,10 @@ fn frame_retained_portal_pcs_cover_all_selectors_and_mixed_frame_portals() {
     assert!(fallback.return_globals.is_empty());
     let expected: Vec<_> = (0..=255u8).flat_map(|n| [n, 173]).chain([113]).collect();
     for options in [
-        AbiCodegenOptions::default(),
+        AbiCodegenOptions {
+            static_frames: false,
+            ..Default::default()
+        },
         AbiCodegenOptions {
             nibble_transfer: true,
             anchor_bank: true,

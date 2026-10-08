@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use bf_compiler::{
-    AbiConfig, AbiField, PROTOCOL_CELLS, StaticLayout, ValueType, compile_source,
-    lower_continuations_with_config, lower_source,
+    AbiCodegenOptions, AbiConfig, AbiField, PROTOCOL_CELLS, StaticLayout, ValueType,
+    compile_source, lower_continuations_with_codegen_options, lower_continuations_with_config,
+    lower_source,
 };
 use bf_interpreter::run;
 
@@ -82,9 +83,17 @@ fn execute_with_global_region_canaries(
     }
     prelude.push_str(&"<".repeat(position));
 
-    let generated = lower_continuations_with_config(&program, config)
-        .expect("canary continuation IR must compile")
-        .to_source();
+    // This raw epilogue probes the dynamic anchor layout explicitly.
+    assert_eq!(config, AbiConfig::default());
+    let generated = lower_continuations_with_codegen_options(
+        &program,
+        AbiCodegenOptions {
+            static_frames: false,
+            ..Default::default()
+        },
+    )
+    .expect("canary continuation IR must compile")
+    .to_source();
 
     // The trampoline exits on main's ACTIVE cell. Move to its context head,
     // then scan the allocation-flag lane leftward to the zero anchor.

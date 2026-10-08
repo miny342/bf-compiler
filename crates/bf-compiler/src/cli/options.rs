@@ -36,7 +36,7 @@ impl Options {
         let mut inplace_compare = false;
         let mut anchor_bank = false;
         let mut region_emission = true;
-        let mut static_frames = false;
+        let mut static_frames = None;
         let mut profile_map_output = None;
         let mut profile_granularity = None;
         let mut embed_profile = false;
@@ -54,8 +54,13 @@ impl Options {
         while let Some(argument) = arguments.next() {
             if argument == "--unlimited-tape" {
                 unlimited_tape = true;
-            } else if argument == "--experimental-static-frames" {
-                static_frames = true;
+            } else if argument == "--enable-static-frames"
+                || argument == "--experimental-static-frames"
+            {
+                // Retain the old spelling as an alias for saved commands.
+                static_frames = Some(true);
+            } else if argument == "--disable-static-frames" {
+                static_frames = Some(false);
             } else if argument == "--enable-nibble-transfer" {
                 nibble_transfer = true;
             } else if argument == "--enable-inplace-compare" {
@@ -123,7 +128,7 @@ impl Options {
         }
         if source_paths.is_empty() && cir_input.is_none() {
             return Err(format!(
-                "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--enable-function-inline|--disable-function-inline] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--experimental-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--experimental-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
+                "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--enable-function-inline|--disable-function-inline] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--enable-static-frames|--disable-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--enable-static-frames|--disable-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
                 executable.to_string_lossy(),
                 executable.to_string_lossy()
             )
@@ -162,7 +167,7 @@ impl Options {
                 || inplace_compare
                 || anchor_bank
                 || !region_emission
-                || static_frames)
+                || static_frames.is_some())
         {
             return Err(
                 "--run-ir cannot be combined with Brainfuck code-generation options".into(),
@@ -211,7 +216,8 @@ impl Options {
         });
 
         let codegen_options = bf_compiler::AbiCodegenOptions {
-            static_frames,
+            static_frames: static_frames
+                .unwrap_or_else(|| bf_compiler::AbiCodegenOptions::default().static_frames),
             unlimited_tape,
             nibble_transfer,
             inplace_compare,

@@ -63,10 +63,11 @@ pub enum ProfileGranularity {
 /// BF backend choices independent of source/CIR lowering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbiCodegenOptions {
-    /// Experimental global contexts for closed nonrecursive call graphs that
+    /// Fixed global contexts for closed nonrecursive call graphs that
     /// access globals. Functions reaching recursion keep dynamic activations.
     /// Unrelated activation paths share storage; callers and descendants never
-    /// overlap. Does not change CIR or inlining decisions.
+    /// overlap. Enabled by default; capacity limits fall back to dynamic
+    /// activations. Does not change CIR or inlining decisions.
     pub static_frames: bool,
     /// Execute bounded soft CFG regions during one dispatcher visit. Enabled
     /// by default; oversized regions retain ordinary dispatcher edges.
@@ -85,14 +86,14 @@ pub struct AbiCodegenOptions {
     /// Aggregate elements (including imported flat CIR) retain scratch staging.
     pub inplace_compare: bool,
     /// Use 16 static anchors and 272-cell stack scans for global crossings.
-    /// Off by default; also supported at experimental fixed/dynamic boundaries.
+    /// Off by default; also supported at fixed/dynamic boundaries.
     pub anchor_bank: bool,
 }
 
 impl Default for AbiCodegenOptions {
     fn default() -> Self {
         Self {
-            static_frames: false,
+            static_frames: true,
             region_emission: true,
             unlimited_tape: false,
             nibble_transfer: false,
@@ -237,6 +238,33 @@ fn lower_continuations_with_options(
 }
 
 fn lower_continuations_annotated_with_options(
+    program: &ContinuationProgram,
+    config: AbiConfig,
+    granularity: ProfileGranularity,
+    options: AbiCodegenOptions,
+) -> Result<AnnotatedBfProgram, AbiCodegenError> {
+    match lower_continuations_annotated_with_plans(program, config, granularity, options) {
+        Err(
+            AbiCodegenError::ContinuationIdsExhausted
+            | AbiCodegenError::Layout(
+                FrameLayoutError::FrameTooLarge { .. }
+                | FrameLayoutError::MainFrameDoesNotFit { .. },
+            )
+            | AbiCodegenError::StaticLayout(StaticLayoutError::StaticAreaTooLarge { .. }),
+        ) if options.static_frames => lower_continuations_annotated_with_plans(
+            program,
+            config,
+            granularity,
+            AbiCodegenOptions {
+                static_frames: false,
+                ..options
+            },
+        ),
+        result => result,
+    }
+}
+
+fn lower_continuations_annotated_with_plans(
     program: &ContinuationProgram,
     config: AbiConfig,
     granularity: ProfileGranularity,

@@ -66,7 +66,8 @@ enumの型identity、method call、macro、文字列、`len`等はfrontendで処
 各activationはparameter、local、temporary、戻り先continuationを保持する。
 通常の動的callはcalleeのactivationを新しく確保し、callerのlocal値をそのframeへ残す。
 直接再帰と相互再帰も同じ規約で扱う。frameの必要量はcompile timeに決まり、call深度が実行時に変わる。
-Rust側の実験的static frame最適化の例外は[ABI-rust.md](ABI-rust.md#実験的static-frame)を参照。
+Rust側はglobalへアクセスする閉じた非再帰関数群を既定で固定contextへ置く。
+動的activationとの接続や容量fallbackは[ABI-rust.md](ABI-rust.md#固定global-context)を参照。
 
 scalar returnはcallerの`VALUE`に結果を届ける。`void` returnはcallerの`VALUE`を0にする。
 aggregate returnはcallerが所有するoutboxへpayloadを届け、resume後にcallerが結果を回収する。

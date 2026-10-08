@@ -62,7 +62,7 @@ fn copy_lifetimes_preserve_branches_loops_calls_portals_and_global_returns() {
                     ..Default::default()
                 },
                 bfc::AbiCodegenOptions {
-                    static_frames: true,
+                    static_frames: false,
                     ..Default::default()
                 },
             ] {

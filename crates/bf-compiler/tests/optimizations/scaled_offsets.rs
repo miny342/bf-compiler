@@ -33,7 +33,7 @@ fn check(program: &ContinuationProgram, input: &[u8], expected: &[u8]) {
             ..Default::default()
         },
         AbiCodegenOptions {
-            static_frames: true,
+            static_frames: false,
             ..Default::default()
         },
     ] {

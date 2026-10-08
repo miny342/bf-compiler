@@ -115,7 +115,7 @@ fn portal_field_offsets_preserve_live_fields_and_frame_or_payload_aliases() {
                         ..Default::default()
                     },
                     AbiCodegenOptions {
-                        static_frames: true,
+                        static_frames: false,
                         ..Default::default()
                     },
                 ] {
@@ -791,7 +791,7 @@ fn portal_last_use_preserves_a_store_value_aliasing_its_byte_index() {
             ..Default::default()
         },
         AbiCodegenOptions {
-            static_frames: true,
+            static_frames: false,
             ..Default::default()
         },
     ] {

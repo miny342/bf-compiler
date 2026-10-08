@@ -189,7 +189,7 @@ impl StaticLayout {
     }
 
     /// Canonical (leftmost) bank head and number of phase anchors. The bank
-    /// follows any storage reserved by experimental static frames.
+    /// follows any storage reserved by fixed global contexts.
     pub(crate) const fn anchor_bank(&self) -> (usize, usize) {
         if self.anchor_group == 1 {
             (self.anchor_head, 1)
