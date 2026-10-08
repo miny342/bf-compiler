@@ -52,6 +52,9 @@ pub(super) struct PortalSite {
     pub(super) return_to: ContinuationId,
     pub(super) next_resume: Option<ContinuationId>,
     pub(super) router: Option<ContinuationId>,
+    /// Dynamic global callers retain their PC in the frame; fixed callers
+    /// use the generic shared accessor and an origin-specific resume gate.
+    pub(super) frame_return: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +85,14 @@ impl PortalPlan {
     pub(super) fn with_frame_returns(
         program: &ContinuationProgram,
         frame_returns: bool,
+    ) -> Result<Self, AbiCodegenError> {
+        Self::with_fixed_contexts(program, frame_returns, &HashSet::new())
+    }
+
+    pub(super) fn with_fixed_contexts(
+        program: &ContinuationProgram,
+        frame_returns: bool,
+        fixed_functions: &HashSet<FunctionId>,
     ) -> Result<Self, AbiCodegenError> {
         // One-byte private return selector; preserve the generic protocol for
         // unusually many globals rather than truncating the selector.
@@ -179,15 +190,18 @@ impl PortalPlan {
                 ),
                 _ => continue,
             };
+            let frame_return = frame_returns
+                && matches!(region, AggregateRegion::Global(_))
+                && !fixed_functions.contains(&continuation.function());
             let router = match region {
                 AggregateRegion::Global(global) => {
-                    let key = (global, frame_returns.then_some(operation.kind()));
+                    let key = (global, frame_return.then_some(operation.kind()));
                     Some(if let Some(id) = router_ids.get(&key).copied() {
                         id
                     } else {
                         let id = allocate_hidden_id(&mut used)?;
                         router_ids.insert(key, id);
-                        let return_selector = if frame_returns {
+                        let return_selector = if frame_return {
                             let index = return_globals
                                 .iter()
                                 .position(|g| *g == global)
@@ -210,7 +224,6 @@ impl PortalPlan {
                 }
                 AggregateRegion::Frame(_) | AggregateRegion::Outbox => None,
             };
-            let frame_return = frame_returns && matches!(region, AggregateRegion::Global(_));
             let key = (operation.kind(), frame_return);
             let accessor = if let Some(accessor) = accessor_ids.get(&key).copied() {
                 accessor
@@ -242,6 +255,7 @@ impl PortalPlan {
                     return_to,
                     next_resume: resumes.get(leaf + 1).copied(),
                     router,
+                    frame_return,
                 };
                 ordered_sites.push(site);
             }

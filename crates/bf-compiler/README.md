@@ -82,6 +82,7 @@ BFCソース
 | `--enable-nibble-transfer` | `nibble_transfer` | global搬送のbyteをnibbleへ分解する。 |
 | `--enable-inplace-compare` | `inplace_compare` | 比較に使うFrameSlotにzero/flagを予約し、ABI Scratchへのoperand搬送を省く。 |
 | `--enable-anchor-bank` | `anchor_bank` | 16 anchorsを使い、stackのglobal往復を272 cells刻みで走査する。 |
+| `--experimental-static-frames` | `static_frames` | globalへアクセスする閉じた非再帰関数群を、関数ごとの固定contextで実行する。 |
 
 ```sh
 cargo run --release -p bf-compiler -- \
@@ -98,6 +99,13 @@ Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimen
 保持する。共有accessorの局所選択表でcallerへ戻るため、4 PC byteのcross-stack搬送を省く。
 公開CIR入力にも同じbackendを適用する。固定frame・global数/hidden ID容量のfallbackは汎用経路。
 詳細と評価は[global portalのPC保持](../../optimize_logs/GLOBAL_PORTAL_PC_EVALUATION_20261007.md)を参照。
+
+`--experimental-static-frames`は既存フラグを再利用した実験経路で、到達先に再帰があるcallerは
+動的stackに残す。固定context間のcall/returnは定数距離で移動し、calleeの返値をcaller専用resumeで
+直接配送する。portal accessorは共有し、固定contextへの配送をsite別resumeへ置く。
+通常ABIのCIR・inline判断・言語仕様は変更しない。素BFが大きくなり、nibble併用のcompiler入力では
+論理RLEが増える条件もある。[仕様](../../ABI-rust.md#実験的static-frame)と
+[評価](../../optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)を参照。
 
 ## 名前の近い処理
 

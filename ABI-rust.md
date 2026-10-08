@@ -1227,18 +1227,34 @@ version 1実装は少なくとも次を`D = 16`で検証する。
 ## 実験的static frame
 
 `--experimental-static-frames`（`AbiCodegenOptions::static_frames`）は既定で無効である。
-[static_frames.rs](crates/bf-compiler/src/backend/codegen/static_frames.rs)が、再帰call cycleに属さない関数の
-frameを関数ごとの固定storageとしてanchorより左へ予約する。再帰関数は動的chunk stackを使い続ける。
+[static_frames.rs](crates/bf-compiler/src/backend/codegen/static_frames.rs)が、globalへアクセスする
+非再帰call graphのframeを関数ごとの固定storageとしてanchorより左へ予約する。
+直接またはcallee経由でglobalへアクセスし、到達先に再帰call cycleがない関数を選び、
+そのcallee群も固定配置する。再帰関数と再帰へ到達するcallerは動的chunk stackを使い続ける。
 
 固定frameも`FrameLayout`のchunk、aggregate、outbox、context配置を使うが、activationの物理baseが
-既知なのでglobalとの移動等に絶対位置を使える。固定frameと動的frameをまたぐreturnには共通の
-static inboxとresumeを使う。この内部storageは通常のglobalとremote-copy scratchの後、anchorの前に入る。
-固定callerから呼ばれた再帰calleeは、通常のframeではportal用でない`INDEX`をreturn経路のflagとして
-使うため、そのactivationの間はこのfieldが非ゼロになり得る。
+既知なのでglobalとの移動等に絶対位置を使える。固定callerと固定calleeの間は既知の距離で
+移動し、共通拠点や動的stackへ戻らない。再帰のない閉じた関数群なので固定callerから動的calleeを
+呼ぶ経路はない。動的callerから固定calleeへ渡すのは引数と復帰PCだけで、追加の動的frameは積まない。
+
+returnはcalleeのcontextを起点としてcaller専用resumeを選び、callerのcontextへ直接配送する。
+scalarはcalleeのABI Value、aggregateはcalleeごとの小さい固定return bufferに一時保持する。
+globalの返値は保存し、死ぬlocalの返値は消費できる。callee frameのcleanupをその場で行い、
+callerのoutboxは返値幅の部分だけ上書きする。元のcalleeの違う共通resumeには別の配送gateを置く。
+動的callerへの配送ではstack navigationを使い、固定callerへは定数距離で移動する。
+以前の共通static inboxと、固定callerから動的calleeへのreturn-route flagは使わない。
+
+portalのaccessorは関数ごとに複製しない。固定callerは共有accessorからsite別resumeへ戻り、
+そのresumeがportal結果を所属関数の固定contextへ配送する。動的callerのglobal portalには
+既存の復帰PC保持経路を残す。混在時はそれぞれの復帰方式の共有accessorを生成する。
+内部storageは通常のglobalとremote-copy scratchの後、anchorの前に入る。
+寿命によるcopy消費と比較guardによる分岐copy省略も、このoptionで無効にしない。
 
 したがって本optionでは「すべてのframeがanchorの右」「すべてのcall/returnが隣接frameとの転送」
 という既定方式の説明は適用しない。sourceの値渡し・再帰・aggregate returnの意味と、
 portalごとのpayload配置は保つ。selfhost backendのuniform frame方式を選ぶoptionではない。
+Anchor16との併用は引き続き未対応。生成量とRLE/nativeの順位は入力で異なり、既定ONにしない。
+2026-10-08の再実装と評価は[global context実験](optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)。
 
 ## 実装との照合
 

@@ -142,7 +142,7 @@ impl<'a> AbiEmitter<'a> {
         instructions: &[FrameInstruction],
         function: FunctionId,
     ) -> Result<Option<TruthCopyLayout>, AbiCodegenError> {
-        if self.fixed.is_some() || !self.inplace_compare {
+        if !self.inplace_compare {
             return Ok(None);
         }
         let Some(
@@ -338,7 +338,7 @@ impl<'a> AbiEmitter<'a> {
                 let src = self.address_location(source_address, function)?;
                 let dst = self.address_location(*dst, function)?;
                 let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
-                if self.fixed.is_none() && self.lifetime.dead(instruction, source_address) {
+                if self.lifetime.dead(instruction, source_address) {
                     self.move_location(src, dst);
                 } else if self.nibble_transfer
                     && self.fixed_context.is_none()
@@ -630,7 +630,7 @@ impl<'a> AbiEmitter<'a> {
             let source = Address::ArrayElement { array: src, index };
             let src = self.array_element_location(src, index, function)?;
             let dst = self.array_element_location(dst, index, function)?;
-            if self.fixed.is_none() && self.lifetime.dead(instruction, source) {
+            if self.lifetime.dead(instruction, source) {
                 self.move_location(src, dst);
             } else {
                 self.copy_locations_with_zeroed_restore(src, dst, restore);

@@ -1,5 +1,6 @@
 //! Differential execution and measurements for the private B0/B1 experiment.
 use super::*;
+use crate::backend::frame_layout::FrameLayout;
 
 fn source_without_inline(source: &str) -> Result<ContinuationProgram, crate::FrontendError> {
     crate::lower_source_with_options(

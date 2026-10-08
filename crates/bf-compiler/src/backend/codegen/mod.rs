@@ -8,8 +8,8 @@ use std::error::Error;
 use std::fmt;
 
 use crate::backend::frame_layout::{
-    AbiConfig, AbiField, FrameLayout, FrameLayoutError, PROTOCOL_CELLS,
-    aggregate_element_physical_offset, aggregate_page_portal_offset,
+    AbiConfig, AbiField, FrameLayoutError, PROTOCOL_CELLS, aggregate_element_physical_offset,
+    aggregate_page_portal_offset,
 };
 use crate::backend::regions::{Region, RegionFlow, RegionNode, RegionPlan};
 use crate::backend::static_layout::{StaticLayout, StaticLayoutError};
@@ -63,7 +63,8 @@ pub enum ProfileGranularity {
 /// BF backend choices independent of source/CIR lowering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbiCodegenOptions {
-    /// Experimental fixed storage for functions outside recursive call SCCs.
+    /// Experimental global contexts for closed nonrecursive call graphs that
+    /// access globals. Functions reaching recursion keep dynamic activations.
     /// Does not change CIR, inlining decisions, or reuse storage between functions.
     pub static_frames: bool,
     /// Execute bounded soft CFG regions during one dispatcher visit. Enabled
@@ -271,10 +272,14 @@ fn lower_continuations_annotated_with_options(
         }
         Err(error) => return Err(error),
     };
+    let fixed_functions = if options.static_frames {
+        crate::cir::analysis::call_graph::global_context_functions(program)
+    } else {
+        HashSet::new()
+    };
     let portal =
-        PortalPlan::with_frame_returns(program, !options.static_frames).or_else(|error| {
-            if !options.static_frames && matches!(error, AbiCodegenError::ContinuationIdsExhausted)
-            {
+        PortalPlan::with_fixed_contexts(program, true, &fixed_functions).or_else(|error| {
+            if matches!(error, AbiCodegenError::ContinuationIdsExhausted) {
                 // Extra load/store routers and scoped accessors must not reject a
                 // program that fits the generic protocol's hidden-ID budget.
                 PortalPlan::with_frame_returns(program, false)
@@ -291,6 +296,7 @@ fn lower_continuations_annotated_with_options(
                 &portal,
                 &mut static_layout,
                 check_capacity,
+                &fixed_functions,
             )
         })
         .transpose()?;

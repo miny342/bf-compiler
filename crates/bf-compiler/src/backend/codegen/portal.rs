@@ -6,9 +6,7 @@ impl<'a> AbiEmitter<'a> {
     fn portal_source_dead(&self, site: PortalSite, address: Address) -> bool {
         // Only ordinary frame scalars: aggregate index aliasing can change a
         // value that the runtime-selected access has not read yet.
-        self.fixed.is_none()
-            && matches!(address, Address::Frame(_))
-            && self.lifetime.terminal_dead(site.origin, address)
+        matches!(address, Address::Frame(_)) && self.lifetime.terminal_dead(site.origin, address)
     }
 
     fn portal_offset_dead(&self, site: PortalSite, address: Address, low: bool) -> bool {
@@ -17,8 +15,7 @@ impl<'a> AbiEmitter<'a> {
         // A dead static frame field can also be consumed for a single-cell
         // global access. Frame portals may alias their own index field, and
         // multi-leaf portals must retain it until the final request.
-        let dead_field = self.fixed.is_none()
-            && matches!(site.region, AggregateRegion::Global(_))
+        let dead_field = matches!(site.region, AggregateRegion::Global(_))
             && site.cells == 1
             && matches!(
                 address,
@@ -278,9 +275,7 @@ impl<'a> AbiEmitter<'a> {
                         (emitter.dispatch_encoding.encode(site.resume) >> 8) as u8,
                     ),
                 ] {
-                    if !emitter.portal.frame_returns
-                        || matches!(index, ROUTE_RESUME_LOW | ROUTE_RESUME_HIGH)
-                    {
+                    if !site.frame_return || matches!(index, ROUTE_RESUME_LOW | ROUTE_RESUME_HIGH) {
                         emitter.set_location(emitter.route_location(index)?, value);
                     }
                 }
@@ -776,7 +771,7 @@ impl<'a> AbiEmitter<'a> {
     ) -> Result<(), AbiCodegenError> {
         let is_load = matches!(site.operation, PortalOperation::Load { .. });
         let frame = self.layout(site.function)?.frame.clone();
-        if !(self.portal.frame_returns && site.router.is_some()) {
+        if !(self.portal.frame_returns && site.frame_return) {
             self.with_profile_site(
                 "abi",
                 "abi.portal.resume.clear",

@@ -194,8 +194,11 @@ impl<'a> AbiEmitter<'a> {
         return_to: ContinuationId,
     ) -> Result<(), AbiCodegenError> {
         self.with_profile_site("abi", "abi.call", "ABI call", |emitter| {
-            if emitter.fixed.is_some() {
-                return emitter.emit_fixed_call(caller, callee, arguments, return_to);
+            if emitter
+                .fixed
+                .is_some_and(|plan| plan.contexts.contains_key(&callee))
+            {
+                return emitter.emit_fixed_call(call, caller, callee, arguments, return_to);
             }
             emitter.emit_call_inner(Some(call), caller, callee, arguments, return_to)
         })

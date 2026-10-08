@@ -1,12 +1,14 @@
-//! Experimental fixed activations for nonrecursive functions. Recursive SCCs
-//! keep the dynamic stack. A static return inbox bridges the two representations.
-//! No function bodies or storage are shared by this pass, and CIR is unchanged.
+//! Experimental global execution contexts for closed, nonrecursive call graphs.
+//! Each selected function owns a fixed frame. Caller-specific return gates
+//! deliver results directly from that frame; there is no shared return inbox.
+//! CIR and the shared portal accessor bodies retain their existing semantics.
 use super::*;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct StaticResume {
     pub id: ContinuationId,
     target: ContinuationId,
+    callee: FunctionId,
     cells: usize,
 }
 
@@ -15,11 +17,10 @@ pub(super) struct StaticFramePlan {
     pub contexts: HashMap<FunctionId, usize>,
     pub resumes: HashMap<ContinuationId, StaticResume>,
     pub extra_resumes: Vec<StaticResume>,
-    return_ids: HashMap<(ContinuationId, usize), ContinuationId>,
-    inbox: FrameLayout,
-    inbox_context: usize,
-    /// Recursive callees entered from a fixed caller need a return-route bit.
-    hub_callees: HashSet<FunctionId>,
+    return_ids: HashMap<(ContinuationId, FunctionId), ContinuationId>,
+    /// Compact, private return payloads. A leaf's CIR outbox may have zero
+    /// cells when aggregate returns were forwarded from its local storage.
+    result_bases: HashMap<FunctionId, usize>,
     static_cells: usize,
     dynamic_functions: usize,
 }
@@ -38,13 +39,14 @@ impl StaticFramePlan {
         portal: &PortalPlan,
         storage: &mut StaticLayout,
         check_capacity: bool,
+        selected: &HashSet<FunctionId>,
     ) -> Result<Self, AbiCodegenError> {
-        let recursive = crate::cir::analysis::call_graph::recursive_functions(program);
         let static_start = storage.anchor_head();
         let config = storage.config();
         let mut contexts = HashMap::new();
+        let mut result_bases = HashMap::new();
         for function in program.functions() {
-            if recursive.contains(&function.id()) {
+            if !selected.contains(&function.id()) {
                 continue;
             }
             let frame = &layouts[&function.id()].frame;
@@ -57,20 +59,11 @@ impl StaticFramePlan {
                 function.id(),
                 bottom + cells - frame.context_chunks() * config.stride(),
             );
+            let result = result_cells(function.return_type());
+            if result > 0 {
+                result_bases.insert(function.id(), storage.reserve_internal_cells(result)?);
+            }
         }
-        let cells = program
-            .functions()
-            .iter()
-            .map(|f| result_cells(f.return_type()))
-            .max()
-            .unwrap_or(0);
-        let inbox = FrameLayout::new(config, 0, cells)?;
-        let size = inbox
-            .frame_chunks()
-            .checked_mul(config.stride())
-            .ok_or(FrameLayoutError::SizeOverflow)?;
-        let bottom = storage.reserve_internal_cells(size)?;
-        let inbox_context = bottom + size - inbox.context_chunks() * config.stride();
         if check_capacity {
             storage.validate_capacity()?;
             if !contexts.contains_key(&program.main()) {
@@ -80,29 +73,24 @@ impl StaticFramePlan {
             }
         }
 
-        // Reuse the original dispatcher entry when it is reached exclusively
-        // by Calls with the same result width. Shared soft/portal/function
-        // entries need a separate gate, but never an extra dispatcher visit.
+        // A resume may receive results from different fixed frames. Preserve
+        // its semantic ID for ordinary edges; allocate origin-specific gates.
         let mut ordinary = program
             .functions()
             .iter()
             .map(|f| f.entry())
             .collect::<HashSet<_>>();
-        let mut widths = HashMap::<ContinuationId, HashSet<usize>>::new();
-        let mut hub_callees = HashSet::new();
+        let mut origins = HashMap::<ContinuationId, HashSet<FunctionId>>::new();
         for c in program.continuations() {
             if let Terminator::Call {
                 callee, return_to, ..
             } = c.terminator()
             {
-                if !contexts.contains_key(&c.function()) && !contexts.contains_key(callee) {
+                if contexts.contains_key(callee) {
+                    origins.entry(*return_to).or_default().insert(*callee);
+                } else {
                     ordinary.insert(*return_to);
-                    continue;
                 }
-                hub_callees.insert(*callee);
-                widths.entry(*return_to).or_default().insert(result_cells(
-                    program.function(*callee).unwrap().return_type(),
-                ));
             } else {
                 ordinary.extend(c.terminator().edges().map(|(id, _)| id));
             }
@@ -125,15 +113,14 @@ impl StaticFramePlan {
             else {
                 continue;
             };
-            if !contexts.contains_key(&c.function()) && !contexts.contains_key(callee) {
+            if !contexts.contains_key(callee) {
                 continue;
             }
-            let cells = result_cells(program.function(*callee).unwrap().return_type());
-            let key = (*return_to, cells);
+            let key = (*return_to, *callee);
             if return_ids.contains_key(&key) {
                 continue;
             }
-            let id = if !ordinary.contains(return_to) && widths[return_to].len() == 1 {
+            let id = if !ordinary.contains(return_to) && origins[return_to].len() == 1 {
                 *return_to
             } else {
                 allocate_hidden_id(&mut used)?
@@ -141,7 +128,8 @@ impl StaticFramePlan {
             let resume = StaticResume {
                 id,
                 target: *return_to,
-                cells,
+                callee: *callee,
+                cells: result_cells(program.function(*callee).unwrap().return_type()),
             };
             if id == *return_to {
                 resumes.insert(id, resume);
@@ -151,15 +139,13 @@ impl StaticFramePlan {
             return_ids.insert(key, id);
         }
         Ok(Self {
+            dynamic_functions: program.functions().len() - contexts.len(),
             contexts,
             resumes,
             extra_resumes,
             return_ids,
-            inbox,
-            inbox_context,
-            hub_callees,
+            result_bases,
             static_cells: storage.anchor_head() - static_start,
-            dynamic_functions: recursive.len(),
         })
     }
 
@@ -181,18 +167,6 @@ impl StaticFramePlan {
             ),
         ])
     }
-
-    fn inbox_field(&self, field: AbiField) -> Location {
-        Location::Global(self.inbox_context + self.inbox.abi_offset(field) as usize)
-    }
-
-    fn inbox_element(&self, index: usize) -> Result<Location, AbiCodegenError> {
-        Ok(Location::Global(
-            self.inbox_context
-                .checked_add_signed(self.inbox.outbox_offset(index)?)
-                .ok_or(FrameLayoutError::SizeOverflow)?,
-        ))
-    }
 }
 
 impl<'a> AbiEmitter<'a> {
@@ -201,13 +175,7 @@ impl<'a> AbiEmitter<'a> {
         check_capacity: bool,
     ) -> Result<(), AbiCodegenError> {
         let fixed = self.fixed.unwrap();
-        self.set_raw(
-            fixed.inbox_context as isize + fixed.inbox.abi_offset(AbiField::Active),
-            1,
-        );
         let Some(&base) = fixed.contexts.get(&self.program.main()) else {
-            // Only initialization uses physical coordinates. Temporarily hide
-            // the plan to use the existing dynamic-root initialization.
             let plan = self.fixed.take();
             let result = self.initialize_main(check_capacity);
             self.fixed = plan;
@@ -227,81 +195,83 @@ impl<'a> AbiEmitter<'a> {
 
     pub(super) fn emit_fixed_call(
         &mut self,
+        call: ContinuationId,
         caller: FunctionId,
         callee: FunctionId,
         arguments: &[ValueOperand],
         return_to: ContinuationId,
     ) -> Result<(), AbiCodegenError> {
         let fixed = self.fixed.unwrap();
-        let callee_base = fixed.contexts.get(&callee).copied();
+        let callee_base = fixed.contexts[&callee];
         let original_context = self.fixed_context;
-        if original_context.is_none() && callee_base.is_none() {
-            return self.emit_call_inner(None, caller, callee, arguments, return_to);
-        }
         let function = self.function(callee)?;
         let entry = function.entry();
-        let return_id = fixed.return_ids[&(return_to, result_cells(function.return_type()))];
+        let return_id = fixed.return_ids[&(return_to, callee)];
         let frame = self.layout(callee)?.frame.clone();
         let mut copies = Vec::new();
+        let mut remaining = HashMap::<Location, usize>::new();
         for (&argument, &parameter) in arguments.iter().zip(function.parameter_locations()) {
-            match parameter {
-                ParameterLocation::Cell(slot) => copies.push((
-                    self.value_operand_element_location(argument, 0, caller)?,
-                    frame.frame_offset(slot),
-                )),
-                ParameterLocation::AggregateElement { aggregate, index } => copies.push((
-                    self.value_operand_element_location(argument, 0, caller)?,
-                    frame.aggregate_element_offset(aggregate, index)?,
-                )),
+            let cells = match parameter {
+                ParameterLocation::Cell(_) | ParameterLocation::AggregateElement { .. } => 1,
                 ParameterLocation::Array(aggregate) | ParameterLocation::Aggregate(aggregate) => {
-                    for index in 0..function.frame_aggregate(aggregate).unwrap().cells() {
-                        copies.push((
-                            self.value_operand_element_location(argument, index, caller)?,
-                            frame.aggregate_element_offset(aggregate, index)?,
-                        ));
+                    function.frame_aggregate(aggregate).unwrap().cells()
+                }
+            };
+            for index in 0..cells {
+                let address = match argument {
+                    ValueOperand::Cell(address) => address,
+                    ValueOperand::Array(array) => Address::ArrayElement { array, index },
+                    ValueOperand::Aggregate {
+                        region: array,
+                        offset,
+                        ..
+                    } => Address::ArrayElement {
+                        array,
+                        index: offset + index,
+                    },
+                };
+                let source = self.address_location(address, caller)?;
+                let offset = match parameter {
+                    ParameterLocation::Cell(slot) => frame.frame_offset(slot),
+                    ParameterLocation::AggregateElement { aggregate, index } => {
+                        frame.aggregate_element_offset(aggregate, index)?
                     }
-                }
+                    ParameterLocation::Array(aggregate)
+                    | ParameterLocation::Aggregate(aggregate) => {
+                        frame.aggregate_element_offset(aggregate, index)?
+                    }
+                };
+                *remaining.entry(source).or_default() += 1;
+                copies.push((address, source, offset));
             }
         }
-        if callee_base.is_none()
-            && let Some(base) = original_context
-        {
-            // A recursive callee is pushed above the live dynamic stack, not
-            // above the fixed caller. Pin source locations before changing origin.
-            for (source, _) in &mut copies {
-                if let Location::Relative(offset) = *source {
-                    *source = Location::Global(
-                        base.checked_add_signed(offset)
-                            .ok_or(FrameLayoutError::SizeOverflow)?,
-                    );
-                }
-            }
-            self.fixed_context = None;
-            self.emit_global_to_context(base, self.config.portal_chunks());
-        }
-        let delta = (frame.frame_chunks() * self.config.stride()) as isize;
-        let destination = |offset| match callee_base {
-            Some(base) => Location::Global(base.checked_add_signed(offset).expect("frame offset")),
-            None => Location::Relative(delta + offset),
+        let destination = |offset| {
+            Location::Global(
+                callee_base
+                    .checked_add_signed(offset)
+                    .expect("frame offset"),
+            )
         };
         let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
         self.clear_location(restore);
         let mut written = HashSet::new();
-        for (source, offset) in copies {
+        for (address, source, offset) in copies {
             let target = destination(offset);
             if !written.insert(target) {
                 self.clear_location(target);
             }
-            self.copy_locations_to_zeroed_destination(source, target, restore);
+            let left = remaining.get_mut(&source).unwrap();
+            *left -= 1;
+            if *left == 0 && self.lifetime.terminal_dead(call, address) {
+                self.move_location_to_zero(source, target);
+            } else {
+                self.copy_locations_to_zeroed_destination(source, target, restore);
+            }
         }
         // Parameters are now complete. Initialize the header at the callee,
         // where every field has a constant relative offset. Doing these stores
         // from a dynamic caller would scan its stack twice for EACH field/head.
-        if let Some(base) = callee_base {
-            self.emit_context_to_global(base, frame.context_chunks());
-        } else {
-            self.migrate_context(delta);
-        }
+        self.emit_context_to_global(callee_base, frame.context_chunks());
         let bottom =
             -(((frame.frame_chunks() - frame.context_chunks()) * self.config.stride()) as isize);
         for chunk in 0..frame.frame_chunks() {
@@ -311,11 +281,6 @@ impl<'a> AbiEmitter<'a> {
             self.clear(frame.abi_offset(field));
         }
         self.set(frame.abi_offset(AbiField::Active), 1);
-        if callee_base.is_none() {
-            // Index is unused by function-local templates. Portal Index lives
-            // in its separate context; it never overwrites this persistent bit.
-            self.set(frame.abi_offset(AbiField::Index), 1);
-        }
         for (field, value) in [
             (
                 AbiField::NextPcLow,
@@ -345,94 +310,39 @@ impl<'a> AbiEmitter<'a> {
         callee: FunctionId,
         value: Option<ValueOperand>,
     ) -> Result<(), AbiCodegenError> {
-        if self.fixed_context.is_some() {
-            return self.emit_inbox_return(callee, value);
-        }
-        if !self.fixed.unwrap().hub_callees.contains(&callee) {
+        if self.fixed_context.is_none() {
             return self.emit_return_inner(callee, value);
         }
-        // Consume the route before migration. Both the inbox Index and the
-        // resumed caller's Branch are zero where the corresponding loops close.
-        // The caller's own Index must survive: it describes that activation's
-        // eventual Return, not this callee's.
-        let route = self.current_abi_offset(AbiField::Index)?;
-        let gate = self.current_abi_offset(AbiField::Branch)?;
-        self.set(gate, 1);
-        self.move_to(route);
-        let body = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.clear(gate);
-            emitter.emit_inbox_return(callee, value)?;
-            emitter.move_to(route);
-            Ok(())
-        })?;
-        self.emit_loop(body);
-        self.move_to(gate);
-        let body = self.capture(|emitter| {
-            emitter.adjust(255);
-            emitter.move_to(0);
-            emitter.emit_return_inner(callee, value)?;
-            emitter.move_to(gate);
-            Ok(())
-        })?;
-        self.emit_loop(body);
-        self.move_to(0);
-        Ok(())
-    }
-
-    fn emit_inbox_return(
-        &mut self,
-        callee: FunctionId,
-        value: Option<ValueOperand>,
-    ) -> Result<(), AbiCodegenError> {
-        let fixed = self.fixed.unwrap();
         let frame = self.layout(callee)?.frame.clone();
         let restore = Location::Relative(frame.abi_offset(AbiField::Restore));
-        let target_value = fixed.inbox_field(AbiField::Value);
         match value {
-            Some(ValueOperand::Cell(address)) => self.copy_locations(
-                self.address_location(address, callee)?,
-                target_value,
-                restore,
-            ),
+            Some(ValueOperand::Cell(address)) => {
+                let src = self.address_location(address, callee)?;
+                let dst = Location::Relative(frame.abi_offset(AbiField::Value));
+                if matches!(src, Location::Relative(_)) {
+                    self.move_location(src, dst);
+                } else {
+                    self.copy_locations(src, dst, restore);
+                }
+            }
             Some(operand) => {
                 self.clear_location(restore);
                 for index in 0..result_cells(self.function(callee)?.return_type()) {
-                    self.copy_locations_with_zeroed_restore(
-                        self.value_operand_element_location(operand, index, callee)?,
-                        fixed.inbox_element(index)?,
-                        restore,
-                    );
+                    let src = self.value_operand_element_location(operand, index, callee)?;
+                    let dst = Location::Global(self.fixed.unwrap().result_bases[&callee] + index);
+                    if matches!(src, Location::Relative(_)) {
+                        self.move_location(src, dst);
+                    } else {
+                        self.copy_locations_with_zeroed_restore(src, dst, restore);
+                    }
                 }
-                self.clear_location(target_value);
+                self.clear_location(Location::Relative(frame.abi_offset(AbiField::Value)));
             }
-            None => self.clear_location(target_value),
+            None => self.clear_location(Location::Relative(frame.abi_offset(AbiField::Value))),
         }
-        for (source, target) in [
-            (AbiField::ReturnPcLow, AbiField::NextPcLow),
-            (AbiField::ReturnPcHigh, AbiField::NextPcHigh),
-        ] {
-            self.move_location(
-                Location::Relative(frame.abi_offset(source)),
-                fixed.inbox_field(target),
-            );
-        }
-        let bottom =
-            -(((frame.frame_chunks() - frame.context_chunks()) * self.config.stride()) as isize);
-        for chunk in 0..frame.frame_chunks() {
-            let head = bottom + (chunk * self.config.stride()) as isize;
-            self.clear(head);
-            for data in 0..self.config.chunk_cells() {
-                self.clear(head + 1 + data as isize);
-            }
-        }
-        if self.fixed_context.is_none() {
-            // The freed head is zero: start the anchor scan at the preceding
-            // dynamic context (or at the anchor when no dynamic frame remains).
-            self.migrate_context(-((frame.frame_chunks() * self.config.stride()) as isize));
-        }
-        self.emit_context_to_global(fixed.inbox_context, frame.context_chunks());
+        // Retain this fixed origin until the caller-specific gate is selected.
+        self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
+        self.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
         Ok(())
     }
 
@@ -444,29 +354,52 @@ impl<'a> AbiEmitter<'a> {
         let continuation = self.program.continuation(resume.target).unwrap();
         let caller = continuation.function();
         let frame = self.layout(caller)?.frame.clone();
-        self.fixed_context = fixed.contexts.get(&caller).copied();
-        // The return inbox is the current physical origin; normalize once to
-        // the suspended caller, then destructively deliver its result.
-        self.emit_global_to_context(fixed.inbox_context, frame.context_chunks());
+        let callee_frame = self.layout(resume.callee)?.frame.clone();
+        let base = fixed.contexts[&resume.callee];
+        self.fixed_context = Some(base);
+        // Clear at the callee before leaving: a dynamic caller would otherwise
+        // scan its stack for every cleared cell. Keep only the outgoing result.
+        let bottom = -(((callee_frame.frame_chunks() - callee_frame.context_chunks())
+            * self.config.stride()) as isize);
+        for chunk in 0..callee_frame.frame_chunks() {
+            let head = bottom + (chunk * self.config.stride()) as isize;
+            self.clear(head);
+            for data in 0..self.config.chunk_cells() {
+                let offset = head + 1 + data as isize;
+                if offset != callee_frame.abi_offset(AbiField::Value) {
+                    self.clear(offset);
+                }
+            }
+        }
+        let caller_base = fixed.contexts.get(&caller).copied();
+        if let Some(target) = caller_base {
+            self.emit_context_to_global(target, frame.context_chunks());
+        } else {
+            self.fixed_context = None;
+            self.emit_global_to_context(base, frame.context_chunks());
+        }
+        self.fixed_context = caller_base;
         self.with_profile_site(
             "abi",
             "abi.return.deliver",
-            "return inbox delivery",
+            "direct fixed frame result delivery",
             |emitter| {
                 emitter.move_location(
-                    fixed.inbox_field(AbiField::Value),
+                    Location::Global(
+                        base.checked_add_signed(callee_frame.abi_offset(AbiField::Value))
+                            .unwrap(),
+                    ),
                     Location::Relative(frame.abi_offset(AbiField::Value)),
                 );
                 for index in 0..resume.cells {
                     emitter.move_location(
-                        fixed.inbox_element(index)?,
+                        Location::Global(fixed.result_bases[&resume.callee] + index),
                         Location::Relative(frame.outbox_offset(index)?),
                     );
                 }
                 Ok(())
             },
         )?;
-        // Execute the semantic resume and its B1 region in this same visit.
         self.emit_function_entry(continuation)
     }
 }
@@ -652,8 +585,9 @@ mod tests {
         let main = FunctionId::new(0);
         let callee = FunctionId::new(1);
         let slot = Address::Frame(FrameSlot::new(0));
-        let p = ContinuationProgram::new(
+        let p = ContinuationProgram::new_with_globals(
             main,
+            vec![crate::GlobalDescriptor::cell(GlobalId::new(0))],
             vec![
                 FunctionDescriptor::new(main, vec![], 1, ValueType::Void, id(1)),
                 FunctionDescriptor::new(callee, vec![], 1, ValueType::Cell, id(256)),
@@ -663,6 +597,10 @@ mod tests {
                     id(1),
                     main,
                     vec![
+                        FrameInstruction::Set {
+                            dst: Address::Global(GlobalId::new(0)),
+                            value: 1,
+                        },
                         FrameInstruction::Input { dst: slot },
                         FrameInstruction::Set {
                             dst: Address::AbiValue,
@@ -725,8 +663,9 @@ mod tests {
             array: AggregateRegion::Outbox,
             index: i,
         };
-        let p = ContinuationProgram::new(
+        let p = ContinuationProgram::new_with_globals(
             main,
+            vec![crate::GlobalDescriptor::cell(GlobalId::new(0))],
             vec![
                 FunctionDescriptor::new_aggregates(
                     main,
@@ -753,6 +692,10 @@ mod tests {
                     id(1),
                     main,
                     vec![
+                        FrameInstruction::Set {
+                            dst: Address::Global(GlobalId::new(0)),
+                            value: 1,
+                        },
                         FrameInstruction::Input { dst: scalar },
                         FrameInstruction::Set {
                             dst: element(0),
@@ -839,6 +782,48 @@ mod tests {
         for regions in [false, true] {
             assert_eq!(check(&p, &[0], regions, true).output, [0, 65, 66]);
             assert_eq!(check(&p, &[1], regions, true).output, [42, 80, 81]);
+        }
+        // Equal result widths still require separate gates when the physical
+        // callee origins differ. The semantic resume and outbox tail are shared.
+        let scalar_long = FunctionDescriptor::new(long, vec![], 1, ValueType::Cell, id(6));
+        let functions = p
+            .functions()
+            .iter()
+            .map(|f| {
+                if f.id() == long {
+                    scalar_long.clone()
+                } else {
+                    f.clone()
+                }
+            })
+            .collect();
+        let nodes = p
+            .continuations()
+            .iter()
+            .map(|c| {
+                if c.id() == id(6) {
+                    Continuation::new(
+                        id(6),
+                        long,
+                        vec![FrameInstruction::Set {
+                            dst: scalar,
+                            value: 7,
+                        }],
+                        Terminator::Return {
+                            value: Some(ValueOperand::Cell(scalar)),
+                        },
+                    )
+                } else {
+                    c.clone()
+                }
+            })
+            .collect();
+        let same_width =
+            ContinuationProgram::new_with_globals(main, p.globals().to_vec(), functions, nodes)
+                .unwrap();
+        for regions in [false, true] {
+            assert_eq!(check(&same_width, &[0], regions, true).output, [7, 80, 81]);
+            assert_eq!(check(&same_width, &[1], regions, true).output, [42, 80, 81]);
         }
     }
 
@@ -991,7 +976,7 @@ mod tests {
     #[test]
     fn static_frames_header_initialization_does_not_scan_per_head() {
         let p = program(
-            "void leaf() { output(65); } void recurse(cell n) { if (n) { leaf(); recurse(n - 1); } } void main() { recurse(3); }",
+            "cell g; void leaf() { g = g + 1; output(65); } void recurse(cell n) { if (n) { leaf(); recurse(n - 1); } } void main() { recurse(3); }",
         );
         let functions = p
             .functions()
@@ -1021,5 +1006,109 @@ mod tests {
             "a larger fixed callee must not add dynamic stack scans for its header"
         );
         assert_eq!(narrow.visits, wide.visits);
+    }
+
+    #[test]
+    fn global_contexts_exclude_callers_of_recursion_and_include_local_descendants() {
+        let p = program(
+            "cell g; cell local(cell x) { return x + 1; } cell leaf(cell x) { g = g + 1; return local(x) + g; } cell recurse(cell n) { if (n) { cell saved = leaf(n); return recurse(n - 1) + saved; } return leaf(0); } cell bridge(cell n) { return recurse(n); } void main() { output(bridge(input())); output(g); }",
+        );
+        let selected = crate::cir::analysis::call_graph::global_context_functions(&p);
+        for f in p.functions() {
+            assert_eq!(
+                selected.contains(&f.id()),
+                matches!(f.name(), Some("leaf" | "local")),
+                "{:?}",
+                f.name(),
+            );
+        }
+        for regions in [false, true] {
+            let baseline = check(&p, &[4], regions, false);
+            let candidate = check(&p, &[4], regions, true);
+            assert_eq!(baseline.visits, candidate.visits);
+        }
+        assert!(
+            crate::cir::analysis::call_graph::global_context_functions(&program(
+                "cell pure(cell x) { return x + 1; } void main() { output(pure(3)); }"
+            ))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn global_contexts_keep_parent_locals_across_nested_calls_and_portals() {
+        let p = program(
+            "cell[256] g; struct P { cell a; cell b; cell c; } P leaf(cell i, cell x) { P p; g[i] = x; p.a = g[i]; p.b = x + 1; p.c = x + 2; return p; } P parent(cell i) { P keep = leaf(i, 255); P next = leaf(i + 1, 1); next.b = next.b + keep.b; next.c = keep.a; return next; } void recurse(cell n) { P saved = parent(n); if (n) { recurse(n - 1); } output(saved.a); output(saved.b); output(saved.c); } void main() { recurse(3); recurse(0); }",
+        );
+        for regions in [false, true] {
+            let baseline = check(&p, &[], regions, false);
+            let candidate = check(&p, &[], regions, true);
+            assert!(
+                candidate.visits <= baseline.visits,
+                "fixed portal routing needs no extra visit"
+            );
+            assert!(
+                candidate.stats.optimization.scan_steps > 0,
+                "dynamic caller remains"
+            );
+        }
+    }
+
+    #[test]
+    fn global_contexts_rle_only_matches_optimized_counters() {
+        let p = program(
+            "cell[256] g; struct P { cell a; cell b; } P read(cell i) { P p; p.a = g[i]; p.b = g[i + 1]; return p; } cell worker(cell n) { g[n] = 255; g[n + 1] = 0; P p = read(n); return p.a + p.b; } cell recursive(cell n) { g[n + 128] = n; cell saved = worker(n); if (n) { return recursive(n - 1) + saved + g[n + 128]; } return saved; } void main() { output(recursive(1)); output(worker(3)); }",
+        );
+        for regions in [false, true] {
+            for nibble in [false, true] {
+                let annotated = lower_continuations_with_profile_and_codegen_options(
+                    &p,
+                    ProfileGranularity::Abi,
+                    AbiCodegenOptions {
+                        static_frames: true,
+                        region_emission: regions,
+                        nibble_transfer: nibble,
+                        inplace_compare: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let artifact = optimize_annotated_bf(&annotated).profile_artifact(true);
+                let optimized = bf_interpreter::run_with_options(
+                    artifact.source.as_bytes(),
+                    &[],
+                    RunOptions {
+                        collect_stats: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let rle = bf_interpreter::run_with_options(
+                    artifact.source.as_bytes(),
+                    &[],
+                    RunOptions {
+                        collect_stats: true,
+                        disable_clear: true,
+                        disable_scan: true,
+                        disable_transfer: true,
+                        disable_countdown: true,
+                        disable_remote_transfer: true,
+                        disable_compare: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(optimized.output, [255, 255]);
+                assert_eq!(rle.output, optimized.output);
+                assert_eq!(
+                    rle.stats.executed_instructions,
+                    optimized.stats.executed_instructions
+                );
+                assert_eq!(
+                    rle.stats.executed_rle_instructions,
+                    optimized.stats.executed_rle_instructions
+                );
+            }
+        }
     }
 }
