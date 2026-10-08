@@ -1,6 +1,7 @@
 //! Experimental global execution contexts for closed, nonrecursive call graphs.
-//! Each selected function owns a fixed frame. Caller-specific return gates
-//! deliver results directly from that frame; there is no shared return inbox.
+//! Each selected function has a fixed frame; unrelated call paths share storage.
+//! Caller-specific return gates deliver results directly from that frame;
+//! there is no shared return inbox.
 //! CIR and the shared portal accessor bodies retain their existing semantics.
 use super::*;
 
@@ -41,31 +42,64 @@ impl StaticFramePlan {
         check_capacity: bool,
         selected: &HashSet<FunctionId>,
     ) -> Result<Self, AbiCodegenError> {
-        let static_start = storage.anchor_head();
         let config = storage.config();
         let mut contexts = HashMap::new();
         let mut result_bases = HashMap::new();
-        // Reverse descriptor order puts later-defined helpers near the globals.
-        // This reduces emitted movement on the compiler workload; it is a
-        // placement heuristic, not a change to the call or activation order.
-        for function in program.functions().iter().rev() {
-            if !selected.contains(&function.id()) {
-                continue;
+        let ranks = crate::cir::analysis::call_graph::callee_ranks(program);
+        let mut functions = program
+            .functions()
+            .iter()
+            .filter(|function| selected.contains(&function.id()))
+            .collect::<Vec<_>>();
+        functions.sort_by_key(|function| ranks[&function.id()]);
+        let mut callees = HashMap::<FunctionId, Vec<FunctionId>>::new();
+        for continuation in program.continuations() {
+            if selected.contains(&continuation.function())
+                && let Some(callee) = continuation.terminator().callee()
+            {
+                debug_assert!(selected.contains(&callee));
+                callees
+                    .entry(continuation.function())
+                    .or_default()
+                    .push(callee);
             }
+        }
+        // The selected graph is closed and acyclic. Put each caller above all
+        // of its descendants; unrelated activation paths can reuse storage.
+        // Include each function's private return payload in its interval.
+        let mut ends = HashMap::<FunctionId, usize>::new();
+        for function in functions {
             let frame = &layouts[&function.id()].frame;
             let cells = frame
                 .frame_chunks()
                 .checked_mul(config.stride())
                 .ok_or(FrameLayoutError::SizeOverflow)?;
-            let bottom = storage.reserve_internal_cells(cells)?;
+            let bottom = callees
+                .get(&function.id())
+                .into_iter()
+                .flatten()
+                .map(|callee| ends[callee])
+                .max()
+                .unwrap_or(0);
+            let result = result_cells(function.return_type());
+            let end = bottom
+                .checked_add(cells)
+                .and_then(|end| end.checked_add(result))
+                .ok_or(FrameLayoutError::SizeOverflow)?;
+            ends.insert(function.id(), end);
             contexts.insert(
                 function.id(),
                 bottom + cells - frame.context_chunks() * config.stride(),
             );
-            let result = result_cells(function.return_type());
             if result > 0 {
-                result_bases.insert(function.id(), storage.reserve_internal_cells(result)?);
+                result_bases.insert(function.id(), bottom + cells);
             }
+        }
+        let static_cells = ends.values().copied().max().unwrap_or(0);
+        let pool_base = storage.reserve_internal_cells(static_cells)?;
+        let displacement = storage.place_internal_before_near_globals(static_cells);
+        for base in contexts.values_mut().chain(result_bases.values_mut()) {
+            *base += pool_base - displacement;
         }
         if check_capacity {
             storage.validate_capacity()?;
@@ -148,7 +182,7 @@ impl StaticFramePlan {
             extra_resumes,
             return_ids,
             result_bases,
-            static_cells: storage.anchor_head() - static_start,
+            static_cells,
         })
     }
 
@@ -375,6 +409,18 @@ impl<'a> AbiEmitter<'a> {
             }
             None => self.clear_location(Location::Relative(frame.abi_offset(AbiField::Value))),
         }
+        // Locals are dead after materializing the outgoing result. Clear them
+        // once per return body, instead of replicating this frame-sized sweep
+        // at every caller's resume gate. Keep the context alive for dispatch.
+        let local_chunks = frame.frame_chunks() - frame.context_chunks();
+        let bottom = -((local_chunks * self.config.stride()) as isize);
+        for chunk in 0..local_chunks {
+            let head = bottom + (chunk * self.config.stride()) as isize;
+            self.clear(head);
+            for data in 0..self.config.chunk_cells() {
+                self.clear(head + 1 + data as isize);
+            }
+        }
         // Retain this fixed origin until the caller-specific gate is selected.
         self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
         self.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
@@ -393,12 +439,10 @@ impl<'a> AbiEmitter<'a> {
         let scalar_return = self.function(resume.callee)?.return_type() == ValueType::Cell;
         let base = fixed.contexts[&resume.callee];
         self.fixed_context = Some(base);
-        // Clear at the callee before leaving: a dynamic caller would otherwise
-        // scan its stack for every cleared cell. Keep only the outgoing result.
-        let bottom = -(((callee_frame.frame_chunks() - callee_frame.context_chunks())
-            * self.config.stride()) as isize);
-        for chunk in 0..callee_frame.frame_chunks() {
-            let head = bottom + (chunk * self.config.stride()) as isize;
+        // Return already cleared every chunk below the context. The context
+        // stayed live through the dispatch to this gate; retain only Value.
+        for chunk in 0..callee_frame.context_chunks() {
+            let head = (chunk * self.config.stride()) as isize;
             self.clear(head);
             for data in 0..self.config.chunk_cells() {
                 let offset = head + 1 + data as isize;
@@ -1188,6 +1232,102 @@ mod tests {
                     rle.stats.executed_rle_instructions,
                     optimized.stats.executed_rle_instructions
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn global_contexts_share_sibling_frames_without_overlapping_ancestors() {
+        let p = program(
+            "cell g; struct P { cell a; cell b; cell c; } cell shared(cell x) { g = g + 1; return x + g; } P left(cell x) { P p; p.a = shared(x); p.b = x; p.c = 255; return p; } cell right(cell x) { cell[40] buf; buf[x] = shared(x); return buf[x]; } P parent(cell x) { P keep = left(x); keep.b = right(x); return keep; } void recurse(cell n) { P keep = parent(n); if (n) { recurse(n - 1); } output(keep.a); output(keep.b); output(keep.c); } void main() { recurse(2); }",
+        );
+        let config = AbiConfig::default();
+        let selected = crate::cir::analysis::call_graph::global_context_functions(&p);
+        let layouts = build_layouts_with_regions(&p, config, None).unwrap();
+        let portal = PortalPlan::new(&p).unwrap();
+        let mut storage = StaticLayout::new(config, p.globals()).unwrap();
+        let fixed =
+            StaticFramePlan::new(&p, &layouts, &portal, &mut storage, true, &selected).unwrap();
+        let interval = |id: FunctionId| {
+            let frame = &layouts[&id].frame;
+            let bottom = fixed.contexts[&id]
+                - (frame.frame_chunks() - frame.context_chunks()) * config.stride();
+            let end = bottom
+                + frame.frame_chunks() * config.stride()
+                + result_cells(p.function(id).unwrap().return_type());
+            (bottom, end)
+        };
+        let named = |name| {
+            p.functions()
+                .iter()
+                .find(|function| function.name() == Some(name))
+                .unwrap()
+                .id()
+        };
+        assert_eq!(interval(named("left")).0, interval(named("right")).0);
+        for c in p.continuations() {
+            if selected.contains(&c.function())
+                && let Some(callee) = c.terminator().callee()
+            {
+                assert!(interval(c.function()).0 >= interval(callee).1);
+            }
+        }
+        let separate_cells = selected
+            .iter()
+            .map(|id| interval(*id).1 - interval(*id).0)
+            .sum::<usize>();
+        assert!(fixed.static_cells < separate_cells);
+        for regions in [false, true] {
+            for nibble in [false, true] {
+                for anchor_bank in [false, true] {
+                    let bf = lower_continuations_with_profile_and_codegen_options(
+                        &p,
+                        ProfileGranularity::Abi,
+                        AbiCodegenOptions {
+                            static_frames: true,
+                            region_emission: regions,
+                            nibble_transfer: nibble,
+                            anchor_bank,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let artifact = optimize_annotated_bf(&bf).profile_artifact(true);
+                    let result = bf_interpreter::run_with_options(
+                        artifact.source.as_bytes(),
+                        &[],
+                        RunOptions {
+                            collect_stats: true,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(result.output, [5, 6, 255, 4, 5, 255, 3, 4, 255]);
+                    let rle = bf_interpreter::run_with_options(
+                        artifact.source.as_bytes(),
+                        &[],
+                        RunOptions {
+                            collect_stats: true,
+                            disable_clear: true,
+                            disable_scan: true,
+                            disable_transfer: true,
+                            disable_countdown: true,
+                            disable_remote_transfer: true,
+                            disable_compare: true,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(rle.output, result.output);
+                    assert_eq!(
+                        rle.stats.executed_instructions,
+                        result.stats.executed_instructions
+                    );
+                    assert_eq!(
+                        rle.stats.executed_rle_instructions,
+                        result.stats.executed_rle_instructions
+                    );
+                }
             }
         }
     }

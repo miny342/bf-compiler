@@ -1232,7 +1232,7 @@ version 1実装は少なくとも次を`D = 16`で検証する。
 
 `--experimental-static-frames`（`AbiCodegenOptions::static_frames`）は既定で無効である。
 [static_frames.rs](crates/bf-compiler/src/backend/codegen/static_frames.rs)が、globalへアクセスする
-非再帰call graphのframeを関数ごとの固定storageとしてanchorより左へ予約する。
+非再帰call graphのframeへ固定baseを割り当て、anchorより左へ予約する。
 直接またはcallee経由でglobalへアクセスし、到達先に再帰call cycleがない関数を選び、
 そのcallee群も固定配置する。再帰関数と再帰へ到達するcallerは動的chunk stackを使い続ける。
 
@@ -1244,7 +1244,9 @@ version 1実装は少なくとも次を`D = 16`で検証する。
 returnはcalleeのcontextを起点としてcaller専用resumeを選び、callerのcontextへ直接配送する。
 scalarはcalleeのABI Value、aggregateはcalleeごとの小さい固定return bufferに一時保持する。
 void／aggregate returnのABI Valueは既知の0なので、搬送せずcaller側で直接clearする。
-globalの返値は保存し、死ぬlocalの返値は消費できる。callee frameのcleanupをその場で行い、
+globalの返値は保存し、死ぬlocalの返値は消費できる。calleeのlocal／outbox／routeは返値の
+materialize直後にreturn側でcleanupし、dispatcherに必要なcontextはresume側でcleanupする。
+caller別resumeへ大きいframeのcleanupを複製しない。
 callerのoutboxは返値幅の部分だけ上書きする。元のcalleeの違う共通resumeには別の配送gateを置く。
 動的callerへの配送ではstack navigationを使い、固定callerへは定数距離で移動する。
 以前の共通static inboxと、固定callerから動的calleeへのreturn-route flagは使わない。
@@ -1261,9 +1263,12 @@ portalのaccessorは関数ごとに複製しない。固定callerは共有access
 offsetとpayloadだけを搬送し、既知のaccessor／resume PCはportal側で直接設定する。
 動的callerのglobal portalには
 既存の復帰PC保持経路を残す。混在時はそれぞれの復帰方式の共有accessorを生成する。
-内部storageは通常のglobalとremote-copy scratchの後、anchorの前に入る。
-固定contextの予約はfunction descriptorの逆順とする。compiler入力で長いMoveを減らした
-配置heuristicであり、すべての入力で生成量を最小化する保証はない。
+内部storageは大きいglobal aggregateの後、小さいglobal aggregate・scalar globals・remote-copy
+scratchの前に入る。後者をanchorの隣に保ち、動的callerからの距離を増やさない。
+固定contextはcallee順で配置し、frame＋private return bufferを一つの区間として、その開始位置を
+`max(end(callee))`にする。親子とすべての祖先・子孫は重ならず、同時に生きない兄弟や
+独立した呼出し経路は同じstorageを使う。総予約幅は各frameの和ではなく、call pathの最大幅になる。
+選択された関数群が閉じていて再帰がなく、子関数から動的callerへ再入しないことが前提である。
 寿命によるcopy消費と比較guardによる分岐copy省略も、このoptionで無効にしない。
 
 したがって本optionでは「すべてのframeがanchorの右」「すべてのcall/returnが隣接frameとの転送」
@@ -1272,6 +1277,7 @@ portalごとのpayload配置は保つ。selfhost backendのuniform frame方式�
 Anchor16とも併用できる。生成量とRLE/nativeの順位は入力で異なり、既定ONにしない。
 2026-10-08の再実装と評価は[global context実験](optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)。
 生成量の削減比較は[固定contextの生成量評価](optimize_logs/GLOBAL_CONTEXT_SIZE_EVALUATION_20261008.md)。
+配置・storage共有の追加評価は[固定context配置の評価](optimize_logs/GLOBAL_CONTEXT_LAYOUT_EVALUATION_20261008.md)。
 
 ## 実装との照合
 

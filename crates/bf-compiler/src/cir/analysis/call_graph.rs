@@ -37,7 +37,8 @@ fn callers_of(
 
 /// Closed, acyclic call subgraphs that access globals. Descendants without
 /// globals join their parent's fixed context execution; callers that reach a
-/// recursive SCC retain the dynamic stack. Every function gets separate storage.
+/// recursive SCC retain the dynamic stack. Selection is independent of physical
+/// placement; the backend can share storage across unrelated activation paths.
 pub(crate) fn global_context_functions(program: &ContinuationProgram) -> HashSet<FunctionId> {
     let edges = call_edges(program);
     let reaches_recursion = callers_of(&edges, recursive_functions(program));

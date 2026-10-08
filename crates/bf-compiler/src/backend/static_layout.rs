@@ -223,6 +223,38 @@ impl StaticLayout {
         Ok(start)
     }
 
+    /// Move a just-reserved internal block before the small aggregate globals,
+    /// scalar globals and remote-copy scratch, retaining their proximity to
+    /// the stack anchor.
+    /// The anchor/bank and total storage width stay in place. Return the
+    /// distance by which the internal block's absolute positions move left.
+    pub(crate) fn place_internal_before_near_globals(&mut self, cells: usize) -> usize {
+        let scratch = self.remote_copy_scratch_start.expect("static scratch");
+        let suffix_start = self
+            .globals
+            .iter()
+            .filter_map(|global| match global {
+                GlobalLayout::Aggregate {
+                    cells, base_head, ..
+                } if *cells > 0 && *cells <= self.config.chunk_cells() => Some(*base_head),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(scratch - self.scalar_cells);
+        let internal_start = self.anchor_bank().0 - cells;
+        for global in &mut self.globals {
+            match global {
+                GlobalLayout::Cell { position, .. } => *position += cells,
+                GlobalLayout::Aggregate { base_head, .. } if *base_head >= suffix_start => {
+                    *base_head += cells;
+                }
+                _ => {}
+            }
+        }
+        self.remote_copy_scratch_start = Some(scratch + cells);
+        internal_start - suffix_start
+    }
+
     /// Minimum tape length containing the static regions and the complete
     /// anchor chunk, including its ABI scratch cells.
     pub fn minimum_tape_cells(&self) -> Result<usize, StaticLayoutError> {
@@ -568,6 +600,63 @@ mod tests {
                     before.aggregate_base_head(global.id())
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fixed_storage_can_keep_near_globals_and_scratch_next_to_anchor() {
+        let descriptors = mixed_descriptors();
+        for bank in [false, true] {
+            let mut layout = StaticLayout::new_with_capacity_check(
+                AbiConfig::default(),
+                &descriptors,
+                true,
+                bank,
+            )
+            .unwrap();
+            let before = layout.clone();
+            let first = layout.reserve_internal_cells(34).unwrap();
+            assert_eq!(layout.reserve_internal_cells(3), Ok(first + 34));
+            let anchor = layout.anchor_bank();
+            let required = layout.minimum_tape_cells().unwrap();
+            let shift = layout.place_internal_before_near_globals(37);
+            assert_eq!(
+                first - shift,
+                before.aggregate_base_head(GlobalId::new(0)).unwrap()
+            );
+            for descriptor in &descriptors {
+                if descriptor.value_type() == ValueType::Cell {
+                    assert_eq!(
+                        layout.scalar_position(descriptor.id()).unwrap(),
+                        before.scalar_position(descriptor.id()).unwrap() + 37
+                    );
+                } else if descriptor.value_type() == ValueType::Array(3) {
+                    assert_eq!(
+                        layout.aggregate_base_head(descriptor.id()).unwrap(),
+                        before.aggregate_base_head(descriptor.id()).unwrap() + 37
+                    );
+                    assert_eq!(
+                        layout
+                            .aggregate_element_position(descriptor.id(), 2)
+                            .unwrap(),
+                        before
+                            .aggregate_element_position(descriptor.id(), 2)
+                            .unwrap()
+                            + 37
+                    );
+                } else {
+                    assert_eq!(
+                        layout.aggregate_base_head(descriptor.id()),
+                        before.aggregate_base_head(descriptor.id())
+                    );
+                }
+            }
+            assert_eq!(layout.anchor_bank(), anchor);
+            assert_eq!(layout.minimum_tape_cells().unwrap(), required);
+            assert_eq!(
+                layout.remote_copy_scratch_position(8).unwrap() + 1,
+                layout.anchor_bank().0
+            );
         }
     }
 

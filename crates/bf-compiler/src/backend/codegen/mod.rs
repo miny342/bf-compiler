@@ -65,7 +65,8 @@ pub enum ProfileGranularity {
 pub struct AbiCodegenOptions {
     /// Experimental global contexts for closed nonrecursive call graphs that
     /// access globals. Functions reaching recursion keep dynamic activations.
-    /// Does not change CIR, inlining decisions, or reuse storage between functions.
+    /// Unrelated activation paths share storage; callers and descendants never
+    /// overlap. Does not change CIR or inlining decisions.
     pub static_frames: bool,
     /// Execute bounded soft CFG regions during one dispatcher visit. Enabled
     /// by default; oversized regions retain ordinary dispatcher edges.
@@ -84,7 +85,7 @@ pub struct AbiCodegenOptions {
     /// Aggregate elements (including imported flat CIR) retain scratch staging.
     pub inplace_compare: bool,
     /// Use 16 static anchors and 272-cell stack scans for global crossings.
-    /// Off by default; incompatible with experimental static frames.
+    /// Off by default; also supported at experimental fixed/dynamic boundaries.
     pub anchor_bank: bool,
 }
 
