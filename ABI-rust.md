@@ -270,7 +270,9 @@ libraryでは`AbiCodegenOptions::nibble_transfer`で指定し、
 `lower_continuations_with_profile_and_codegen_options`へ渡す。
 既存のoptionsなしAPIもunaryを既定とする。
 source/CIR、通常/圧縮BF、profile付き出力で共通の指定である。
-frame/static配置とscratch予約、offset分解、windowのbase-16移動は変更しない。
+通常ABIではframe/static配置とscratch予約、offset分解、windowのbase-16移動は変更しない。
+experimental固定frameの動的callerとのcall/returnにもnibbleを適用する。
+global portalがないprogramでもこのcall境界がある場合は、引数分解用のroute chunkを予約する。
 stage2のBFC製backendの設定ではない。
 
 ### 選択式の直接比較とAnchor16
@@ -294,7 +296,7 @@ bank全体を同じdata chunk内に収め、chunk headをzeroやflagとして使
 zeroは書き換えず、flagは比較終了時に0へ戻す。結果の配送と必要なoperand保存copyは従来通りである。
 `SubWithBorrow`の差はprivateなABI Restoreに保持し、従来と同じ順序で差・borrowを配送する。
 
-同一operand、global/ABI/aggregate element、experimental static framesの固定contextでは
+同一operand、global/ABI/aggregate elementでは
 従来のScratch0..3方式を使う。公開バイナリCIRはflat frame全体を一つのaggregateとして保存するため、
 **この入力経路の比較には直接比較を適用しない**。連続領域へのportal accessやaggregate copyの
 意味を保つための制約である。直接比較の追加cellとchunk内のpaddingはframe容量の検査に含める。
@@ -312,7 +314,9 @@ contextからglobalへは、現在のframe内の最上位の使用済みheadか�
 globalからの復帰では位相の0を探して1へ戻し、その位相のhead列を272刻みで走査してfrontierを求める。
 call/returnが管理する通常の使用済みhead=1/free head=0をそのまま使い、stack側へ新しいheaderは追加しない。
 anchor bank全体とその後のmain frameをテープ容量の検査に含める。
-`--experimental-static-frames`との併用はcodegen errorとする。公開CIRにもAnchor16は適用できる。
+`--experimental-static-frames`とも併用できる。固定領域をbankの前に予約し、bank全体を動的stackの
+直前へ移す。固定context間の移動は定数距離のまま、動的stackとの境界だけAnchor16を使う。
+公開CIRにもAnchor16は適用できる。
 
 これらは論理RLE op数を減らすための選択肢である。
 frameの拡大は初期化・掃除・navigationの費用を変え、直接比較と新navigationは既存interpreterの
@@ -1244,6 +1248,12 @@ callerのoutboxは返値幅の部分だけ上書きする。元のcalleeの違�
 動的callerへの配送ではstack navigationを使い、固定callerへは定数距離で移動する。
 以前の共通static inboxと、固定callerから動的calleeへのreturn-route flagは使わない。
 
+nibble有効時、動的callerからのframe引数は二つのdigitで搬送する。liveな引数はdigitから
+callerの元cellも復元し、重複引数は最後の読み取りまで保存する。scalar/aggregate返値も
+既存static scratchで分解して動的callerへ配送し、callee側の返値は消費する。
+動的callerにあるglobal引数はglobal側のstatic scratchでcopyし、unitごとのstack往復を避ける。
+固定context内では選択式の直接比較も使い、予約したguardでoperand搬送を省く。
+
 portalのaccessorは関数ごとに複製しない。固定callerは共有accessorからsite別resumeへ戻り、
 そのresumeがportal結果を所属関数の固定contextへ配送する。動的callerのglobal portalには
 既存の復帰PC保持経路を残す。混在時はそれぞれの復帰方式の共有accessorを生成する。
@@ -1253,7 +1263,7 @@ portalのaccessorは関数ごとに複製しない。固定callerは共有access
 したがって本optionでは「すべてのframeがanchorの右」「すべてのcall/returnが隣接frameとの転送」
 という既定方式の説明は適用しない。sourceの値渡し・再帰・aggregate returnの意味と、
 portalごとのpayload配置は保つ。selfhost backendのuniform frame方式を選ぶoptionではない。
-Anchor16との併用は引き続き未対応。生成量とRLE/nativeの順位は入力で異なり、既定ONにしない。
+Anchor16とも併用できる。生成量とRLE/nativeの順位は入力で異なり、既定ONにしない。
 2026-10-08の再実装と評価は[global context実験](optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)。
 
 ## 実装との照合

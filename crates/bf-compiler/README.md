@@ -90,7 +90,7 @@ cargo run --release -p bf-compiler -- \
 ```
 
 公開CIRはflat frameを連続aggregateとして保つため、直接比較は従来方式へ戻す。
-Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimental-static-frames`は併用できない。
+Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimental-static-frames`も併用できる。
 これらのoptionはCIR出力・inline判断を変更せず、BFを生成する際だけ使う。
 論理RLE op数の削減を目的とし、全最適化ONのinterpreterの実時間では遅くなる場合もある。
 配置とfallbackの詳細は[Rust ABI](../../ABI-rust.md#選択式の直接比較とanchor16)を参照。
@@ -103,6 +103,8 @@ Anchor16とnibbleは`--cir-input`でも有効である。Anchor16と`--experimen
 `--experimental-static-frames`は既存フラグを再利用した実験経路で、到達先に再帰があるcallerは
 動的stackに残す。固定context間のcall/returnは定数距離で移動し、calleeの返値をcaller専用resumeで
 直接配送する。portal accessorは共有し、固定contextへの配送をsite別resumeへ置く。
+nibble有効時は動的callerとの引数・返値搬送も分解し、liveな引数は元cellへ復元する。
+Anchor16は固定領域の後ろに置き、動的stackとの境界だけに適用する。固定contextでも直接比較を使える。
 通常ABIのCIR・inline判断・言語仕様は変更しない。素BFが大きくなり、nibble併用のcompiler入力では
 論理RLEが増える条件もある。[仕様](../../ABI-rust.md#実験的static-frame)と
 [評価](../../optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)を参照。

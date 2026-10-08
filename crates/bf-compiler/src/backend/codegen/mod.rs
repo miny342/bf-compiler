@@ -241,9 +241,6 @@ fn lower_continuations_annotated_with_options(
     granularity: ProfileGranularity,
     options: AbiCodegenOptions,
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
-    if options.anchor_bank && options.static_frames {
-        return Err(AbiCodegenError::AnchorBankWithStaticFrames);
-    }
     let check_capacity = !options.unlimited_tape;
     let mut regions = options.region_emission.then(|| RegionPlan::new(program));
     let mut static_layout = if options.anchor_bank {
@@ -253,8 +250,30 @@ fn lower_continuations_annotated_with_options(
     } else {
         StaticLayout::new_unbounded(config, program.globals())?
     };
+    let fixed_functions = if options.static_frames {
+        crate::cir::analysis::call_graph::global_context_functions(program)
+    } else {
+        HashSet::new()
+    };
+    // Scalar-global-only programs have no portal route. A mixed S -> G call
+    // still needs nine private scratch lanes for nibble argument transport.
+    let boundary_nibbles = options.nibble_transfer
+        && config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS
+        && program.continuations().iter().any(|continuation| {
+            !fixed_functions.contains(&continuation.function())
+                && continuation
+                    .terminator()
+                    .callee()
+                    .is_some_and(|callee| fixed_functions.contains(&callee))
+        });
     let make_layouts = |regions: Option<&RegionPlan>| {
-        let layouts = build_layouts_for_codegen(program, config, regions, options.inplace_compare)?;
+        let layouts = build_layouts_for_codegen(
+            program,
+            config,
+            regions,
+            options.inplace_compare,
+            boundary_nibbles,
+        )?;
         if check_capacity {
             layouts[&program.main()]
                 .frame
@@ -271,11 +290,6 @@ fn lower_continuations_annotated_with_options(
             make_layouts(None)?
         }
         Err(error) => return Err(error),
-    };
-    let fixed_functions = if options.static_frames {
-        crate::cir::analysis::call_graph::global_context_functions(program)
-    } else {
-        HashSet::new()
     };
     let portal =
         PortalPlan::with_fixed_contexts(program, true, &fixed_functions).or_else(|error| {
@@ -333,8 +347,11 @@ fn lower_continuations_annotated_with_options(
 pub enum AbiCodegenError {
     Layout(FrameLayoutError),
     StaticLayout(StaticLayoutError),
-    MissingFunctionLayout { function: FunctionId },
+    MissingFunctionLayout {
+        function: FunctionId,
+    },
     ContinuationIdsExhausted,
+    /// Legacy diagnostic retained for API compatibility; this combination is supported.
     AnchorBankWithStaticFrames,
 }
 

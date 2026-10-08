@@ -188,8 +188,8 @@ impl StaticLayout {
         self.anchor_head
     }
 
-    /// Canonical (leftmost) bank head and number of phase anchors. A single
-    /// anchor follows any storage reserved by experimental static frames.
+    /// Canonical (leftmost) bank head and number of phase anchors. The bank
+    /// follows any storage reserved by experimental static frames.
     pub(crate) const fn anchor_bank(&self) -> (usize, usize) {
         if self.anchor_group == 1 {
             (self.anchor_head, 1)
@@ -204,10 +204,22 @@ impl StaticLayout {
         &mut self,
         cells: usize,
     ) -> Result<usize, StaticLayoutError> {
-        let start = self.anchor_head;
-        self.anchor_head = start
+        let end = self
+            .anchor_head
             .checked_add(cells)
             .ok_or(StaticLayoutError::SizeOverflow)?;
+        let start = if self.anchor_group == 1 {
+            self.anchor_head
+        } else {
+            // Keep every phase lane adjacent to the dynamic stack. Reserving
+            // fixed storage at the last bank head would overwrite its flags
+            // and leave the coarse scan's sentinel far behind the stack.
+            self.anchor_bank_base
+        };
+        if self.anchor_group > 1 {
+            self.anchor_bank_base += cells;
+        }
+        self.anchor_head = end;
         Ok(start)
     }
 
@@ -531,6 +543,32 @@ mod tests {
             GlobalDescriptor::array(GlobalId::new(2), 17),
             GlobalDescriptor::cell(GlobalId::new(3)),
         ]
+    }
+
+    #[test]
+    fn fixed_storage_precedes_the_complete_anchor_bank() {
+        let globals = mixed_descriptors();
+        let mut layout =
+            StaticLayout::new_with_anchor_bank(AbiConfig::default(), &globals, true).unwrap();
+        let before = layout.clone();
+        let (bank, group) = before.anchor_bank();
+        assert_eq!(layout.reserve_internal_cells(34), Ok(bank));
+        assert_eq!(layout.reserve_internal_cells(3), Ok(bank + 34));
+        assert_eq!(layout.anchor_bank(), (bank + 37, group));
+        assert_eq!(layout.anchor_head(), before.anchor_head() + 37);
+        for global in globals {
+            if global.value_type() == ValueType::Cell {
+                assert_eq!(
+                    layout.scalar_position(global.id()),
+                    before.scalar_position(global.id())
+                );
+            } else {
+                assert_eq!(
+                    layout.aggregate_base_head(global.id()),
+                    before.aggregate_base_head(global.id())
+                );
+            }
+        }
     }
 
     #[test]

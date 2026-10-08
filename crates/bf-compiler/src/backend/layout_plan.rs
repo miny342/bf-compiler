@@ -33,7 +33,7 @@ pub(crate) fn build_layouts_with_regions(
     config: AbiConfig,
     regions: Option<&RegionPlan>,
 ) -> Result<HashMap<FunctionId, FunctionLayout>, FrameLayoutError> {
-    build_layouts_for_codegen(program, config, regions, false)
+    build_layouts_for_codegen(program, config, regions, false, false)
 }
 
 /// Apply optional physical guards after compact planning. Inlining cost
@@ -43,9 +43,14 @@ pub(crate) fn build_layouts_for_codegen(
     config: AbiConfig,
     regions: Option<&RegionPlan>,
     inplace_compare: bool,
+    boundary_nibbles: bool,
 ) -> Result<HashMap<FunctionId, FunctionLayout>, FrameLayoutError> {
-    let mut layouts =
-        build_layouts_with_route(program, config, regions, has_global_portal(program))?;
+    let mut layouts = build_layouts_with_route(
+        program,
+        config,
+        regions,
+        has_global_portal(program) || boundary_nibbles,
+    )?;
     if inplace_compare {
         let mut operands: HashMap<FunctionId, BTreeSet<usize>> = HashMap::new();
         for continuation in program.continuations() {

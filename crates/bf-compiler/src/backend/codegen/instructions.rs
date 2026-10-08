@@ -410,7 +410,6 @@ impl<'a> AbiEmitter<'a> {
         function: FunctionId,
     ) -> Result<(), AbiCodegenError> {
         let inplace = self.inplace_compare
-            && self.fixed_context.is_none()
             && matches!((left, right), (Address::Frame(_), Address::Frame(_)))
             && left != right;
         let left = self.address_location(left, function)?;

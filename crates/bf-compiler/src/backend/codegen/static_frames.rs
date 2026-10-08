@@ -181,6 +181,7 @@ impl<'a> AbiEmitter<'a> {
             self.fixed = plan;
             return result;
         };
+        self.initialize_anchor_bank();
         let frame = &self.layouts[&self.program.main()].frame;
         let bottom = base - (frame.frame_chunks() - frame.context_chunks()) * self.config.stride();
         for chunk in 0..frame.frame_chunks() {
@@ -262,7 +263,38 @@ impl<'a> AbiEmitter<'a> {
             }
             let left = remaining.get_mut(&source).unwrap();
             *left -= 1;
-            if *left == 0 && self.lifetime.terminal_dead(call, address) {
+            let consume = *left == 0 && self.lifetime.terminal_dead(call, address);
+            if self.nibble_transfer
+                && original_context.is_none()
+                && self.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS
+                && let Location::Relative(source) = source
+                && let Location::Global(target) = target
+            {
+                self.relative_to_global_nibbles(
+                    source,
+                    target,
+                    !consume,
+                    "abi.call.argument.nibble",
+                )?;
+            } else if original_context.is_none()
+                && let Location::Global(source) = source
+            {
+                // Both endpoints are static. Copy there using shared static
+                // scratch, avoiding a scan per unit through the caller's Restore.
+                let scratch =
+                    Location::Global(self.static_layout.remote_copy_scratch_position(0).unwrap());
+                self.emit_context_to_global(source, self.config.portal_chunks());
+                self.fixed_context = Some(source);
+                self.clear_location(scratch);
+                self.copy_locations_to_zeroed_destination(
+                    Location::Global(source),
+                    target,
+                    scratch,
+                );
+                self.move_to(0);
+                self.fixed_context = None;
+                self.emit_global_to_context(source, self.config.portal_chunks());
+            } else if consume {
                 self.move_location_to_zero(source, target);
             } else {
                 self.copy_locations_to_zeroed_destination(source, target, restore);
@@ -384,17 +416,27 @@ impl<'a> AbiEmitter<'a> {
             "abi.return.deliver",
             "direct fixed frame result delivery",
             |emitter| {
-                emitter.move_location(
-                    Location::Global(
-                        base.checked_add_signed(callee_frame.abi_offset(AbiField::Value))
-                            .unwrap(),
-                    ),
-                    Location::Relative(frame.abi_offset(AbiField::Value)),
-                );
+                let scalar_source = base
+                    .checked_add_signed(callee_frame.abi_offset(AbiField::Value))
+                    .unwrap();
+                let mut deliver = |source, destination| {
+                    if emitter.nibble_transfer
+                        && caller_base.is_none()
+                        && emitter.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS
+                    {
+                        emitter.move_global_to_relative_nibbles(source, destination);
+                    } else {
+                        emitter.move_location(
+                            Location::Global(source),
+                            Location::Relative(destination),
+                        );
+                    }
+                };
+                deliver(scalar_source, frame.abi_offset(AbiField::Value));
                 for index in 0..resume.cells {
-                    emitter.move_location(
-                        Location::Global(fixed.result_bases[&resume.callee] + index),
-                        Location::Relative(frame.outbox_offset(index)?),
+                    deliver(
+                        fixed.result_bases[&resume.callee] + index,
+                        frame.outbox_offset(index)?,
                     );
                 }
                 Ok(())
@@ -1055,12 +1097,86 @@ mod tests {
     }
 
     #[test]
+    fn global_contexts_nibble_arguments_preserve_aliases_and_aggregate_returns() {
+        // No global portal: argument transport must reserve its own route.
+        // Repeated live arguments, a global argument, and a live aggregate all
+        // survive calls from recursive frames spanning several anchor phases.
+        let p = program(
+            "cell g; struct P { cell a; cell b; cell c; } P leaf(P p, cell x, cell y, cell z) { g = g + 1; p.a = x < z; p.b = p.b + y; p.c = z; return p; } void recurse(cell n) { cell x = input(); P keep; keep.a = x; keep.b = 255; keep.c = 127; P next = leaf(keep, x, x, g); if (n) { recurse(n - 1); } output(next.a); output(next.b); output(next.c); output(keep.a); output(keep.b); output(keep.c); output(x); } void main() { g = 255; recurse(19); recurse(0); }",
+        );
+        let input = (0..21).map(|i| [0, 1, 127, 255][i % 4]).collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        crate::run_continuations_with_io(
+            &p,
+            &mut &input[..],
+            &mut expected,
+            Default::default(),
+            |_| {},
+        )
+        .unwrap();
+        for regions in [false, true] {
+            for anchor_bank in [false, true] {
+                let annotated = lower_continuations_with_profile_and_codegen_options(
+                    &p,
+                    ProfileGranularity::Abi,
+                    AbiCodegenOptions {
+                        static_frames: true,
+                        nibble_transfer: true,
+                        inplace_compare: true,
+                        region_emission: regions,
+                        anchor_bank,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let artifact = optimize_annotated_bf(&annotated).profile_artifact(true);
+                let optimized = bf_interpreter::run_with_options(
+                    artifact.source.as_bytes(),
+                    &input,
+                    RunOptions {
+                        collect_stats: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(optimized.output, expected);
+                let rle = bf_interpreter::run_with_options(
+                    artifact.source.as_bytes(),
+                    &input,
+                    RunOptions {
+                        collect_stats: true,
+                        disable_clear: true,
+                        disable_scan: true,
+                        disable_transfer: true,
+                        disable_countdown: true,
+                        disable_remote_transfer: true,
+                        disable_compare: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(rle.output, expected);
+                assert_eq!(
+                    rle.stats.executed_instructions,
+                    optimized.stats.executed_instructions
+                );
+                assert_eq!(
+                    rle.stats.executed_rle_instructions,
+                    optimized.stats.executed_rle_instructions
+                );
+            }
+        }
+    }
+
+    #[test]
     fn global_contexts_rle_only_matches_optimized_counters() {
         let p = program(
             "cell[256] g; struct P { cell a; cell b; } P read(cell i) { P p; p.a = g[i]; p.b = g[i + 1]; return p; } cell worker(cell n) { g[n] = 255; g[n + 1] = 0; P p = read(n); return p.a + p.b; } cell recursive(cell n) { g[n + 128] = n; cell saved = worker(n); if (n) { return recursive(n - 1) + saved + g[n + 128]; } return saved; } void main() { output(recursive(1)); output(worker(3)); }",
         );
         for regions in [false, true] {
-            for nibble in [false, true] {
+            for (nibble, anchor_bank) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
                 let annotated = lower_continuations_with_profile_and_codegen_options(
                     &p,
                     ProfileGranularity::Abi,
@@ -1068,6 +1184,7 @@ mod tests {
                         static_frames: true,
                         region_emission: regions,
                         nibble_transfer: nibble,
+                        anchor_bank,
                         inplace_compare: true,
                         ..Default::default()
                     },

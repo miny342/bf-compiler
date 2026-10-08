@@ -218,16 +218,37 @@ fn backend_flags_are_opt_in_for_source_cir_and_all_output_formats() {
             String::from_utf8_lossy(&invalid.stderr).contains("Brainfuck code-generation options")
         );
     }
-    let invalid = run_bfc(
-        &root,
-        &[
+    for input in [vec!["main.bfc"], vec!["--cir-input", "main.cir"]] {
+        let mut arguments = input;
+        arguments.extend([
             "--experimental-static-frames",
             "--enable-anchor-bank",
-            "main.bfc",
-        ],
-    );
-    assert!(!invalid.status.success());
-    assert!(String::from_utf8_lossy(&invalid.stderr).contains("anchor bank cannot be combined"));
+            "--enable-nibble-transfer",
+            "--enable-inplace-compare",
+            "--compressed-bf",
+            "--profile-map-output",
+            "combined.json",
+        ]);
+        let combined = run_bfc(&root, &arguments);
+        assert!(combined.status.success(), "{:?}", combined.stderr);
+        let map = bf_profiling::ProfileMap::from_json(
+            &fs::read_to_string(root.join("combined.json")).unwrap(),
+        )
+        .unwrap();
+        map.validate_for_source(&combined.stdout).unwrap();
+        for value in [0, 1, 127, 255] {
+            let run = run_with_options(
+                &combined.stdout,
+                &[value, value, 255 - value],
+                RunOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                run.output,
+                [value, value, 255 - value, u8::from(value < 255 - value)]
+            );
+        }
+    }
     fs::remove_dir_all(root).unwrap();
 }
 

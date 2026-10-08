@@ -252,9 +252,6 @@ fn guarded_frames_preserve_aggregates_across_calls_and_static_bridges() {
     .unwrap();
     for flags in 0..8 {
         for static_frames in [false, true] {
-            if static_frames && flags & 4 != 0 {
-                continue;
-            }
             for region_emission in [false, true] {
                 let bf = bfc::optimize_bf(
                     &bfc::lower_continuations_with_codegen_options(
@@ -290,17 +287,6 @@ fn guarded_frames_preserve_aggregates_across_calls_and_static_bridges() {
             }
         }
     }
-    assert!(matches!(
-        bfc::lower_continuations_with_codegen_options(
-            &program,
-            bfc::AbiCodegenOptions {
-                static_frames: true,
-                anchor_bank: true,
-                ..Default::default()
-            }
-        ),
-        Err(bfc::AbiCodegenError::AnchorBankWithStaticFrames)
-    ));
 }
 
 #[test]

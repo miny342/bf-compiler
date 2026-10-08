@@ -225,6 +225,14 @@ impl<'a> AbiEmitter<'a> {
         self.global_to_relative_nibbles(source, 0, destination, true);
     }
 
+    /// Destructive counterpart for a fixed callee's return payload. Navigation
+    /// uses the suspended dynamic caller; the fixed source is left zero.
+    pub(super) fn move_global_to_relative_nibbles(&mut self, source: usize, destination: isize) {
+        self.clear(destination);
+        self.emit_context_to_global(source, self.config.portal_chunks());
+        self.global_to_relative_nibbles(source, 0, destination, false);
+    }
+
     /// The pointer starts at `base` in static storage and finishes at the
     /// current frame. `source` is relative to that base; the frame destination
     /// must be zero. Destructive portal returns leave the source zero, while
@@ -304,6 +312,19 @@ impl<'a> AbiEmitter<'a> {
         source: isize,
         destination: usize,
     ) -> Result<(), AbiCodegenError> {
+        self.relative_to_global_nibbles(source, destination, false, "abi.portal.route")
+    }
+
+    /// A call argument may remain live in its caller. Rebuild it from the two
+    /// digits while transporting, rather than copying it through ABI Restore.
+    /// The static destination must be zero and must not alias the route scratch.
+    pub(super) fn relative_to_global_nibbles(
+        &mut self,
+        source: isize,
+        destination: usize,
+        restore_source: bool,
+        profile_prefix: &str,
+    ) -> Result<(), AbiCodegenError> {
         debug_assert!(self.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS);
         let Location::Relative(zero) = self.route_location(ROUTE_SCRATCH_START)? else {
             unreachable!("route scratch is frame-relative")
@@ -312,8 +333,8 @@ impl<'a> AbiEmitter<'a> {
 
         self.with_profile_site_infallible(
             "abi",
-            "abi.portal.route.decompose",
-            "abi.portal.route.decompose",
+            format!("{profile_prefix}.decompose"),
+            "byte decomposition",
             |emitter| {
                 emitter.clear(zero);
                 for bit in bits {
@@ -331,8 +352,8 @@ impl<'a> AbiEmitter<'a> {
         );
         self.with_profile_site_infallible(
             "abi",
-            "abi.portal.route.pack",
-            "abi.portal.route.pack",
+            format!("{profile_prefix}.pack"),
+            "nibble packing",
             |emitter| {
                 for index in 1..4 {
                     emitter.move_static_value(bits[index], bits[0], 1_u8 << index);
@@ -346,12 +367,16 @@ impl<'a> AbiEmitter<'a> {
         for (digit, contribution) in [(bits[0], 1_u8), (bits[4], 16_u8)] {
             self.with_profile_site_infallible(
                 "abi",
-                format!("abi.portal.route.transport.nibble.{contribution}"),
+                format!("{profile_prefix}.transport.nibble.{contribution}"),
                 "nibble transport",
                 |emitter| {
                     emitter.move_to(digit);
                     let transport = emitter.capture_infallible(|emitter| {
                         emitter.adjust(255);
+                        if restore_source {
+                            emitter.move_to(source);
+                            emitter.adjust(contribution);
+                        }
                         emitter.move_to(0);
                         emitter.emit_context_to_global(destination, context_chunks);
                         emitter.adjust(contribution);
