@@ -405,8 +405,9 @@ routerはglobal側で既知の共有accessor PCとglobal選択番号を設定す
 全体dispatcherへの追加訪問やglobalごとのpayload resolver複製は必要ない。
 選択表のloop gateにはPcLow/Conditionを使い、callerのactivation ReturnPcを保持する。
 
-static frames、対象globalが257個以上、または追加hidden IDが収まらない場合は、
+動的callerで対象globalが257個以上、または追加hidden IDが収まらない場合は、
 ACCESSOR/RESUMEの4 PC byteも送る汎用protocolへ戻る。
+experimental固定contextの共有request/returnは末尾で説明する。
 route予約量は両方式とも16 cellsである。global側のRETURN_PC_LOWは新方式では0..255の
 global選択番号、汎用方式ではresume PC低byteを表す。frame/local portalのreturn PC解釈は従来通り。
 この領域はoutboxとcontextの間に入るため、outbox位置の計算にも`Q`を含める。
@@ -1258,9 +1259,17 @@ routeを持たないcalleeでは既存static scratchを使う。
 動的callerにあるglobal引数はglobal側のstatic scratchでcopyし、unitごとのstack往復を避ける。
 固定context内では選択式の直接比較も使い、予約したguardでoperand搬送を省く。
 
-portalのaccessorは関数ごとに複製しない。固定callerは共有accessorからsite別resumeへ戻り、
-そのresumeがportal結果を所属関数の固定contextへ配送する。固定callerのinline requestは
-offsetとpayloadだけを搬送し、既知のaccessor／resume PCはportal側で直接設定する。
+portalのaccessorは関数ごとに複製しない。固定callerはsiteのresume PCを自身のrouteに保持する。
+関数・global・load/store種別の組ごとに共有return continuationを置き、accessorはportal上の
+このcontinuationへ戻る。共有returnがportalをcleanupし、loadの結果を所属関数のABI Valueへ
+配送してから、routeのresume PCをcallerのNEXT_PCへ消費moveする。storeでは値を配送しない。
+site別resumeはcaller contextで実行し、Valueから宛先への局所配送・batchのoffset更新だけを行う。
+activationのReturnPcは保持する。
+
+同じ組のleaf requestが二つ以上ある場合は、往路も専用request continuationで共有する。
+単一leafの往路はinlineに残して余分なdispatchを避ける。aggregate batchはleaf数で数える。
+いずれもoffsetとpayloadの3 byteだけを搬送し、既知のaccessor／共有return PCはportal側で
+直接設定する。request/returnの隠しIDとcall return gateが合計で収まらない場合は、汎用portalへ戻す。
 動的callerのglobal portalには
 既存の復帰PC保持経路を残す。混在時はそれぞれの復帰方式の共有accessorを生成する。
 内部storageは大きいglobal aggregateの後、小さいglobal aggregate・scalar globals・remote-copy
@@ -1278,6 +1287,7 @@ Anchor16とも併用できる。生成量とRLE/nativeの順位は入力で異�
 2026-10-08の再実装と評価は[global context実験](optimize_logs/GLOBAL_CONTEXT_STATIC_FRAMES_EVALUATION_20261008.md)。
 生成量の削減比較は[固定contextの生成量評価](optimize_logs/GLOBAL_CONTEXT_SIZE_EVALUATION_20261008.md)。
 配置・storage共有の追加評価は[固定context配置の評価](optimize_logs/GLOBAL_CONTEXT_LAYOUT_EVALUATION_20261008.md)。
+request/returnの共有とdispatch追加費用は[共有portal評価](optimize_logs/GLOBAL_CONTEXT_SHARED_PORTAL_EVALUATION_20261008.md)。
 
 ## 実装との照合
 

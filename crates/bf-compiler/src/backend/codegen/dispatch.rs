@@ -8,6 +8,7 @@ pub(super) enum DispatchEntry<'a> {
     PortalAccessor(PortalAccessor),
     PortalResume(PortalSite),
     GlobalPortalRouter(GlobalPortalRouter),
+    FixedPortalReturn(GlobalPortalRouter),
     StaticResume(StaticResume),
 }
 
@@ -18,6 +19,7 @@ impl DispatchEntry<'_> {
             Self::PortalAccessor(accessor) => accessor.id,
             Self::PortalResume(site) => site.resume,
             Self::GlobalPortalRouter(router) => router.id,
+            Self::FixedPortalReturn(router) => router.fixed.unwrap().return_id,
             Self::StaticResume(resume) => resume.id,
         }
     }
@@ -61,7 +63,19 @@ impl DispatchEncoding {
             .map(|c| (c.id(), false))
             .chain(portal.accessors.iter().map(|a| (a.id, true)))
             .chain(portal.ordered_sites.iter().map(|s| (s.resume, true)))
-            .chain(portal.routers.iter().map(|r| (r.id, true)))
+            .chain(
+                portal
+                    .routers
+                    .iter()
+                    .filter(|r| r.fixed.is_none_or(|f| f.shared_request))
+                    .map(|r| (r.id, true)),
+            )
+            .chain(
+                portal
+                    .routers
+                    .iter()
+                    .filter_map(|r| r.fixed.map(|f| (f.return_id, true))),
+            )
             .chain(
                 fixed
                     .into_iter()
@@ -234,11 +248,20 @@ impl<'a> AbiEmitter<'a> {
                     .push(DispatchEntry::PortalResume(site));
             }
             for &router in &emitter.portal.routers {
-                let encoded = emitter.dispatch_encoding.encode(router.id);
-                pages
-                    .entry((encoded >> 8) as u8)
-                    .or_default()
-                    .push(DispatchEntry::GlobalPortalRouter(router));
+                if router.fixed.is_none_or(|f| f.shared_request) {
+                    let encoded = emitter.dispatch_encoding.encode(router.id);
+                    pages
+                        .entry((encoded >> 8) as u8)
+                        .or_default()
+                        .push(DispatchEntry::GlobalPortalRouter(router));
+                }
+                if let Some(origin) = router.fixed {
+                    let encoded = emitter.dispatch_encoding.encode(origin.return_id);
+                    pages
+                        .entry((encoded >> 8) as u8)
+                        .or_default()
+                        .push(DispatchEntry::FixedPortalReturn(router));
+                }
             }
             if let Some(fixed) = emitter.fixed {
                 for &resume in &fixed.extra_resumes {
@@ -639,8 +662,15 @@ impl<'a> AbiEmitter<'a> {
                 self.emit_portal_resume(site)
             }
             DispatchEntry::GlobalPortalRouter(router) => {
-                self.fixed_context = None;
+                self.fixed_context = router
+                    .fixed
+                    .map(|f| self.fixed.unwrap().contexts[&f.function]);
                 self.emit_global_portal_router(router)
+            }
+            DispatchEntry::FixedPortalReturn(router) => {
+                let origin = router.fixed.unwrap();
+                self.fixed_context = Some(self.fixed.unwrap().contexts[&origin.function]);
+                self.emit_fixed_portal_return(router)
             }
         }
     }

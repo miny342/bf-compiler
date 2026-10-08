@@ -52,9 +52,20 @@ pub(super) struct PortalSite {
     pub(super) return_to: ContinuationId,
     pub(super) next_resume: Option<ContinuationId>,
     pub(super) router: Option<ContinuationId>,
-    /// Dynamic global callers retain their PC in the frame; fixed callers
-    /// use the generic shared accessor and an origin-specific resume gate.
+    /// Dynamic global callers use the accessor's local selector return path.
+    /// Fixed callers use a generic accessor followed by a shared fixed return.
     pub(super) frame_return: bool,
+    /// Return transport is shared by this fixed function/global/kind pair.
+    pub(super) shared_fixed: bool,
+    /// Repeated leaf requests also share their outward transport.
+    pub(super) shared_request: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FixedPortalOrigin {
+    pub(super) function: FunctionId,
+    pub(super) return_id: ContinuationId,
+    pub(super) shared_request: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,8 +73,10 @@ pub(super) struct GlobalPortalRouter {
     pub(super) id: ContinuationId,
     pub(super) global: GlobalId,
     pub(super) kind: PortalAccessKind,
-    /// None uses the generic seven-byte protocol (fixed frames or capacity fallback).
+    /// Dynamic callers use a compact global selector when capacity permits.
+    /// None denotes a fixed origin or the generic seven-byte fallback.
     pub(super) return_selector: Option<u8>,
+    pub(super) fixed: Option<FixedPortalOrigin>,
 }
 
 #[derive(Debug)]
@@ -120,6 +133,37 @@ impl PortalPlan {
             })
             .collect::<HashSet<_>>();
         let frame_returns = frame_returns && globals.len() <= 256;
+        let mut fixed_counts = HashMap::<(FunctionId, GlobalId, PortalAccessKind), usize>::new();
+        for c in program.continuations() {
+            if !fixed_functions.contains(&c.function()) {
+                continue;
+            }
+            let (global, kind, cells) = match *c.terminator() {
+                Terminator::ArrayLoad {
+                    array: AggregateRegion::Global(g),
+                    ..
+                } => (g, PortalAccessKind::Load, 1),
+                Terminator::ArrayStore {
+                    array: AggregateRegion::Global(g),
+                    ..
+                } => (g, PortalAccessKind::Store, 1),
+                Terminator::AggregateLoad {
+                    source: AggregateRegion::Global(g),
+                    cells,
+                    ..
+                } => (g, PortalAccessKind::Load, cells),
+                Terminator::AggregateStore {
+                    destination: AggregateRegion::Global(g),
+                    cells,
+                    ..
+                } => (g, PortalAccessKind::Store, cells),
+                _ => continue,
+            };
+            let count = fixed_counts
+                .entry((c.function(), global, kind))
+                .or_default();
+            *count = count.saturating_add(cells);
+        }
         let mut used = program
             .continuations()
             .iter()
@@ -193,14 +237,39 @@ impl PortalPlan {
             let frame_return = frame_returns
                 && matches!(region, AggregateRegion::Global(_))
                 && !fixed_functions.contains(&continuation.function());
+            let shared_fixed = matches!(region, AggregateRegion::Global(_))
+                && fixed_functions.contains(&continuation.function());
+            // An extra request dispatch is worthwhile only when its long
+            // transport template can replace multiple emitted leaf requests.
+            let shared_request = shared_fixed
+                && matches!(region, AggregateRegion::Global(global)
+                    if fixed_counts[&(continuation.function(), global, operation.kind())] >= 2);
             let router = match region {
                 AggregateRegion::Global(global) => {
-                    let key = (global, frame_return.then_some(operation.kind()));
+                    let fixed_function = shared_fixed.then_some(continuation.function());
+                    let key = (
+                        global,
+                        (frame_return || shared_fixed).then_some(operation.kind()),
+                        fixed_function,
+                    );
                     Some(if let Some(id) = router_ids.get(&key).copied() {
                         id
                     } else {
                         let id = allocate_hidden_id(&mut used)?;
                         router_ids.insert(key, id);
+                        let fixed = if let Some(function) = fixed_function {
+                            Some(FixedPortalOrigin {
+                                function,
+                                return_id: if shared_request {
+                                    allocate_hidden_id(&mut used)?
+                                } else {
+                                    id
+                                },
+                                shared_request,
+                            })
+                        } else {
+                            None
+                        };
                         let return_selector = if frame_return {
                             let index = return_globals
                                 .iter()
@@ -218,6 +287,7 @@ impl PortalPlan {
                             global,
                             kind: operation.kind(),
                             return_selector,
+                            fixed,
                         });
                         id
                     })
@@ -256,6 +326,8 @@ impl PortalPlan {
                     next_resume: resumes.get(leaf + 1).copied(),
                     router,
                     frame_return,
+                    shared_fixed,
+                    shared_request,
                 };
                 ordered_sites.push(site);
             }

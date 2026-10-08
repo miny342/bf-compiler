@@ -139,6 +139,12 @@ impl StaticFramePlan {
             .chain(portal.accessors.iter().map(|a| a.id.get()))
             .chain(portal.ordered_sites.iter().map(|s| s.resume.get()))
             .chain(portal.routers.iter().map(|r| r.id.get()))
+            .chain(
+                portal
+                    .routers
+                    .iter()
+                    .filter_map(|r| r.fixed.map(|f| f.return_id.get())),
+            )
             .collect::<HashSet<_>>();
         let mut resumes = HashMap::new();
         let mut extra_resumes = Vec::new();
@@ -1155,7 +1161,7 @@ mod tests {
             let candidate = check(&p, &[], regions, true);
             assert!(
                 candidate.visits <= baseline.visits,
-                "fixed portal routing needs no extra visit"
+                "single-site requests stay inline, only the return is shared"
             );
             assert!(
                 candidate.stats.optimization.scan_steps > 0,
@@ -1424,6 +1430,135 @@ mod tests {
                     .unwrap();
                     assert_eq!(result.output, [0, 81, 0, 81, 0, 81, 0, 81, 0, 0, 1, 1]);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn global_contexts_share_portal_transport_per_origin_and_kind() {
+        let p = program(
+            "cell[256] g; cell read(cell i) { return g[i] + g[i + 1]; } cell single(cell i) { return g[i]; } void main() { cell n = input(); g[n] = 7; output(read(n)); output(single(n)); }",
+        );
+        let selected = crate::cir::analysis::call_graph::global_context_functions(&p);
+        let portal = PortalPlan::with_fixed_contexts(&p, true, &selected).unwrap();
+        let named = |name| {
+            p.functions()
+                .iter()
+                .find(|f| f.name() == Some(name))
+                .unwrap()
+                .id()
+        };
+        let repeated = portal
+            .routers
+            .iter()
+            .find(|r| r.fixed.is_some_and(|f| f.function == named("read")))
+            .unwrap();
+        let single = portal
+            .routers
+            .iter()
+            .find(|r| r.fixed.is_some_and(|f| f.function == named("single")))
+            .unwrap();
+        assert!(repeated.fixed.unwrap().shared_request);
+        assert_ne!(repeated.id, repeated.fixed.unwrap().return_id);
+        assert!(!single.fixed.unwrap().shared_request);
+        assert_eq!(single.id, single.fixed.unwrap().return_id);
+        assert_ne!(single.id, repeated.fixed.unwrap().return_id);
+        let mut entries = p.continuations().iter().map(|c| c.id()).collect::<Vec<_>>();
+        entries.extend(portal.accessors.iter().map(|a| a.id));
+        entries.extend(portal.ordered_sites.iter().map(|s| s.resume));
+        for r in &portal.routers {
+            if r.fixed.is_none_or(|f| f.shared_request) {
+                entries.push(r.id);
+            }
+            if let Some(f) = r.fixed {
+                entries.push(f.return_id);
+            }
+        }
+        let config = AbiConfig::default();
+        let layouts = build_layouts_with_regions(&p, config, None).unwrap();
+        let mut storage = StaticLayout::new(config, p.globals()).unwrap();
+        let fixed =
+            StaticFramePlan::new(&p, &layouts, &portal, &mut storage, true, &selected).unwrap();
+        entries.extend(fixed.extra_resumes.iter().map(|r| r.id));
+        assert_eq!(
+            entries.iter().copied().collect::<HashSet<_>>().len(),
+            entries.len()
+        );
+        let encoding = DispatchEncoding::with_fixed_frames(&p, &portal, None, Some(&fixed));
+        let encoded = entries
+            .iter()
+            .map(|id| encoding.encode(*id))
+            .collect::<HashSet<_>>();
+        assert_eq!(encoded.len(), entries.len());
+        assert!(!encoded.contains(&0));
+    }
+
+    #[test]
+    fn global_contexts_shared_portals_batch_across_page_and_recursive_caller() {
+        let p = program(
+            "struct P { cell a; cell b; cell c; } P[100] g; P read(cell i) { return g[i]; } void write(cell i, P p) { g[i] = p; } void recurse(cell n) { P p; p.a = 255; p.b = n; p.c = 9; write(85, p); P keep = read(85); write(84, p); P other = read(84); if (n) { recurse(n - 1); } output(keep.a); output(keep.b); output(keep.c); output(other.a); output(other.b); output(other.c); } void main() { recurse(1); }",
+        );
+        let selected = crate::cir::analysis::call_graph::global_context_functions(&p);
+        let portal = PortalPlan::with_fixed_contexts(&p, true, &selected).unwrap();
+        assert!(
+            portal
+                .ordered_sites
+                .iter()
+                .any(|s| s.cells == 3 && s.shared_request)
+        );
+        for regions in [false, true] {
+            for enabled in [false, true] {
+                let annotated = lower_continuations_with_profile_and_codegen_options(
+                    &p,
+                    ProfileGranularity::Abi,
+                    AbiCodegenOptions {
+                        static_frames: true,
+                        region_emission: regions,
+                        nibble_transfer: enabled,
+                        anchor_bank: enabled,
+                        inplace_compare: enabled,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let artifact = optimize_annotated_bf(&annotated).profile_artifact(true);
+                let optimized = bf_interpreter::run_with_options(
+                    artifact.source.as_bytes(),
+                    &[],
+                    RunOptions {
+                        collect_stats: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let rle = bf_interpreter::run_with_options(
+                    artifact.source.as_bytes(),
+                    &[],
+                    RunOptions {
+                        collect_stats: true,
+                        disable_clear: true,
+                        disable_scan: true,
+                        disable_transfer: true,
+                        disable_countdown: true,
+                        disable_remote_transfer: true,
+                        disable_compare: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    optimized.output,
+                    [255, 0, 9, 255, 0, 9, 255, 1, 9, 255, 1, 9]
+                );
+                assert_eq!(rle.output, optimized.output);
+                assert_eq!(
+                    rle.stats.executed_instructions,
+                    optimized.stats.executed_instructions
+                );
+                assert_eq!(
+                    rle.stats.executed_rle_instructions,
+                    optimized.stats.executed_rle_instructions
+                );
             }
         }
     }

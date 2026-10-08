@@ -275,9 +275,11 @@ impl<'a> AbiEmitter<'a> {
                         (emitter.dispatch_encoding.encode(site.resume) >> 8) as u8,
                     ),
                 ] {
-                    if emitter.fixed_context.is_none()
+                    if (emitter.fixed_context.is_none()
                         && (!site.frame_return
-                            || matches!(index, ROUTE_RESUME_LOW | ROUTE_RESUME_HIGH))
+                            || matches!(index, ROUTE_RESUME_LOW | ROUTE_RESUME_HIGH)))
+                        || (site.shared_fixed
+                            && matches!(index, ROUTE_RESUME_LOW | ROUTE_RESUME_HIGH))
                     {
                         emitter.set_location(emitter.route_location(index)?, value);
                     }
@@ -286,9 +288,23 @@ impl<'a> AbiEmitter<'a> {
                 Ok(())
             },
         )?;
-        if self.fixed_context.is_some() {
+        if site.shared_request {
+            self.set_next_pc(router)
+        } else if self.fixed_context.is_some() {
             // This inline route knows both PCs. Transport only runtime data,
             // then set the constants once at the selected static portal.
+            let return_id = if site.shared_fixed {
+                self.portal
+                    .routers
+                    .iter()
+                    .find(|r| r.id == router)
+                    .expect("validated fixed router")
+                    .fixed
+                    .expect("fixed portal origin")
+                    .return_id
+            } else {
+                site.resume
+            };
             self.move_global_portal_request_fields(site.region, false)?;
             self.enter_portal(site.region, site.function)?;
             for (field, value) in [
@@ -302,11 +318,11 @@ impl<'a> AbiEmitter<'a> {
                 ),
                 (
                     AbiField::ReturnPcLow,
-                    self.dispatch_encoding.encode(site.resume) as u8,
+                    self.dispatch_encoding.encode(return_id) as u8,
                 ),
                 (
                     AbiField::ReturnPcHigh,
-                    (self.dispatch_encoding.encode(site.resume) >> 8) as u8,
+                    (self.dispatch_encoding.encode(return_id) >> 8) as u8,
                 ),
             ] {
                 self.set_abi_field(field, value)?;
@@ -332,6 +348,38 @@ impl<'a> AbiEmitter<'a> {
         router: GlobalPortalRouter,
     ) -> Result<(), AbiCodegenError> {
         let region = AggregateRegion::Global(router.global);
+        if let Some(origin) = router.fixed {
+            self.move_global_portal_request_fields(region, false)?;
+            self.enter_portal(region, origin.function)?;
+            let accessor = self
+                .portal
+                .accessors
+                .iter()
+                .find(|a| a.kind == router.kind && !a.frame_return)
+                .expect("validated fixed accessor")
+                .id;
+            for (field, value) in [
+                (
+                    AbiField::NextPcLow,
+                    self.dispatch_encoding.encode(accessor) as u8,
+                ),
+                (
+                    AbiField::NextPcHigh,
+                    (self.dispatch_encoding.encode(accessor) >> 8) as u8,
+                ),
+                (
+                    AbiField::ReturnPcLow,
+                    self.dispatch_encoding.encode(origin.return_id) as u8,
+                ),
+                (
+                    AbiField::ReturnPcHigh,
+                    (self.dispatch_encoding.encode(origin.return_id) >> 8) as u8,
+                ),
+            ] {
+                self.set_abi_field(field, value)?;
+            }
+            return self.set_abi_field(AbiField::Active, 1);
+        }
         if let Some(selector) = router.return_selector {
             self.move_global_portal_request_fields(region, false)?;
             // PC constants stay at the selected static portal. Only a compact
@@ -790,7 +838,7 @@ impl<'a> AbiEmitter<'a> {
     ) -> Result<(), AbiCodegenError> {
         let is_load = matches!(site.operation, PortalOperation::Load { .. });
         let frame = self.layout(site.function)?.frame.clone();
-        if !(self.portal.frame_returns && site.frame_return) {
+        if !(site.shared_fixed || (self.portal.frame_returns && site.frame_return)) {
             self.with_profile_site(
                 "abi",
                 "abi.portal.resume.clear",
@@ -898,6 +946,48 @@ impl<'a> AbiEmitter<'a> {
             // buffer leaf, so the buffer is already zero for the next request.
             self.set_next_pc(site.return_to)
         }
+    }
+
+    /// Return once per fixed function/global/kind pair. The site PC remains
+    /// in its caller's route, so only runtime offset/payload crosses the gap.
+    pub(super) fn emit_fixed_portal_return(
+        &mut self,
+        router: GlobalPortalRouter,
+    ) -> Result<(), AbiCodegenError> {
+        self.with_profile_site(
+            "abi",
+            "abi.portal.fixed.return",
+            "shared fixed portal return",
+            |emitter| {
+                let origin = router.fixed.expect("fixed portal return");
+                let frame = emitter.layout(origin.function)?.frame.clone();
+                let load = router.kind == PortalAccessKind::Load;
+                for field in AbiField::ALL {
+                    if !load || field != AbiField::Value {
+                        emitter.clear_abi_field(field)?;
+                    }
+                }
+                let base = emitter.static_layout.aggregate_base_head(router.global)?;
+                if load {
+                    emitter.move_global_portal_value_to_context(
+                        base,
+                        frame.abi_offset(AbiField::Value),
+                    )?;
+                } else {
+                    emitter.emit_global_to_context(base, frame.context_chunks());
+                }
+                for (route, field) in [
+                    (ROUTE_RESUME_LOW, AbiField::NextPcLow),
+                    (ROUTE_RESUME_HIGH, AbiField::NextPcHigh),
+                ] {
+                    emitter.move_location(
+                        emitter.route_location(route)?,
+                        Location::Relative(frame.abi_offset(field)),
+                    );
+                }
+                Ok(())
+            },
+        )
     }
 
     pub(super) fn increment_portal_offset(

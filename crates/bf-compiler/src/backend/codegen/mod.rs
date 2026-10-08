@@ -244,7 +244,7 @@ fn lower_continuations_annotated_with_options(
 ) -> Result<AnnotatedBfProgram, AbiCodegenError> {
     let check_capacity = !options.unlimited_tape;
     let mut regions = options.region_emission.then(|| RegionPlan::new(program));
-    let mut static_layout = if options.anchor_bank {
+    let static_layout = if options.anchor_bank {
         StaticLayout::new_with_anchor_bank(config, program.globals(), check_capacity)?
     } else if check_capacity {
         StaticLayout::new(config, program.globals())?
@@ -292,29 +292,39 @@ fn lower_continuations_annotated_with_options(
         }
         Err(error) => return Err(error),
     };
-    let portal =
-        PortalPlan::with_fixed_contexts(program, true, &fixed_functions).or_else(|error| {
-            if matches!(error, AbiCodegenError::ContinuationIdsExhausted) {
-                // Extra load/store routers and scoped accessors must not reject a
-                // program that fits the generic protocol's hidden-ID budget.
-                PortalPlan::with_frame_returns(program, false)
-            } else {
-                Err(error)
-            }
-        })?;
-    let fixed = options
-        .static_frames
-        .then(|| {
-            StaticFramePlan::new(
-                program,
-                &layouts,
-                &portal,
-                &mut static_layout,
-                check_capacity,
-                &fixed_functions,
-            )
-        })
-        .transpose()?;
+    let make_plans = |shared: bool| {
+        let portal = if shared {
+            PortalPlan::with_fixed_contexts(program, true, &fixed_functions)?
+        } else {
+            PortalPlan::with_frame_returns(program, false)?
+        };
+        // Static planning reserves tape and may allocate caller return gates
+        // after portal IDs. Retry from the original layout on ID exhaustion.
+        let mut storage = static_layout.clone();
+        let fixed = options
+            .static_frames
+            .then(|| {
+                StaticFramePlan::new(
+                    program,
+                    &layouts,
+                    &portal,
+                    &mut storage,
+                    check_capacity,
+                    &fixed_functions,
+                )
+            })
+            .transpose()?;
+        Ok::<_, AbiCodegenError>((portal, fixed, storage))
+    };
+    let (portal, fixed, static_layout) = make_plans(true).or_else(|error| {
+        if matches!(error, AbiCodegenError::ContinuationIdsExhausted) {
+            // Shared transport must not reject a program whose generic portal
+            // and fixed call/return gates fit the hidden-ID budget together.
+            make_plans(false)
+        } else {
+            Err(error)
+        }
+    })?;
     let mut emitter = AbiEmitter::new(
         program,
         &layouts,
