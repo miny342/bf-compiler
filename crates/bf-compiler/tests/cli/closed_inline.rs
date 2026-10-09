@@ -52,7 +52,7 @@ fn verify(name: &str, source: &str, cases: &[(&[u8], &[u8])]) {
                     (output.stdout, entries)
                 };
                 let (baseline, entries) = compile("0", "128");
-                for mode in ["1", "2"] {
+                for mode in ["1", "2", "3"] {
                     for weight in ["0", "128"] {
                         let (bf, new_entries) = compile(mode, weight);
                         assert!(
@@ -146,5 +146,41 @@ fn closed_inline_preserves_abort_and_input_order() {
         "abort",
         "void stop(cell n) { if(n) { output(input()); abort(); } output(65); } void main() { stop(input()); output(input()); }",
         &[(&[0, 9], &[65, 9]), (&[1, 7, 9], &[7])],
+    );
+}
+
+#[test]
+fn closed_inline_forwards_portal_wrapper_results() {
+    verify(
+        "forward",
+        "cell[256] arena; cell read(cell p) { return arena[p]; } cell wrapper(cell p) { return read(p+1); } void main() { cell p=input(); arena[p+1]=input(); output(wrapper(p)); output(p); }",
+        &[(&[0, 3], &[3, 0]), (&[255, 255], &[255, 255])],
+    );
+}
+
+#[test]
+fn closed_inline_collapses_tail_recursive_cycle() {
+    verify(
+        "cycle",
+        "cell a(cell n) { output(65); if(n) { return b(n-1); } return 7; } cell b(cell n) { output(66); if(n) { return a(n-1); } return 7; } void main() { output(a(input())); }",
+        &[(&[0], &[65, 7]), (&[3], &[65, 66, 65, 66, 7])],
+    );
+}
+
+#[test]
+fn closed_inline_forwards_void_portal_wrapper() {
+    verify(
+        "void-forward",
+        "cell[256] arena; void write(cell p,cell value) { arena[p]=value; } void wrapper(cell p,cell value) { write(p+1,value); } void main() { cell p=input(); wrapper(p,input()); output(arena[p+1]); output(p); }",
+        &[(&[0, 3], &[3, 0]), (&[255, 255], &[255, 255])],
+    );
+}
+
+#[test]
+fn closed_inline_preserves_post_call_global_write() {
+    verify(
+        "post-global",
+        "cell[256] arena; cell g; cell read(cell p) { return arena[p]; } cell wrapper(cell p) { cell value=read(p); g=7; return value; } void main() { arena[0]=input(); output(wrapper(0)); output(g); }",
+        &[(&[0], &[0, 7]), (&[255], &[255, 7])],
     );
 }

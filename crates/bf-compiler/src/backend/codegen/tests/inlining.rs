@@ -915,3 +915,91 @@ fn closed_inline_preserves_portal_roots_and_recursive_callees() {
         }
     }
 }
+
+#[test]
+fn forwarding_inline_shares_portal_callee_and_skips_wrapper_resumes() {
+    let program = source(
+        "cell[256] arena; cell read(cell p) { return arena[p]; } cell advance(cell p) { return read(p+1); } cell wrapper(cell p) { return advance(p); } void main() { cell p=input(); arena[p+1]=input(); output(wrapper(p)); output(p); }",
+    );
+    let (expanded, stats) =
+        crate::cir::inline::inline_forwarding(&program, Default::default(), 128).unwrap();
+    assert!(stats.calls_inlined >= 2);
+    let names: HashSet<_> = expanded
+        .functions()
+        .iter()
+        .filter_map(FunctionDescriptor::name)
+        .collect();
+    assert!(names.contains("read"));
+    assert!(!names.contains("advance"));
+    assert!(!names.contains("wrapper"));
+    let requests = |p: &ContinuationProgram| {
+        p.continuations()
+            .iter()
+            .filter(|c| matches!(c.terminator(), Terminator::AggregateLoad { .. }))
+            .count()
+    };
+    assert_eq!(requests(&expanded), requests(&program));
+    let (before, _) =
+        crate::cir::pipeline::optimize_and_allocate(&program, Default::default()).unwrap();
+    let (after, _) =
+        crate::cir::pipeline::optimize_and_allocate(&expanded, Default::default()).unwrap();
+    assert!(RegionPlan::new(&after).entries.len() < RegionPlan::new(&before).entries.len());
+    for input in [[0u8, 3], [254, 255], [255, 0]] {
+        let old = measure(&before, &input, true);
+        let new = measure(&after, &input, true);
+        assert_eq!(new.output, [input[1], input[0]]);
+        assert!(new.semantic.calls < old.semantic.calls);
+    }
+}
+
+#[test]
+fn forwarding_inline_collapses_tail_recursive_scc_to_one_function() {
+    let program = source(
+        "cell a(cell n) { output(65); if(n) { return b(n-1); } return 7; } cell b(cell n) { output(66); if(n) { return c(n-1); } return 7; } cell c(cell n) { output(67); if(n) { return d(n-1); } return 7; } cell d(cell n) { output(68); if(n) { return a(n-1); } return 7; } void main() { output(a(input())); }",
+    );
+    let (expanded, stats) =
+        crate::cir::inline::inline_forwarding(&program, Default::default(), 128).unwrap();
+    assert!(stats.calls_inlined >= 3);
+    let names: HashSet<_> = expanded
+        .functions()
+        .iter()
+        .filter_map(FunctionDescriptor::name)
+        .collect();
+    assert_eq!(names, HashSet::from(["a", "main"]));
+    let (before, _) =
+        crate::cir::pipeline::optimize_and_allocate(&program, Default::default()).unwrap();
+    let (after, _) =
+        crate::cir::pipeline::optimize_and_allocate(&expanded, Default::default()).unwrap();
+    assert!(RegionPlan::new(&after).entries.len() <= RegionPlan::new(&before).entries.len());
+    for n in 0u8..=255 {
+        let mut expected = (0..=n).map(|i| 65 + i % 4).collect::<Vec<_>>();
+        expected.push(7);
+        let old = measure(&before, &[n], true);
+        let new = measure(&after, &[n], true);
+        assert_eq!(new.output, expected);
+        if n >= 4 {
+            assert!(new.semantic.max_call_depth < old.semantic.max_call_depth);
+        }
+    }
+}
+
+#[test]
+fn forwarding_inline_retains_post_call_effects_and_non_tail_recursion() {
+    for text in [
+        "cell[256] arena; cell read(cell p) { return arena[p]; } cell wrapper(cell p) { cell x=read(p); output(65); return x; } void main() { arena[0]=9; output(wrapper(0)); }",
+        "cell a(cell n) { if(n) { return b(n-1)+1; } return 0; } cell b(cell n) { if(n) { return a(n-1)+1; } return 0; } void main() { output(a(3)); }",
+    ] {
+        let program = source(text);
+        let (expanded, stats) =
+            crate::cir::inline::inline_forwarding(&program, Default::default(), 128).unwrap();
+        assert_eq!(stats.calls_inlined, 0);
+        let (before, _) =
+            crate::cir::pipeline::optimize_and_allocate(&program, Default::default()).unwrap();
+        let (after, _) =
+            crate::cir::pipeline::optimize_and_allocate(&expanded, Default::default()).unwrap();
+        assert_eq!(
+            measure(&after, &[], true).output,
+            measure(&before, &[], true).output
+        );
+    }
+}

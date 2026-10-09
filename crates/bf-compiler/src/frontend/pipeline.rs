@@ -31,12 +31,17 @@ pub(crate) fn lower_hir(
     // Replace general cloning with closed-callee expansion even when general
     // function inlining is disabled for the comparison.
     let closed = std::env::var("BFC_EVAL_CLOSED_INLINE").unwrap_or_default();
-    let lowered = if matches!(closed.as_str(), "1" | "2") {
+    let lowered = if matches!(closed.as_str(), "1" | "2" | "3") {
         let max_weight = std::env::var("BFC_EVAL_CLOSED_INLINE_WEIGHT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(128);
-        crate::cir::inline::inline_closed(&lowered, options, closed == "2", max_weight)
+        let trial = if closed == "3" {
+            crate::cir::inline::inline_forwarding(&lowered, options, max_weight)
+        } else {
+            crate::cir::inline::inline_closed(&lowered, options, closed == "2", max_weight)
+        };
+        trial
             .map_err(|detail| ContinuationLoweringError::InvalidHir {
                 function: None,
                 detail,

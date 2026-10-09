@@ -124,3 +124,33 @@ pub(crate) fn callee_ranks(program: &ContinuationProgram) -> HashMap<FunctionId,
     }
     rank
 }
+
+/// Keep one deterministic function per recursive SCC as an expansion stop.
+/// Forwarding wrappers can then collapse the other members without unrolling
+/// the remaining self recursion indefinitely.
+pub(crate) fn recursive_roots(program: &ContinuationProgram) -> HashSet<FunctionId> {
+    let edges = call_edges(program);
+    let recursive = recursive_functions(program);
+    let mut reach = HashMap::new();
+    for &function in &recursive {
+        let mut visited = HashSet::new();
+        let mut pending = vec![function];
+        while let Some(id) = pending.pop() {
+            if visited.insert(id) {
+                pending.extend(edges.get(&id).into_iter().flatten().copied());
+            }
+        }
+        reach.insert(function, visited);
+    }
+    recursive
+        .iter()
+        .copied()
+        .filter(|&function| {
+            !recursive.iter().any(|&other| {
+                other.index() < function.index()
+                    && reach[&function].contains(&other)
+                    && reach[&other].contains(&function)
+            })
+        })
+        .collect()
+}

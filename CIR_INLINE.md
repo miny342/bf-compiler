@@ -26,6 +26,25 @@ dispatch rootの判定は既定のB1用で、`--disable-region-emission`のB0に
 割り当て後にCopy／Transferが残らないことを全256入力で確認した。
 [中断しないcalleeの割り当て前inline評価](optimize_logs/CLOSED_CALLEE_INLINE_EVALUATION_20261009.md)。
 
+同日追補: `BFC_EVAL_CLOSED_INLINE=3` は版2に末尾wrapperの取り込みを加える。
+callee自身にportal命令がなく、残るCallのscalar／void結果を副作用なしにそのまま返すなら、
+内側calleeを共有し、内側Callのresult destination／return_toを既存callerのものへ転送する。
+wrapperのcloned epilogueは到達不能になり、追加のhard resumeを必要としない。
+post-callのglobal書き込み／I/O／loop／結果変更、aggregate返値、返値型の不一致は対象外。
+call前の処理と早期return／abortは通常のvirtual CIR spliceで保持する。
+
+末端優先の選択は維持する。相互再帰では元call graphの各SCCにつき最小FunctionIdを展開停止点にし、
+他のメンバーがこのwrapper条件を満たす場合だけ取り込む。self Callは展開しない。
+`A→B→C→D→A` が結果をそのまま返す形なら、B/C/Dを取り込んで再帰先をAへまとめられる。
+一般の非末尾相互再帰の統合は未実装。各activationのゼロ初期化、snapshot、残存CallのABIは維持する。
+
+版3／weight256、三option ONの既定汎用inline比でcompiler RLE−3.5663%／transfer反復−3.8488%、
+dispatch先2,617→2,406、素BF−21.2524%／圧縮BF＋15.8537%。arena RLE−0.9119%。
+版3／weight128はcompiler RLE＋3.3890%だが圧縮BF−27.0457%。既定OFFを維持する。
+旧版1/2と既定経路のBF10artifact、公開CIR48artifact不変。全474テスト・CLI native/RLE-only1,728実行・
+全256入力の4関数SCC・fmt/clippyを検証。
+[末尾wrapperと相互再帰SCCの評価](optimize_logs/FORWARDING_INLINE_SCC_EVALUATION_20261009.md)。
+
 2026-09-23。allocation 前の CIR graph に clone／splice を実装した。
 source の既定経路は frame cost に基づく自動 CIR inline を使用する。HIR の汎用 inliner は撤去した。
 `ContinuationOptimizationOptions::inline_functions = false` または `bfc --disable-function-inline` で

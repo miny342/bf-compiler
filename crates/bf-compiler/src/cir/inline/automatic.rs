@@ -13,6 +13,7 @@ enum Selection {
     Closed {
         allow_fixed_growth: bool,
         max_weight: usize,
+        forward_wrappers: bool,
     },
 }
 
@@ -267,6 +268,27 @@ pub(crate) fn inline_closed(
         Selection::Closed {
             allow_fixed_growth,
             max_weight,
+            forward_wrappers: false,
+        },
+    )
+}
+
+pub(crate) fn inline_forwarding(
+    program: &ContinuationProgram,
+    options: ContinuationOptimizationOptions,
+    max_weight: usize,
+) -> Result<(ContinuationProgram, InlineStats), String> {
+    let budget = weight(program.continuations().iter())
+        .saturating_mul(8)
+        .clamp(8192, 1_000_000);
+    inline_with_selection(
+        program,
+        options,
+        budget,
+        Selection::Closed {
+            allow_fixed_growth: true,
+            max_weight,
+            forward_wrappers: true,
         },
     )
 }
@@ -308,29 +330,56 @@ fn inline_with_selection(
         HashSet::new()
     };
     let recursive = recursive_functions(&cleaned);
+    let forward_wrappers = matches!(
+        selection,
+        Selection::Closed {
+            forward_wrappers: true,
+            ..
+        }
+    );
+    let stops = if forward_wrappers {
+        crate::cir::analysis::call_graph::recursive_roots(&cleaned)
+    } else {
+        recursive.clone()
+    };
     let ranks = callee_ranks(&cleaned);
     let mut budgets = WorkBudgets::new(&cleaned, budget);
     let mut graph = Graph::normalize(&cleaned)?;
+    let mut eligible = if is_closed {
+        closed_functions(&graph)
+    } else {
+        HashSet::new()
+    };
+    if forward_wrappers {
+        eligible.extend(
+            graph
+                .functions
+                .iter()
+                .filter(|f| graph.forwards_calls(f.id()))
+                .map(FunctionDescriptor::id),
+        );
+    }
     let mut skipped = HashSet::new();
     loop {
         let reachable = graph.reachable(cleaned.main());
-        let closed = if is_closed {
-            closed_functions(&graph)
-        } else {
-            HashSet::new()
-        };
         let candidate = graph
             .nodes
             .iter()
             .filter(|c| reachable.contains(&c.id()) && !skipped.contains(&c.id()))
             .filter_map(|c| c.terminator().callee().map(|callee| (c.id(), callee)))
-            .filter(|&(_, callee)| !is_closed || closed.contains(&callee))
+            .filter(|&(_, callee)| !is_closed || eligible.contains(&callee))
             .min_by_key(|&(site, callee)| (ranks[&callee], site));
         let Some((site, callee)) = candidate else {
             break;
         };
         skipped.insert(site);
-        if recursive.contains(&callee) {
+        let caller = graph
+            .nodes
+            .iter()
+            .find(|c| c.id() == site)
+            .unwrap()
+            .function();
+        if stops.contains(&callee) || caller == callee {
             stats.recursive_calls_preserved += 1;
             continue;
         }
@@ -343,12 +392,6 @@ fn inline_with_selection(
             stats.id_limit_calls_preserved += 1;
             continue;
         }
-        let caller = graph
-            .nodes
-            .iter()
-            .find(|c| c.id() == site)
-            .unwrap()
-            .function();
         let work = weight(graph.nodes.iter().filter(|c| c.function() == callee));
         if matches!(selection, Selection::Closed { max_weight, .. } if work > max_weight) {
             stats.work_limit_calls_preserved += 1;
@@ -359,7 +402,11 @@ fn inline_with_selection(
             continue;
         }
         let mut candidate = graph.trial(caller, callee);
-        let copied = candidate.splice(site)?;
+        let copied = if forward_wrappers {
+            candidate.splice_forwarding(site)?
+        } else {
+            candidate.splice(site)?
+        };
         let Ok((new_cost, new_entries, projection)) = caller_cost(
             &candidate,
             &cleaned,
@@ -419,6 +466,18 @@ fn inline_with_selection(
         graph.owners.insert(caller, refreshed.owners[&caller]);
         graph.ids.used.extend(candidate.ids.used);
         graph.ids.used.extend(refreshed.ids.used);
+        if is_closed {
+            let closed = graph
+                .nodes
+                .iter()
+                .filter(|c| c.function() == caller)
+                .all(|c| c.terminator().boundary() != crate::cir::ir::BoundaryKind::Hard);
+            if closed || (forward_wrappers && graph.forwards_calls(caller)) {
+                eligible.insert(caller);
+            } else {
+                eligible.remove(&caller);
+            }
+        }
         #[cfg(test)]
         {
             let materialized = graph.clone().materialize(&cleaned)?;

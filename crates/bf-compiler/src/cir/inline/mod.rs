@@ -7,7 +7,8 @@
 use std::collections::{HashMap, HashSet};
 
 mod automatic;
-pub(crate) use automatic::{inline_automatic, inline_closed};
+mod forwarding;
+pub(crate) use automatic::{inline_automatic, inline_closed, inline_forwarding};
 
 use crate::cir::analysis::call_graph::recursive_functions;
 use crate::cir::operands::{map_body, map_operand, map_region, map_terminator};
@@ -204,6 +205,14 @@ impl Graph {
     }
 
     fn splice(&mut self, site: ContinuationId) -> Result<usize, String> {
+        self.splice_impl(site, false)
+    }
+
+    fn splice_forwarding(&mut self, site: ContinuationId) -> Result<usize, String> {
+        self.splice_impl(site, true)
+    }
+
+    fn splice_impl(&mut self, site: ContinuationId, forward_calls: bool) -> Result<usize, String> {
         let call_index = self.nodes.iter().position(|c| c.id() == site).unwrap();
         let call = self.nodes[call_index].clone();
         let Terminator::Call {
@@ -340,6 +349,15 @@ impl Graph {
                         body.len() - count,
                     ));
                     terminal = Terminator::Goto { target: *return_to };
+                }
+                Terminator::Call {
+                    return_to: ref mut target,
+                    ..
+                } if forward_calls && self.forwards_result(c) => {
+                    // Skip the wrapper's cloned epilogue and deliver the inner
+                    // Call into the original caller's result/resume directly.
+                    *target = *return_to;
+                    self.results.insert(ids[&c.id()], destination);
                 }
                 Terminator::Call { .. } => {
                     let result = self.results[&c.id()];
