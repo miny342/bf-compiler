@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 mod automatic;
-pub(crate) use automatic::inline_automatic;
+pub(crate) use automatic::{inline_automatic, inline_closed};
 
 use crate::cir::analysis::call_graph::recursive_functions;
 use crate::cir::operands::{map_body, map_operand, map_region, map_terminator};

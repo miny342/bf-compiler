@@ -1,5 +1,31 @@
 # CIR graph inline migration
 
+2026-10-09追補: `experiment/shared-call-regions`で、中断しないcalleeだけを割り当て前に取り込む
+試作を追加した。`BFC_EVAL_CLOSED_INLINE=1` はglobal利用callerのframe増大禁止を維持し、
+`=2` は閉じた非再帰global contextに限って増大を許す。既定はOFF。
+この環境変数はsource経路で既存の汎用inlineを置き換え、`--disable-function-inline`との併用でも有効。
+公開binary CIR／割り当て済みCIRには適用しない。
+
+候補はCall／ArrayLoad・Store／AggregateLoad・Storeを含まない関数に限定する。
+structured branch／loop、I/O、scalar globalアクセスは対象にできる。
+callee側のclosed callを先に消し、親もclosedになれば対象にする。
+callee本文と引数準備・返値受け取りをvirtual storageでつなぎ、既存の計算グラフ・DSE等を通してから
+実際のframeを決める。calleeのhard resumeを複製しない。
+trialにも本番のscalar化等を通し、callerのB1 region計画でdispatch rootが増える候補を棄却する。
+候補の評価用allocationは破棄し、virtual CIRを保持して最後にprogram全体をallocationする。
+
+本文のweight（各block＋nested FrameInstruction数）は `BFC_EVAL_CLOSED_INLINE_WEIGHT`（既定128）で制限する。
+既存のcaller別work budgetも維持する。0なら展開せず、非常に大きな値で上限のない比較を行える。
+hard resumeを増やさない条件だけではBF生成量は抑えられなかったため、weight制限を併用する。
+dispatch rootの判定は既定のB1用で、`--disable-region-emission`のB0に同じ先数保証はしない。
+
+版2／weight128、関数inline OFF・nibble＋直接比較＋Anchor16の基準比compiler RLE−27.07%／
+圧縮BF−7.54%、arena RLE−19.63%／圧縮BF−2.37%。compiler dispatch先は3,555→2,652。
+既定の汎用inline比ではcompiler RLE＋16.79%なので、代替として既定化していない。
+小fixtureの `helper(x)=x+x+7; output(helper(x)-x-x);` は引数・返値境界を越えて相殺され、
+割り当て後にCopy／Transferが残らないことを全256入力で確認した。
+[中断しないcalleeの割り当て前inline評価](optimize_logs/CLOSED_CALLEE_INLINE_EVALUATION_20261009.md)。
+
 2026-09-23。allocation 前の CIR graph に clone／splice を実装した。
 source の既定経路は frame cost に基づく自動 CIR inline を使用する。HIR の汎用 inliner は撤去した。
 `ContinuationOptimizationOptions::inline_functions = false` または `bfc --disable-function-inline` で

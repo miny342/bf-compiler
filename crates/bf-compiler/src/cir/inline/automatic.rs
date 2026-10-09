@@ -7,6 +7,39 @@ use crate::ContinuationOptimizationOptions;
 use crate::cir::analysis::call_graph::callee_ranks;
 use crate::cir::effects::{self, Effect};
 
+#[derive(Clone, Copy)]
+enum Selection {
+    Automatic,
+    Closed {
+        allow_fixed_growth: bool,
+        max_weight: usize,
+    },
+}
+
+fn closed_functions(graph: &Graph) -> HashSet<FunctionId> {
+    let mut closed: HashSet<_> = graph.nodes.iter().map(Continuation::function).collect();
+    for c in &graph.nodes {
+        if matches!(
+            c.terminator().boundary(),
+            crate::cir::ir::BoundaryKind::Hard
+        ) {
+            closed.remove(&c.function());
+        }
+    }
+    closed
+}
+
+fn dispatch_entries(program: &ContinuationProgram) -> HashMap<FunctionId, usize> {
+    let plan = crate::backend::regions::RegionPlan::new(program);
+    let mut counts = HashMap::new();
+    for id in plan.entries {
+        *counts
+            .entry(program.continuation(id).unwrap().function())
+            .or_default() += 1;
+    }
+    counts
+}
+
 fn visit_body(body: &[I], visit: &mut impl FnMut(Effect)) {
     let mut pending = vec![body];
     while let Some(body) = pending.pop() {
@@ -168,18 +201,30 @@ fn caller_cost(
     caller: FunctionId,
     options: ContinuationOptimizationOptions,
     global_portal: bool,
-) -> Result<(usize, ContinuationProgram), String> {
+    selection: Selection,
+) -> Result<(usize, usize, ContinuationProgram), String> {
     // A splice changes only its caller. Callee signatures remain available
     // for validation, but other bodies are stubbed before cleanup/allocation.
     let projection = graph.clone().materialize_caller(original, caller)?;
     let projection =
         crate::cir::virtual_cleanup::cleanup(&projection).map_err(|e| e.to_string())?;
-    let (allocated, _) = crate::cir::pipeline::optimize_for_inline_cost(&projection, options)
-        .map_err(|e| e.to_string())?;
+    let (allocated, _) = match selection {
+        Selection::Automatic => {
+            crate::cir::pipeline::optimize_for_inline_cost(&projection, options)
+        }
+        Selection::Closed { .. } => {
+            crate::cir::pipeline::optimize_and_allocate(&projection, options)
+        }
+    }
+    .map_err(|e| e.to_string())?;
     let costs =
         crate::backend::layout_plan::estimated_frame_chunks_with_route(&allocated, global_portal)
             .map_err(|e| e.to_string())?;
-    Ok((costs[&caller], projection))
+    let entries = match selection {
+        Selection::Automatic => 0,
+        Selection::Closed { .. } => dispatch_entries(&allocated)[&caller],
+    };
+    Ok((costs[&caller], entries, projection))
 }
 
 pub(crate) fn inline_automatic(
@@ -200,6 +245,38 @@ fn inline_with_budget(
     options: ContinuationOptimizationOptions,
     budget: usize,
 ) -> Result<(ContinuationProgram, InlineStats), String> {
+    inline_with_selection(program, options, budget, Selection::Automatic)
+}
+
+/// Trial only callees without Call/portal boundaries. Soft bodies may be
+/// duplicated, but no hard resume is cloned. Run the existing value passes
+/// before measuring layout and reject newly required dispatcher roots.
+pub(crate) fn inline_closed(
+    program: &ContinuationProgram,
+    options: ContinuationOptimizationOptions,
+    allow_fixed_growth: bool,
+    max_weight: usize,
+) -> Result<(ContinuationProgram, InlineStats), String> {
+    let budget = weight(program.continuations().iter())
+        .saturating_mul(8)
+        .clamp(8192, 1_000_000);
+    inline_with_selection(
+        program,
+        options,
+        budget,
+        Selection::Closed {
+            allow_fixed_growth,
+            max_weight,
+        },
+    )
+}
+
+fn inline_with_selection(
+    program: &ContinuationProgram,
+    options: ContinuationOptimizationOptions,
+    budget: usize,
+    selection: Selection,
+) -> Result<(ContinuationProgram, InlineStats), String> {
     let cleaned = crate::cir::virtual_cleanup::cleanup(program).map_err(|e| e.to_string())?;
     let mut stats = InlineStats::default();
     let Ok(mut costs) = allocated_costs(&cleaned, options) else {
@@ -209,6 +286,27 @@ fn inline_with_budget(
         return Ok((cleaned, stats));
     };
     let global = global_users(&cleaned);
+    let is_closed = matches!(selection, Selection::Closed { .. });
+    let mut entries = if is_closed {
+        let (allocated, _) = crate::cir::pipeline::optimize_and_allocate(&cleaned, options)
+            .map_err(|e| e.to_string())?;
+        costs = crate::backend::layout_plan::estimated_frame_chunks(&allocated)
+            .map_err(|e| e.to_string())?;
+        dispatch_entries(&allocated)
+    } else {
+        HashMap::new()
+    };
+    let fixed = if matches!(
+        selection,
+        Selection::Closed {
+            allow_fixed_growth: true,
+            ..
+        }
+    ) {
+        crate::cir::analysis::call_graph::global_context_functions(&cleaned)
+    } else {
+        HashSet::new()
+    };
     let recursive = recursive_functions(&cleaned);
     let ranks = callee_ranks(&cleaned);
     let mut budgets = WorkBudgets::new(&cleaned, budget);
@@ -216,11 +314,17 @@ fn inline_with_budget(
     let mut skipped = HashSet::new();
     loop {
         let reachable = graph.reachable(cleaned.main());
+        let closed = if is_closed {
+            closed_functions(&graph)
+        } else {
+            HashSet::new()
+        };
         let candidate = graph
             .nodes
             .iter()
             .filter(|c| reachable.contains(&c.id()) && !skipped.contains(&c.id()))
             .filter_map(|c| c.terminator().callee().map(|callee| (c.id(), callee)))
+            .filter(|&(_, callee)| !is_closed || closed.contains(&callee))
             .min_by_key(|&(site, callee)| (ranks[&callee], site));
         let Some((site, callee)) = candidate else {
             break;
@@ -246,23 +350,37 @@ fn inline_with_budget(
             .unwrap()
             .function();
         let work = weight(graph.nodes.iter().filter(|c| c.function() == callee));
+        if matches!(selection, Selection::Closed { max_weight, .. } if work > max_weight) {
+            stats.work_limit_calls_preserved += 1;
+            continue;
+        }
         if !budgets.charge(caller, work) {
             stats.work_limit_calls_preserved += 1;
             continue;
         }
         let mut candidate = graph.trial(caller, callee);
         let copied = candidate.splice(site)?;
-        let Ok((new_cost, projection)) = caller_cost(
+        let Ok((new_cost, new_entries, projection)) = caller_cost(
             &candidate,
             &cleaned,
             caller,
             options,
             crate::backend::layout_plan::has_global_portal(&cleaned),
+            selection,
         ) else {
             stats.frame_limit_calls_preserved += 1;
             continue;
         };
-        if global.contains(&caller) && new_cost > costs[&caller] {
+        let grow = matches!(
+            selection,
+            Selection::Closed {
+                allow_fixed_growth: true,
+                ..
+            }
+        ) && fixed.contains(&caller);
+        if (global.contains(&caller) && !grow && new_cost > costs[&caller])
+            || (is_closed && new_entries > entries[&caller])
+        {
             stats.frame_limit_calls_preserved += 1;
             continue;
         }
@@ -306,13 +424,36 @@ fn inline_with_budget(
             let materialized = graph.clone().materialize(&cleaned)?;
             let materialized =
                 crate::cir::virtual_cleanup::cleanup(&materialized).map_err(|e| e.to_string())?;
-            assert_eq!(
-                new_cost,
-                allocated_costs(&materialized, options)?[&caller],
-                "isolated caller cost must match full program layout"
-            );
+            if is_closed {
+                let (allocated, _) =
+                    crate::cir::pipeline::optimize_and_allocate(&materialized, options)
+                        .map_err(|e| e.to_string())?;
+                let full_costs = crate::backend::layout_plan::estimated_frame_chunks_with_route(
+                    &allocated,
+                    crate::backend::layout_plan::has_global_portal(&cleaned),
+                )
+                .map_err(|e| e.to_string())?;
+                assert_eq!(
+                    new_cost, full_costs[&caller],
+                    "closed caller cost must match full program layout"
+                );
+                assert_eq!(
+                    new_entries,
+                    dispatch_entries(&allocated)[&caller],
+                    "closed caller roots must match full program layout"
+                );
+            } else {
+                assert_eq!(
+                    new_cost,
+                    allocated_costs(&materialized, options)?[&caller],
+                    "isolated caller cost must match full program layout"
+                );
+            }
         }
         costs.insert(caller, new_cost);
+        if is_closed {
+            entries.insert(caller, new_entries);
+        }
         stats.calls_inlined += 1;
         stats.blocks_cloned += copied;
     }

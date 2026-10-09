@@ -27,7 +27,22 @@ pub(crate) fn lower_hir(
     options: ContinuationOptimizationOptions,
 ) -> Result<(ContinuationProgram, ContinuationOptimizationStats), ContinuationLoweringError> {
     let lowered = lower_hir_unallocated(program)?;
-    let lowered = if options.inline_functions {
+    // Explicit source-only experiment; imported allocated CIR stays untouched.
+    // Replace general cloning with closed-callee expansion even when general
+    // function inlining is disabled for the comparison.
+    let closed = std::env::var("BFC_EVAL_CLOSED_INLINE").unwrap_or_default();
+    let lowered = if matches!(closed.as_str(), "1" | "2") {
+        let max_weight = std::env::var("BFC_EVAL_CLOSED_INLINE_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(128);
+        crate::cir::inline::inline_closed(&lowered, options, closed == "2", max_weight)
+            .map_err(|detail| ContinuationLoweringError::InvalidHir {
+                function: None,
+                detail,
+            })?
+            .0
+    } else if options.inline_functions {
         crate::cir::inline::inline_automatic(&lowered, options)
             .map_err(|detail| ContinuationLoweringError::InvalidHir {
                 function: None,

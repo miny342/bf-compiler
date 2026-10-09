@@ -9,6 +9,8 @@ use support::*;
 
 #[path = "cli/backend_options.rs"]
 mod backend_options;
+#[path = "cli/closed_inline.rs"]
+mod closed_inline;
 #[path = "cli/direct_regions.rs"]
 mod direct_regions;
 #[path = "cli/metrics.rs"]

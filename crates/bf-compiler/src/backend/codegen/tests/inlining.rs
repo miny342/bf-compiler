@@ -836,3 +836,82 @@ fn readonly_parameter_aliases_preserve_frame_and_abi_snapshots() {
     );
     compare(&p, &named(&p, &["f", "change"]), &[], &[8, 4, 9]);
 }
+
+#[test]
+fn closed_inline_folds_across_argument_body_and_return_boundaries() {
+    let program = source(
+        "cell helper(cell x) { return x+x+7; } void main() { cell x=input(); cell y=helper(x); output(y-x-x); }",
+    );
+    let (expanded, stats) =
+        crate::cir::inline::inline_closed(&program, Default::default(), false, usize::MAX).unwrap();
+    assert_eq!(stats.calls_inlined, 1);
+    let (before, _) =
+        crate::cir::pipeline::optimize_and_allocate(&program, Default::default()).unwrap();
+    let (after, _) =
+        crate::cir::pipeline::optimize_and_allocate(&expanded, Default::default()).unwrap();
+    assert_eq!(after.functions().len(), 1);
+    assert!(
+        after
+            .continuations()
+            .iter()
+            .flat_map(|c| c.body())
+            .all(|i| !matches!(i, I::Copy { .. } | I::Transfer { .. }))
+    );
+    let old = measure(&before, &[255], true);
+    let new = measure(&after, &[255], true);
+    assert!(new.rle_instructions < old.rle_instructions);
+    assert!(RegionPlan::new(&after).entries.len() <= RegionPlan::new(&before).entries.len());
+    for value in 0..=255 {
+        assert_eq!(measure(&after, &[value], true).output, [7]);
+    }
+}
+
+#[test]
+fn closed_inline_preserves_portal_roots_and_recursive_callees() {
+    let program = source(
+        "cell[256] arena; cell leaf(cell x) { return x+1; } cell reader(cell p) { return arena[p]; } cell rec(cell n) { if(n) { return rec(n-1)+1; } return 0; } void main() { cell p=input(); arena[p]=leaf(input()); output(reader(p)); output(rec(2)); }",
+    );
+    for allow_growth in [false, true] {
+        let (expanded, stats) = crate::cir::inline::inline_closed(
+            &program,
+            Default::default(),
+            allow_growth,
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(stats.calls_inlined, 1);
+        let remaining: HashSet<_> = expanded
+            .functions()
+            .iter()
+            .filter_map(FunctionDescriptor::name)
+            .collect();
+        assert!(!remaining.contains("leaf"));
+        assert!(remaining.contains("reader"));
+        assert!(remaining.contains("rec"));
+        let requests = |p: &ContinuationProgram| {
+            p.continuations()
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c.terminator(),
+                        Terminator::ArrayLoad { .. }
+                            | Terminator::ArrayStore { .. }
+                            | Terminator::AggregateLoad { .. }
+                            | Terminator::AggregateStore { .. }
+                    )
+                })
+                .count()
+        };
+        assert_eq!(requests(&expanded), requests(&program));
+        let (before, _) =
+            crate::cir::pipeline::optimize_and_allocate(&program, Default::default()).unwrap();
+        let (after, _) =
+            crate::cir::pipeline::optimize_and_allocate(&expanded, Default::default()).unwrap();
+        assert!(RegionPlan::new(&after).entries.len() <= RegionPlan::new(&before).entries.len());
+        for input in [[0u8, 0], [15, 1], [255, 255]] {
+            let expected = [input[1].wrapping_add(1), 2];
+            assert_eq!(measure(&before, &input, true).output, expected);
+            assert_eq!(measure(&after, &input, true).output, expected);
+        }
+    }
+}
