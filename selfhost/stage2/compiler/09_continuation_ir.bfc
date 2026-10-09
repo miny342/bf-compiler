@@ -324,10 +324,14 @@ WideValue dynamic_region_cells(NodeId expression) {
     return type_cells(expression_type(base));
 }
 
-void lower_dynamic_offset(NodeId expression, cell low, cell high) {
+// Return whether the low byte is still known to be zero. Whole-page strides
+// preserve that fact; any projection with a nonzero low contribution ends it.
+// Keep the proof in lowering so BF and public CIR use the same instructions.
+cell lower_dynamic_offset_zero(NodeId expression, cell low, cell high) {
     NodeId base = node_a(expression);
+    cell low_zero = 1;
     if (expression_is_dynamic_place(base)) {
-        lower_dynamic_offset(base, low, high);
+        low_zero = lower_dynamic_offset_zero(base, low, high);
     } else {
         append_ir_instruction(IR_SET, low, 0);
         append_ir_instruction(IR_SET, high, 0);
@@ -337,13 +341,20 @@ void lower_dynamic_offset(NodeId expression, cell low, cell high) {
     if (projection_kind == DYNAMIC_PROJECTION_INDEX) {
         cell index = allocate_lowering_temp();
         lower_ast_expression(node_b(expression), index);
-        append_offset_ir_instruction(
-            IR_OFFSET_ADD_SCALED,
-            low,
-            high,
-            index,
-            amount
-        );
+        if (low_zero && amount.low == 1 && amount.mid == 0 && amount.high == 0) {
+            // A byte added to zero cannot carry. The index is an owned
+            // temporary, so consume it directly without saving each partial
+            // sum for a carry test. High and the original expression survive.
+            append_ir_instruction(IR_ADD, low, index);
+        } else {
+            append_offset_ir_instruction(
+                IR_OFFSET_ADD_SCALED,
+                low,
+                high,
+                index,
+                amount
+            );
+        }
         release_lowering_temp(index);
     } else if (projection_kind == DYNAMIC_PROJECTION_CONSTANT) {
         append_offset_ir_instruction(
@@ -356,6 +367,14 @@ void lower_dynamic_offset(NodeId expression, cell low, cell high) {
     } else {
         fail('H', 'G');
     }
+    if (amount.low != 0) {
+        low_zero = 0;
+    }
+    return low_zero;
+}
+
+void lower_dynamic_offset(NodeId expression, cell low, cell high) {
+    cell low_zero = lower_dynamic_offset_zero(expression, low, high);
 }
 
 void append_dynamic_portal(

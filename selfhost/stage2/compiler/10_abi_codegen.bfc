@@ -195,30 +195,33 @@ cell emit_frame_swap(cell position, cell left, cell right) {
 }
 
 cell emit_frame_less(cell position, cell left, cell right) {
+    if (left == right) {
+        return emit_clear(position, left);
+    }
+    // Operands are data cells (>=16). Use existing private scratch 11..14 as
+    // right | flag=1 | zero | left, consuming both operands only once.
+    position = emit_clear(position, FRAME_SCRATCH_0);
     position = emit_clear(position, FRAME_SCRATCH_1);
-    position = emit_loop_open(position, right);
-    position = emit_move_to(position, right);
-    compiler_output!('-');
-    position = emit_frame_copy(position, left, FRAME_CONDITION);
-    position = emit_frame_booleanize(position, FRAME_CONDITION);
-    position = emit_constant(position, FRAME_SCRATCH_0, 1);
-
-    position = emit_loop_open(position, FRAME_CONDITION);
-    position = emit_clear(position, FRAME_CONDITION);
-    position = emit_clear(position, FRAME_SCRATCH_0);
-    position = emit_move_to(position, left);
-    compiler_output!('-');
-    position = emit_loop_close(position, FRAME_CONDITION);
-
-    position = emit_loop_open(position, FRAME_SCRATCH_0);
-    position = emit_clear(position, FRAME_SCRATCH_0);
+    position = emit_clear(position, FRAME_SCRATCH_2);
+    position = emit_clear(position, FRAME_SCRATCH_3);
+    position = emit_transfer(position, right, FRAME_SCRATCH_0, 0);
+    position = emit_transfer(position, left, FRAME_SCRATCH_3, 0);
     position = emit_constant(position, FRAME_SCRATCH_1, 1);
-    position = emit_clear(position, right);
-    position = emit_loop_close(position, FRAME_SCRATCH_0);
-    position = emit_loop_close(position, right);
-
+    position = emit_move_to(position, FRAME_SCRATCH_0);
+    compiler_output!('['); compiler_output!('>'); compiler_output!('>'); compiler_output!('>');
+    compiler_output!('['); compiler_output!('-'); compiler_output!('<'); compiler_output!(']');
+    compiler_output!('<'); compiler_output!('<'); compiler_output!('-'); compiler_output!(']');
+    // The loop exits on right or flag. >[>] always joins at the zero cell;
+    // flag is 1 iff original left>=right. Never infer a single loop-end cell.
+    compiler_output!('>'); compiler_output!('['); compiler_output!('>'); compiler_output!(']');
+    position = FRAME_SCRATCH_2;
+    position = emit_constant(position, left, 1);
+    position = emit_loop_open(position, FRAME_SCRATCH_1);
+    compiler_output!('-');
     position = emit_clear(position, left);
-    position = emit_transfer(position, FRAME_SCRATCH_1, left, 0);
+    position = emit_loop_close(position, FRAME_SCRATCH_1);
+    position = emit_clear(position, FRAME_SCRATCH_0);
+    position = emit_clear(position, FRAME_SCRATCH_3);
     return position;
 }
 
