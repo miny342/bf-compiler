@@ -257,6 +257,7 @@ impl<'a> AbiEmitter<'a> {
         callee: FunctionId,
         arguments: &[ValueOperand],
         return_to: ContinuationId,
+        direct: Option<DirectCallSetup>,
     ) -> Result<(), AbiCodegenError> {
         let fixed = self.fixed.unwrap();
         let callee_base = fixed.contexts[&callee];
@@ -387,6 +388,12 @@ impl<'a> AbiEmitter<'a> {
                 (self.dispatch_encoding.encode(return_id) >> 8) as u8,
             ),
         ] {
+            if direct.is_some() && matches!(field, AbiField::NextPcLow | AbiField::NextPcHigh)
+                || direct.is_some_and(|p| !p.preserve_return_pc)
+                    && matches!(field, AbiField::ReturnPcLow | AbiField::ReturnPcHigh)
+            {
+                continue;
+            }
             self.set(frame.abi_offset(field), value);
         }
         self.fixed_context = original_context;
@@ -397,16 +404,33 @@ impl<'a> AbiEmitter<'a> {
         &mut self,
         callee: FunctionId,
         value: Option<ValueOperand>,
+        deliver_directly: bool,
     ) -> Result<(), AbiCodegenError> {
         if self.fixed_context.is_none() {
             return self.emit_return_inner(callee, value);
         }
         let frame = self.layout(callee)?.frame.clone();
         let restore = Location::Relative(frame.abi_offset(AbiField::Restore));
+        // A known return into another fixed frame can materialize directly
+        // into the caller's ABI inbox. Shared-dispatch returns still stage
+        // through the callee Value/private aggregate result buffer.
+        let direct = deliver_directly
+            .then(|| self.direct_fixed_result(callee).unwrap())
+            .map(|resume| {
+                let caller = self.program.continuation(resume.target).unwrap().function();
+                (self.fixed.unwrap().contexts[&caller], caller)
+            });
+        let scalar_destination = match direct {
+            Some((base, caller)) => Location::Global(
+                base.checked_add_signed(self.layout(caller)?.frame.abi_offset(AbiField::Value))
+                    .unwrap(),
+            ),
+            None => Location::Relative(frame.abi_offset(AbiField::Value)),
+        };
         match value {
             Some(ValueOperand::Cell(address)) => {
                 let src = self.address_location(address, callee)?;
-                let dst = Location::Relative(frame.abi_offset(AbiField::Value));
+                let dst = scalar_destination;
                 if matches!(src, Location::Relative(_)) {
                     self.move_location(src, dst);
                 } else {
@@ -417,7 +441,12 @@ impl<'a> AbiEmitter<'a> {
                 self.clear_location(restore);
                 for index in 0..result_cells(self.function(callee)?.return_type()) {
                     let src = self.value_operand_element_location(operand, index, callee)?;
-                    let dst = Location::Global(self.fixed.unwrap().result_bases[&callee] + index);
+                    let dst = Location::Global(match direct {
+                        Some((base, caller)) => base
+                            .checked_add_signed(self.layout(caller)?.frame.outbox_offset(index)?)
+                            .unwrap(),
+                        None => self.fixed.unwrap().result_bases[&callee] + index,
+                    });
                     if matches!(src, Location::Relative(_)) {
                         self.move_location(src, dst);
                     } else {
@@ -425,8 +454,16 @@ impl<'a> AbiEmitter<'a> {
                     }
                 }
                 self.clear_location(Location::Relative(frame.abi_offset(AbiField::Value)));
+                if direct.is_some() {
+                    self.clear_location(scalar_destination);
+                }
             }
-            None => self.clear_location(Location::Relative(frame.abi_offset(AbiField::Value))),
+            None => {
+                self.clear_location(Location::Relative(frame.abi_offset(AbiField::Value)));
+                if direct.is_some() {
+                    self.clear_location(scalar_destination);
+                }
+            }
         }
         // Locals are dead after materializing the outgoing result. Clear them
         // once per return body, instead of replicating this frame-sized sweep
@@ -441,14 +478,24 @@ impl<'a> AbiEmitter<'a> {
             }
         }
         // Retain this fixed origin until the caller-specific gate is selected.
-        self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
-        self.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
+        if !self.has_direct_return(callee) {
+            self.move_abi_field(AbiField::ReturnPcLow, AbiField::NextPcLow);
+            self.move_abi_field(AbiField::ReturnPcHigh, AbiField::NextPcHigh);
+        }
         Ok(())
     }
 
     pub(super) fn emit_static_resume(
         &mut self,
         resume: StaticResume,
+    ) -> Result<(), AbiCodegenError> {
+        self.emit_static_resume_with_result(resume, false)
+    }
+
+    pub(super) fn emit_static_resume_with_result(
+        &mut self,
+        resume: StaticResume,
+        delivered: bool,
     ) -> Result<(), AbiCodegenError> {
         let fixed = self.fixed.unwrap();
         let continuation = self.program.continuation(resume.target).unwrap();
@@ -465,7 +512,7 @@ impl<'a> AbiEmitter<'a> {
             self.clear(head);
             for data in 0..self.config.chunk_cells() {
                 let offset = head + 1 + data as isize;
-                if offset != callee_frame.abi_offset(AbiField::Value) {
+                if delivered || offset != callee_frame.abi_offset(AbiField::Value) {
                     self.clear(offset);
                 }
             }
@@ -478,6 +525,11 @@ impl<'a> AbiEmitter<'a> {
             self.emit_global_to_context(base, frame.context_chunks());
         }
         self.fixed_context = caller_base;
+        if delivered {
+            // Result was placed in the fixed caller before clearing the
+            // callee. No second transfer, and no retained callee Value.
+            return self.emit_function_entry(continuation);
+        }
         let return_scratch = if callee_frame.route_chunks() > 0 {
             Some(
                 base.checked_add_signed(callee_frame.route_offset(ROUTE_SCRATCH_START)?)

@@ -25,7 +25,7 @@ use crate::{
 
 mod control;
 mod direct_regions;
-use direct_regions::DirectRegionState;
+use direct_regions::{DirectCallSetup, DirectRegionState};
 mod dispatch;
 mod instructions;
 mod lifetime;

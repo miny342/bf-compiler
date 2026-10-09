@@ -40,10 +40,23 @@ target/release/bfc --disable-function-inline --compressed-bf \
 `DIRECT_RETURN` はその展開内で帰り先が既知のreturnから既存resumeを直接実行する設定（ともに既定OFF）。
 `DIRECT_RAW_LIMIT` と `DIRECT_CODE_LIMIT` は1回の展開候補の素BF長と圧縮前の内部BF操作数の上限で、
 環境変数名にはすべて `BFC_EVAL_` を付ける。サイズ上限の既定は無制限なので、検証では上記のように明示する。
-上限判定は候補を生成した後に行い、不採用時は元のcallが設定したPCで共有entryへdispatchする。
+上限判定は候補を生成した後に行い、不採用時は通常prologueを出力して共有entryへdispatchする。
 既存prologue、calleeのframe配置、portalで中断した後のcontinuation、return先IDをそのまま使う。
-callerへの引数・返値転送はまだ省略しない。固定／動的frame、再帰、複数return、aggregate返値、
+callerからの引数転送はまだ省略しない。固定／動的frame、再帰、複数return、aggregate返値、
 portal中断、abort、およびサイズ上限でのfallbackをCLI回帰テストで確認する。
+
+同日追補: 展開候補をprologueより先に生成し、採用時はentry PCの書き込みを省く。
+帰り先が既知のreturnではReturnPCのtransferも省き、入口regionの全終端がreturn／abort／haltの場合は
+ReturnPC保存自体を省く。Call・portal・soft edgeの展開上限によるdispatchが残る場合は保存を維持する。
+returnからcallerの続きを展開する上限は `BFC_EVAL_DIRECT_RESUME_CODE_LIMIT`（既定は入口のCODE_LIMIT）で
+独立に制限する。帰路だけ不採用になった場合は既存resume IDを直接PCに設定し、入口の展開は残せる。
+calleeとcallerがともに固定frameで、帰路の展開も採用できた場合は返値をcallerのValue／outboxへ直接書く。
+それ以外はcalleeのValue／private aggregate bufferを経由する配送を維持する。
+
+入口上限2,048・帰路上限512・深さ4のcompiler測定では、前の試作の同じ入口上限／深さ比で
+論理RLE−6.12%／transfer iterations−6.90%、素BF＋0.03%／圧縮BF＋6.43%。
+関数inline OFFで展開しない基準比はRLE−12.22%。関数inline ONの性能には未到達で、既定OFFを維持する。
+[PC・返値・独立resume上限の評価](optimize_logs/DIRECT_CALL_PC_RETURN_EVALUATION_20261009.md)。
 
 `Terminator` に内部用の boundary 分類、通常／resume edge の列挙、successor remap、
 callee reference を集約した。既存 optimizer と local reconstruction も edge API を使う。

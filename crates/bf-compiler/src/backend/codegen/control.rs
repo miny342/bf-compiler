@@ -194,15 +194,21 @@ impl<'a> AbiEmitter<'a> {
         return_to: ContinuationId,
     ) -> Result<(), AbiCodegenError> {
         self.with_profile_site("abi", "abi.call", "ABI call", |emitter| {
+            let direct = emitter.plan_direct_call_entry(callee, return_to)?;
+            let setup = direct.as_ref().map(|p| p.setup);
             if emitter
                 .fixed
                 .is_some_and(|plan| plan.contexts.contains_key(&callee))
             {
-                emitter.emit_fixed_call(call, caller, callee, arguments, return_to)?;
+                emitter.emit_fixed_call(call, caller, callee, arguments, return_to, setup)?;
             } else {
-                emitter.emit_call_inner(Some(call), caller, callee, arguments, return_to)?;
+                emitter.emit_call_inner(Some(call), caller, callee, arguments, return_to, setup)?;
             }
-            emitter.emit_direct_call_entry(callee, return_to)
+            if let Some(direct) = direct {
+                emitter.output.extend(direct.body);
+                emitter.position = direct.position;
+            }
+            Ok(())
         })
     }
 
@@ -213,6 +219,7 @@ impl<'a> AbiEmitter<'a> {
         callee: FunctionId,
         arguments: &[ValueOperand],
         return_to: ContinuationId,
+        direct: Option<DirectCallSetup>,
     ) -> Result<(), AbiCodegenError> {
         let callee_function = self.function(callee)?;
         let parameters = callee_function
@@ -312,18 +319,22 @@ impl<'a> AbiEmitter<'a> {
             callee_context_delta + callee_frame.abi_offset(AbiField::Active),
             1,
         );
-        self.set_pc_at(
-            callee_context_delta,
-            AbiField::NextPcLow,
-            AbiField::NextPcHigh,
-            entry,
-        );
-        self.set_pc_at(
-            callee_context_delta,
-            AbiField::ReturnPcLow,
-            AbiField::ReturnPcHigh,
-            return_to,
-        );
+        if direct.is_none() {
+            self.set_pc_at(
+                callee_context_delta,
+                AbiField::NextPcLow,
+                AbiField::NextPcHigh,
+                entry,
+            );
+        }
+        if direct.is_none_or(|p| p.preserve_return_pc) {
+            self.set_pc_at(
+                callee_context_delta,
+                AbiField::ReturnPcLow,
+                AbiField::ReturnPcHigh,
+                return_to,
+            );
+        }
 
         self.migrate_context(callee_context_delta);
         Ok(())
@@ -335,12 +346,24 @@ impl<'a> AbiEmitter<'a> {
         value: Option<ValueOperand>,
     ) -> Result<(), AbiCodegenError> {
         self.with_profile_site("abi", "abi.return", "ABI return", |emitter| {
+            let direct = emitter.plan_direct_return_resume(callee)?;
             if emitter.fixed.is_some() {
-                emitter.emit_fixed_return(callee, value)?;
+                emitter.emit_fixed_return(
+                    callee,
+                    value,
+                    direct.as_ref().is_some_and(|r| r.delivered),
+                )?;
             } else {
                 emitter.emit_return_inner(callee, value)?;
             }
-            emitter.emit_direct_return_resume(callee)
+            if let Some(direct) = direct {
+                emitter.move_to(0);
+                emitter.output.extend(direct.body);
+                emitter.position = direct.position;
+            } else {
+                emitter.set_known_return_pc(callee)?;
+            }
+            Ok(())
         })
     }
 
@@ -389,14 +412,16 @@ impl<'a> AbiEmitter<'a> {
             None => self.clear_location(caller_value),
         }
 
-        self.move_value(
-            callee_frame.abi_offset(AbiField::ReturnPcLow),
-            caller_delta + callee_frame.abi_offset(AbiField::NextPcLow),
-        );
-        self.move_value(
-            callee_frame.abi_offset(AbiField::ReturnPcHigh),
-            caller_delta + callee_frame.abi_offset(AbiField::NextPcHigh),
-        );
+        if !self.has_direct_return(callee) {
+            self.move_value(
+                callee_frame.abi_offset(AbiField::ReturnPcLow),
+                caller_delta + callee_frame.abi_offset(AbiField::NextPcLow),
+            );
+            self.move_value(
+                callee_frame.abi_offset(AbiField::ReturnPcHigh),
+                caller_delta + callee_frame.abi_offset(AbiField::NextPcHigh),
+            );
+        }
 
         // The bottom head is below the context by every non-context chunk.
         // Clearing data as well as flags establishes the allocation invariant
