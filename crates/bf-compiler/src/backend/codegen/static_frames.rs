@@ -257,7 +257,7 @@ impl<'a> AbiEmitter<'a> {
         callee: FunctionId,
         arguments: &[ValueOperand],
         return_to: ContinuationId,
-        direct: Option<DirectCallSetup>,
+        direct: Option<&DirectCallSetup>,
     ) -> Result<(), AbiCodegenError> {
         let fixed = self.fixed.unwrap();
         let callee_base = fixed.contexts[&callee];
@@ -269,6 +269,11 @@ impl<'a> AbiEmitter<'a> {
         let mut copies = Vec::new();
         let mut remaining = HashMap::<Location, usize>::new();
         for (&argument, &parameter) in arguments.iter().zip(function.parameter_locations()) {
+            if let ParameterLocation::Cell(slot) = parameter
+                && direct.is_some_and(|p| p.borrowed.contains(&Address::Frame(slot)))
+            {
+                continue;
+            }
             let cells = match parameter {
                 ParameterLocation::Cell(_) | ParameterLocation::AggregateElement { .. } => 1,
                 ParameterLocation::Array(aggregate) | ParameterLocation::Aggregate(aggregate) => {
@@ -320,7 +325,17 @@ impl<'a> AbiEmitter<'a> {
             }
             let left = remaining.get_mut(&source).unwrap();
             *left -= 1;
-            let consume = *left == 0 && self.lifetime.terminal_dead(call, address);
+            let static_source = match (source, original_context) {
+                (Location::Relative(offset), Some(base)) => {
+                    Location::Global(base.checked_add_signed(offset).unwrap())
+                }
+                _ => source,
+            };
+            // A skipped parameter bridge still borrows this source. A copied
+            // sibling argument must not consume it before the callee reads it.
+            let consume = *left == 0
+                && self.lifetime.terminal_dead(call, address)
+                && !direct.is_some_and(|p| p.borrowed_sources.contains(&static_source));
             if self.nibble_transfer
                 && original_context.is_none()
                 && self.config.chunk_cells() >= GLOBAL_ROUTE_NIBBLE_CELLS
@@ -361,6 +376,12 @@ impl<'a> AbiEmitter<'a> {
         // where every field has a constant relative offset. Doing these stores
         // from a dynamic caller would scan its stack twice for EACH field/head.
         self.emit_context_to_global(callee_base, frame.context_chunks());
+        if direct.is_some_and(|p| p.frameless) {
+            // Every return is directly resumed, so no dispatcher sees this
+            // fixed context. Previous cleanup supplies its zeroed ABI scratch.
+            self.fixed_context = original_context;
+            return Ok(());
+        }
         let bottom =
             -(((frame.frame_chunks() - frame.context_chunks()) * self.config.stride()) as isize);
         for chunk in 0..frame.frame_chunks() {
@@ -431,7 +452,9 @@ impl<'a> AbiEmitter<'a> {
             Some(ValueOperand::Cell(address)) => {
                 let src = self.address_location(address, callee)?;
                 let dst = scalar_destination;
-                if matches!(src, Location::Relative(_)) {
+                if matches!(src, Location::Relative(_))
+                    || self.can_consume_borrowed(callee, address)
+                {
                     self.move_location(src, dst);
                 } else {
                     self.copy_locations(src, dst, restore);

@@ -73,6 +73,9 @@ impl<'a> AbiEmitter<'a> {
         address: Address,
         function: FunctionId,
     ) -> Result<Location, AbiCodegenError> {
+        if let Some(location) = self.borrowed_location(function, address) {
+            return Ok(location);
+        }
         let layout = self.layout(function)?;
         Ok(match address {
             Address::Frame(slot) => Location::Relative(layout.frame.frame_offset(slot)),

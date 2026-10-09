@@ -194,8 +194,9 @@ impl<'a> AbiEmitter<'a> {
         return_to: ContinuationId,
     ) -> Result<(), AbiCodegenError> {
         self.with_profile_site("abi", "abi.call", "ABI call", |emitter| {
-            let direct = emitter.plan_direct_call_entry(callee, return_to)?;
-            let setup = direct.as_ref().map(|p| p.setup);
+            let direct =
+                emitter.plan_direct_call_entry(call, caller, callee, arguments, return_to)?;
+            let setup = direct.as_ref().map(|p| &p.setup);
             if emitter
                 .fixed
                 .is_some_and(|plan| plan.contexts.contains_key(&callee))
@@ -219,7 +220,7 @@ impl<'a> AbiEmitter<'a> {
         callee: FunctionId,
         arguments: &[ValueOperand],
         return_to: ContinuationId,
-        direct: Option<DirectCallSetup>,
+        direct: Option<&DirectCallSetup>,
     ) -> Result<(), AbiCodegenError> {
         let callee_function = self.function(callee)?;
         let parameters = callee_function

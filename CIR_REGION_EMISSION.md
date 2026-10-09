@@ -42,7 +42,7 @@ target/release/bfc --disable-function-inline --compressed-bf \
 環境変数名にはすべて `BFC_EVAL_` を付ける。サイズ上限の既定は無制限なので、検証では上記のように明示する。
 上限判定は候補を生成した後に行い、不採用時は通常prologueを出力して共有entryへdispatchする。
 既存prologue、calleeのframe配置、portalで中断した後のcontinuation、return先IDをそのまま使う。
-callerからの引数転送はまだ省略しない。固定／動的frame、再帰、複数return、aggregate返値、
+通常の試作経路ではcallerからの引数転送を省略しない。固定／動的frame、再帰、複数return、aggregate返値、
 portal中断、abort、およびサイズ上限でのfallbackをCLI回帰テストで確認する。
 
 同日追補: 展開候補をprologueより先に生成し、採用時はentry PCの書き込みを省く。
@@ -57,6 +57,28 @@ calleeとcallerがともに固定frameで、帰路の展開も採用できた場
 論理RLE−6.12%／transfer iterations−6.90%、素BF＋0.03%／圧縮BF＋6.43%。
 関数inline OFFで展開しない基準比はRLE−12.22%。関数inline ONの性能には未到達で、既定OFFを維持する。
 [PC・返値・独立resume上限の評価](optimize_logs/DIRECT_CALL_PC_RETURN_EVALUATION_20261009.md)。
+
+同日追補: `BFC_EVAL_DIRECT_BINDINGS=1` で閉じた固定calleeのscalar引数をcallerのセルへ結び付ける
+試作を追加した（既定0／OFF）。割り当て済みparameter slotがcallee全体で書かれない場合だけ対象とする。
+caller側で死ぬ値は最後の参照で消費でき、生存値・重複引数・global値は保存する。
+同じcallerセルを別の引数にもcopyする場合、そのcopyで借用元を消費してはいけない。
+global引数はcalleeによる書き込みがない場合だけ共有し、snapshotが必要な場合は従来のcopyを残す。
+分岐／loopに入る前に共有を解消する。帰り先の直接展開もすべて採用できた閉じた固定calleeでは
+frame header初期化も省くが、固定storageの予約とreturn cleanupは維持する。
+
+`BFC_EVAL_DIRECT_BINDINGS=2` は書き込みまで共有を延ばす比較用試作。
+read/write命令の直前に値をcalleeへ実体化し、旧値を読まない上書きなら共有だけを破棄する。
+両版とも、値共有を無効にした候補を先に生成して入口／帰路のサイズ上限を判定する。
+小さくなった本文により追加の展開候補を採用してしまうことを避け、共有後の本文が上限を超えた場合は
+従来の候補を使う。この二重生成のコンパイル費用は未測定。
+
+入口2,048・帰路512・深さ4、関数inline OFF／三option ONの前試作比で、版1はcompiler RLE−0.04125%／
+圧縮BF−1.08455%、arena RLE不変／圧縮BF−2.40606%。版2はcompiler RLE＋0.24005%で推奨しない。
+dispatch先のID集合は不変。public binary CIRのaggregate element引数は今回のセル共有対象外。
+FrameInstructionはセル割り当て前にも使われるIRであり、既存の関数inlineは割り当て前のCIRで行い、
+後段の計算グラフ・DSE等を通る。今回の割り当て後の参照共有だけでは、caller/calleeにまたがる
+式の書き換え・不要計算除去までは行わない。
+[引数共有・header省略の評価](optimize_logs/DIRECT_PARAMETER_BINDINGS_EVALUATION_20261009.md)。
 
 `Terminator` に内部用の boundary 分類、通常／resume edge の列挙、successor remap、
 callee reference を集約した。既存 optimizer と local reconstruction も edge API を使う。

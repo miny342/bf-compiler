@@ -64,6 +64,7 @@ impl AbiEmitter<'_> {
             return self.emit_region_node_body(node, selector);
         }
         let function = self.program.continuation(node.id).unwrap().function();
+        self.materialize_direct_bindings(function)?;
         let gate = Location::Relative(self.acquire_branch_temporary(function)?);
         self.region_loops.push((node.id, gate));
         self.set_location(gate, 1);
@@ -132,6 +133,7 @@ impl AbiEmitter<'_> {
             unreachable!("region branch");
         };
         let function = continuation.function();
+        self.materialize_direct_bindings(function)?;
         if self.inplace_compare
             && let Address::Frame(slot) = condition
             && let Some((flag, zero)) = self.layout(function)?.frame.truth_guards(*slot)

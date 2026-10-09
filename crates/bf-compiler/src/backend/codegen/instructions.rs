@@ -20,6 +20,7 @@ impl<'a> AbiEmitter<'a> {
     ) -> Result<(), AbiCodegenError> {
         let mut index = 0;
         while index < instructions.len() {
+            self.prepare_direct_instruction_bindings(&instructions[index], function)?;
             let FrameInstruction::Set {
                 dst:
                     Address::ArrayElement {
@@ -167,6 +168,7 @@ impl<'a> AbiEmitter<'a> {
             _ => return Ok(None),
         };
         if *source == Address::Frame(*destination)
+            || self.borrowed_location(function, *source).is_some()
             || condition != Address::Frame(*destination)
             || self.lifetime.dead(instruction, *source)
         {
@@ -359,8 +361,12 @@ impl<'a> AbiEmitter<'a> {
                 let src = self.address_location(source_address, function)?;
                 let dst = self.address_location(*dst, function)?;
                 let restore = Location::Relative(self.current_abi_offset(AbiField::Restore)?);
-                if self.lifetime.dead(instruction, source_address) {
+                if (self.borrowed_location(function, source_address).is_none()
+                    || self.can_consume_borrowed(function, source_address))
+                    && self.lifetime.dead(instruction, source_address)
+                {
                     self.move_location(src, dst);
+                    self.forget_direct_binding(function, source_address);
                 } else if self.nibble_transfer
                     && self.fixed_context.is_none()
                     && matches!(source_address, Address::Global(_))
