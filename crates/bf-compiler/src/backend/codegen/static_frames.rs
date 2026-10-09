@@ -192,6 +192,19 @@ impl StaticFramePlan {
         })
     }
 
+    pub(super) fn resume_for_call(
+        &self,
+        callee: FunctionId,
+        return_to: ContinuationId,
+    ) -> StaticResume {
+        let id = self.return_ids[&(return_to, callee)];
+        self.resumes
+            .get(&id)
+            .copied()
+            .or_else(|| self.extra_resumes.iter().find(|r| r.id == id).copied())
+            .unwrap()
+    }
+
     pub fn profile_attributes(&self) -> BTreeMap<String, String> {
         BTreeMap::from([
             ("static_functions".into(), self.contexts.len().to_string()),

@@ -24,6 +24,8 @@ use crate::{
 };
 
 mod control;
+mod direct_regions;
+use direct_regions::DirectRegionState;
 mod dispatch;
 mod instructions;
 mod lifetime;
@@ -489,6 +491,7 @@ struct AbiEmitter<'a> {
     branch_temporary_depth: usize,
     /// Active native soft loops; all close before a terminal changes context.
     region_loops: Vec<(ContinuationId, Location)>,
+    direct_regions: DirectRegionState,
     nibble_transfer: bool,
     inplace_compare: bool,
     current_source: Option<SourceSpan>,
@@ -536,6 +539,7 @@ impl<'a> AbiEmitter<'a> {
             position: 0,
             branch_temporary_depth: 0,
             region_loops: Vec::new(),
+            direct_regions: DirectRegionState::default(),
             nibble_transfer: false,
             inplace_compare: false,
             current_source: None,

@@ -198,9 +198,11 @@ impl<'a> AbiEmitter<'a> {
                 .fixed
                 .is_some_and(|plan| plan.contexts.contains_key(&callee))
             {
-                return emitter.emit_fixed_call(call, caller, callee, arguments, return_to);
+                emitter.emit_fixed_call(call, caller, callee, arguments, return_to)?;
+            } else {
+                emitter.emit_call_inner(Some(call), caller, callee, arguments, return_to)?;
             }
-            emitter.emit_call_inner(Some(call), caller, callee, arguments, return_to)
+            emitter.emit_direct_call_entry(callee, return_to)
         })
     }
 
@@ -334,9 +336,11 @@ impl<'a> AbiEmitter<'a> {
     ) -> Result<(), AbiCodegenError> {
         self.with_profile_site("abi", "abi.return", "ABI return", |emitter| {
             if emitter.fixed.is_some() {
-                return emitter.emit_fixed_return(callee, value);
+                emitter.emit_fixed_return(callee, value)?;
+            } else {
+                emitter.emit_return_inner(callee, value)?;
             }
-            emitter.emit_return_inner(callee, value)
+            emitter.emit_direct_return_resume(callee)
         })
     }
 

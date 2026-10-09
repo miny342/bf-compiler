@@ -9,6 +9,8 @@ use support::*;
 
 #[path = "cli/backend_options.rs"]
 mod backend_options;
+#[path = "cli/direct_regions.rs"]
+mod direct_regions;
 #[path = "cli/metrics.rs"]
 mod metrics;
 #[path = "cli/multiple_sources.rs"]

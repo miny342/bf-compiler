@@ -16,6 +16,35 @@ viewer の読み取り処理は削除した。旧 variant を使う Rust API 利
 
 ## 実装範囲
 
+2026-10-09補足: 最適化で避けたいのは本文の複製自体ではなく、dispatch先の増殖。
+callerがprologueを実行し、calleeのentry本文をBF出力時に展開しても、
+中断後のcontinuationとportal resumeを共有できれば新しいdispatch先は要らない。
+既存のregion emissionはsoft edgeまでを扱う。callの入口と即時returnにも直接実行を広げた
+検証ブランチ `experiment/shared-call-regions` の試作では、CIRとdispatch先数を維持した改善を確認したが、
+関数inlineの代替性能には未到達。試作は既定OFFで、通常の関数inlineの設定も変更しない。
+[共有entry/resumeを保つ試作評価](optimize_logs/REGION_WITHOUT_FUNCTION_CLONING_EVALUATION_20261009.md)。
+
+試作の有効化例（関数inlineを止めて、共有entry/resumeの効果を分離する）:
+
+```sh
+BFC_EVAL_DIRECT_REGION=2 \
+BFC_EVAL_DIRECT_DYNAMIC=1 \
+BFC_EVAL_DIRECT_RETURN=1 \
+BFC_EVAL_DIRECT_RAW_LIMIT=1048576 \
+BFC_EVAL_DIRECT_CODE_LIMIT=512 \
+target/release/bfc --disable-function-inline --compressed-bf \
+  --enable-nibble-transfer --enable-inplace-compare --enable-anchor-bank input.bfc > output.bf
+```
+
+`BFC_EVAL_DIRECT_REGION` は展開するcallの最大深さ（既定0）、`DIRECT_DYNAMIC` は動的frameも対象にする設定、
+`DIRECT_RETURN` はその展開内で帰り先が既知のreturnから既存resumeを直接実行する設定（ともに既定OFF）。
+`DIRECT_RAW_LIMIT` と `DIRECT_CODE_LIMIT` は1回の展開候補の素BF長と圧縮前の内部BF操作数の上限で、
+環境変数名にはすべて `BFC_EVAL_` を付ける。サイズ上限の既定は無制限なので、検証では上記のように明示する。
+上限判定は候補を生成した後に行い、不採用時は元のcallが設定したPCで共有entryへdispatchする。
+既存prologue、calleeのframe配置、portalで中断した後のcontinuation、return先IDをそのまま使う。
+callerへの引数・返値転送はまだ省略しない。固定／動的frame、再帰、複数return、aggregate返値、
+portal中断、abort、およびサイズ上限でのfallbackをCLI回帰テストで確認する。
+
 `Terminator` に内部用の boundary 分類、通常／resume edge の列挙、successor remap、
 callee reference を集約した。既存 optimizer と local reconstruction も edge API を使う。
 operand remap は `cir::operands`、read/write/clobber は `cir::effects` に集約し、
