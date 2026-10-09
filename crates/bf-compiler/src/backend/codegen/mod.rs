@@ -302,6 +302,7 @@ fn lower_continuations_annotated_with_plans(
             regions,
             options.inplace_compare,
             boundary_nibbles,
+            options.static_frames,
         )?;
         if check_capacity {
             layouts[&program.main()]

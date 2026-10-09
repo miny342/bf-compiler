@@ -147,7 +147,7 @@ impl<'a> AbiEmitter<'a> {
         }
         let Some(
             instruction @ FrameInstruction::Copy {
-                src: Address::Frame(source),
+                src: source,
                 dst: Address::Frame(destination),
             },
         ) = instructions.first()
@@ -166,28 +166,46 @@ impl<'a> AbiEmitter<'a> {
             }
             _ => return Ok(None),
         };
-        if source == destination
+        if *source == Address::Frame(*destination)
             || condition != Address::Frame(*destination)
-            || self.lifetime.dead(instruction, Address::Frame(*source))
+            || self.lifetime.dead(instruction, *source)
         {
             return Ok(None);
         }
         let frame = &self.layout(function)?.frame;
-        Ok(frame
-            .truth_guards(*source)
-            .map(|(flag, zero)| TruthCopyLayout {
-                source: frame.frame_offset(*source),
-                destination: frame.frame_offset(*destination),
-                flag,
-                zero,
-                adjustment,
-                consumed,
-            }))
+        let (position, guards) = match *source {
+            Address::Frame(slot) => (frame.frame_offset(slot), frame.truth_guards(slot)),
+            Address::ArrayElement {
+                array: AggregateRegion::Frame(id),
+                index,
+            } => {
+                // Only statically accessed aggregates have private padding.
+                // Keep portal-addressed payloads on the ordinary copy path.
+                if self.portal.ordered_sites.iter().any(|site| {
+                    site.function == function && site.region == AggregateRegion::Frame(id)
+                }) {
+                    return Ok(None);
+                }
+                (
+                    frame.aggregate_element_offset(id, index)?,
+                    frame.aggregate_truth_guards(id, index)?,
+                )
+            }
+            _ => return Ok(None),
+        };
+        Ok(guards.map(|(flag, zero)| TruthCopyLayout {
+            source: position,
+            destination: frame.frame_offset(*destination),
+            flag,
+            zero,
+            adjustment,
+            consumed,
+        }))
     }
 
     /// The next destructive Branch observes only whether the copy is zero.
-    /// Existing private [value, flag, zero] guards allow testing without moving
-    /// the value. The first loop exits at value=0 or flag=0; >[>] joins at zero.
+    /// Private guards allow testing without moving the value. The first loop
+    /// exits at value=0 or flag=0; equal strides join both exits at zero.
     /// Deliver 0/1 to the branch condition and restore both guards to zero.
     fn emit_truth_copy(&mut self, source: isize, destination: isize, flag: isize, zero: isize) {
         self.set(destination, 1);
@@ -204,8 +222,11 @@ impl<'a> AbiEmitter<'a> {
 
     /// Preserve source; flag is one exactly for source=0. Both exits join at
     /// zero, without copying a byte or clearing its value-dependent remainder.
+    /// The strides may exceed one when using small aggregate payload padding.
     pub(super) fn emit_preserving_zero_test(&mut self, source: isize, flag: isize, zero: isize) {
-        debug_assert_eq!((flag - source, zero - flag), (1, 1));
+        let stride = flag - source;
+        debug_assert_eq!(zero - flag, stride);
+        debug_assert!(stride > 0);
         self.clear(zero);
         self.set(flag, 1);
         self.move_to(source);
@@ -214,11 +235,11 @@ impl<'a> AbiEmitter<'a> {
             emitter.clear_current();
         });
         self.emit_loop(test);
-        self.push_move(1);
+        self.push_move(stride);
         let site = self.current_profile_site();
         self.emit_loop(vec![AnnotatedBfInstruction::new(
             site,
-            AnnotatedBfOperation::Move(1),
+            AnnotatedBfOperation::Move(stride),
         )]);
         self.position = zero;
     }

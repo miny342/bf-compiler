@@ -1,6 +1,381 @@
 use super::*;
 
 #[test]
+fn fixed_truth_banks_do_not_require_comparison_operands() {
+    use crate::{GlobalDescriptor, GlobalId};
+    use FrameInstruction as I;
+    let function = FunctionId::new(0);
+    let slot = |n| Address::Frame(FrameSlot::new(n));
+    let p = ContinuationProgram::new_with_globals(
+        function,
+        vec![GlobalDescriptor::cell(GlobalId::new(0))],
+        vec![FunctionDescriptor::new(
+            function,
+            vec![],
+            3,
+            ValueType::Void,
+            id(1),
+        )],
+        vec![Continuation::new(
+            id(1),
+            function,
+            vec![
+                I::Output {
+                    src: Address::Global(GlobalId::new(0)),
+                },
+                I::Input { dst: slot(2) },
+                I::Loop {
+                    condition: slot(2),
+                    body: vec![
+                        I::Input { dst: slot(0) },
+                        I::Copy {
+                            src: slot(0),
+                            dst: slot(1),
+                        },
+                        I::Branch {
+                            condition: slot(1),
+                            then_body: vec![I::Output { src: slot(0) }],
+                            else_body: vec![I::Output { src: slot(0) }],
+                        },
+                        I::Output { src: slot(0) },
+                        I::Input { dst: slot(2) },
+                    ],
+                },
+            ],
+            Terminator::Halt,
+        )],
+    )
+    .unwrap();
+    for static_frames in [false, true] {
+        let options = AbiCodegenOptions {
+            inplace_compare: true,
+            static_frames,
+            ..Default::default()
+        };
+        let annotated = lower_continuations_with_profile_and_codegen_options(
+            &p,
+            ProfileGranularity::Abi,
+            options,
+        )
+        .unwrap();
+        let has_truth = annotated
+            .sites()
+            .records()
+            .iter()
+            .any(|s| s.stable_key == "abi.frame.truth_copy");
+        assert_eq!(has_truth, static_frames);
+        let mut input = Vec::new();
+        let mut expected = vec![0];
+        for value in 0..=255u8 {
+            input.extend([1, value]);
+            expected.extend([value, value]);
+        }
+        input.push(0);
+        let source = optimize_annotated_bf(&annotated).to_source();
+        for disabled in [false, true] {
+            let result = bf_interpreter::run_with_options(
+                source.as_bytes(),
+                &input,
+                bf_interpreter::RunOptions {
+                    disable_clear: disabled,
+                    disable_scan: disabled,
+                    disable_transfer: disabled,
+                    disable_countdown: disabled,
+                    disable_remote_transfer: disabled,
+                    disable_compare: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.output, expected);
+        }
+    }
+}
+
+#[test]
+fn portal_accessed_aggregate_padding_stays_private_to_the_portal() {
+    use crate::{FrameAggregateDescriptor, FrameAggregateId, LogicalOffset, ValueOperand};
+    use FrameInstruction as I;
+    let function = FunctionId::new(0);
+    let aggregate = FrameAggregateId::new(0);
+    let region = AggregateRegion::Frame(aggregate);
+    let field = Address::ArrayElement {
+        array: region,
+        index: 0,
+    };
+    let slot = |n| Address::Frame(FrameSlot::new(n));
+    let program = ContinuationProgram::new(
+        function,
+        vec![FunctionDescriptor::new_aggregates(
+            function,
+            vec![],
+            4,
+            vec![FrameAggregateDescriptor::new(aggregate, 3)],
+            0,
+            ValueType::Void,
+            id(1),
+        )],
+        vec![
+            Continuation::new(
+                id(1),
+                function,
+                vec![
+                    I::Input { dst: field },
+                    I::Set {
+                        dst: slot(0),
+                        value: 0,
+                    },
+                    I::Set {
+                        dst: slot(3),
+                        value: 0,
+                    },
+                ],
+                Terminator::AggregateLoad {
+                    source: region,
+                    offset: LogicalOffset::new(slot(0), slot(3)),
+                    destination: ValueOperand::Cell(slot(1)),
+                    cells: 1,
+                    return_to: id(2),
+                },
+            ),
+            Continuation::new(
+                id(2),
+                function,
+                vec![
+                    I::Copy {
+                        src: field,
+                        dst: slot(2),
+                    },
+                    I::Branch {
+                        condition: slot(2),
+                        then_body: vec![I::Output { src: field }],
+                        else_body: vec![I::Output { src: field }],
+                    },
+                    I::Output { src: slot(1) },
+                    I::Output { src: field },
+                ],
+                Terminator::Halt,
+            ),
+        ],
+    )
+    .unwrap();
+    let annotated = lower_continuations_with_profile_and_codegen_options(
+        &program,
+        ProfileGranularity::Abi,
+        AbiCodegenOptions {
+            inplace_compare: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !annotated
+            .sites()
+            .records()
+            .iter()
+            .any(|site| site.stable_key == "abi.frame.truth_copy")
+    );
+    let source = optimize_annotated_bf(&annotated).to_source();
+    for value in [0, 1, 17, 128, 255] {
+        for disabled in [false, true] {
+            let result = bf_interpreter::run_with_options(
+                source.as_bytes(),
+                &[value],
+                bf_interpreter::RunOptions {
+                    disable_clear: disabled,
+                    disable_scan: disabled,
+                    disable_transfer: disabled,
+                    disable_countdown: disabled,
+                    disable_remote_transfer: disabled,
+                    disable_compare: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.output, vec![value; 3]);
+        }
+    }
+}
+
+#[test]
+fn aggregate_padding_truth_tests_preserve_fields_and_reuse_guards() {
+    use crate::{FrameAggregateDescriptor, FrameAggregateId, GlobalDescriptor, GlobalId};
+    use FrameInstruction as I;
+    let function = FunctionId::new(0);
+    let region = AggregateRegion::Frame(FrameAggregateId::new(0));
+    let field = |index| Address::ArrayElement {
+        array: region,
+        index,
+    };
+    let slot = |index| Address::Frame(FrameSlot::new(index));
+    let global = GlobalId::new(0);
+    let mut input = Vec::new();
+    for value in 0..=255u8 {
+        input.extend([1, value]);
+    }
+    input.push(0);
+    for cells in 1..=6 {
+        for selected in 0..cells {
+            for constant in [0u8, 1, 17, 128, 255] {
+                let mut iteration = (0..cells)
+                    .map(|index| I::Set {
+                        dst: field(index),
+                        value: 40 + index as u8,
+                    })
+                    .collect::<Vec<_>>();
+                iteration.extend([
+                    I::Input {
+                        dst: field(selected),
+                    },
+                    I::Copy {
+                        src: field(selected),
+                        dst: slot(0),
+                    },
+                    I::AddConst {
+                        dst: slot(0),
+                        value: constant.wrapping_neg(),
+                    },
+                    I::Branch {
+                        condition: slot(0),
+                        then_body: vec![
+                            I::Output {
+                                src: field(selected),
+                            },
+                            I::Set {
+                                dst: field(selected),
+                                value: 17,
+                            },
+                            I::Set {
+                                dst: slot(0),
+                                value: 23,
+                            },
+                        ],
+                        else_body: vec![
+                            I::Output {
+                                src: field(selected),
+                            },
+                            I::Set {
+                                dst: field(selected),
+                                value: 31,
+                            },
+                            I::Set {
+                                dst: slot(0),
+                                value: 37,
+                            },
+                        ],
+                    },
+                    // Reuse the same padding after overwriting the live source.
+                    I::Copy {
+                        src: field(selected),
+                        dst: slot(0),
+                    },
+                    I::Branch {
+                        condition: slot(0),
+                        then_body: vec![I::Output {
+                            src: field(selected),
+                        }],
+                        else_body: vec![],
+                    },
+                    I::Output { src: slot(0) },
+                ]);
+                iteration.retain(|i| !matches!(i, I::AddConst { value: 0, .. }));
+                iteration.extend((0..cells).map(|index| I::Output { src: field(index) }));
+                iteration.push(I::Input { dst: slot(1) });
+                let p = ContinuationProgram::new_with_globals(
+                    function,
+                    vec![GlobalDescriptor::cell(global)],
+                    vec![FunctionDescriptor::new_aggregates(
+                        function,
+                        vec![],
+                        2,
+                        vec![FrameAggregateDescriptor::new(
+                            FrameAggregateId::new(0),
+                            cells,
+                        )],
+                        0,
+                        ValueType::Void,
+                        id(1),
+                    )],
+                    vec![Continuation::new(
+                        id(1),
+                        function,
+                        vec![
+                            I::Set {
+                                dst: Address::Global(global),
+                                value: 1,
+                            },
+                            I::Input { dst: slot(1) },
+                            I::Loop {
+                                condition: slot(1),
+                                body: iteration,
+                            },
+                        ],
+                        Terminator::Halt,
+                    )],
+                )
+                .unwrap();
+                let expected: Vec<_> = (0..=255u8)
+                    .flat_map(|value| {
+                        let changed = if value == constant { 31 } else { 17 };
+                        let mut bytes = vec![value, changed, 0];
+                        bytes.extend((0..cells).map(|index| {
+                            if index == selected {
+                                changed
+                            } else {
+                                40 + index as u8
+                            }
+                        }));
+                        bytes
+                    })
+                    .collect();
+                for static_frames in [false, true] {
+                    let options = AbiCodegenOptions {
+                        inplace_compare: true,
+                        static_frames,
+                        ..Default::default()
+                    };
+                    let bf = optimize_bf(
+                        &lower_continuations_with_codegen_options(&p, options).unwrap(),
+                    )
+                    .to_source();
+                    let run = |disabled| {
+                        bf_interpreter::run_with_options(
+                            bf.as_bytes(),
+                            &input,
+                            bf_interpreter::RunOptions {
+                                disable_clear: disabled,
+                                disable_scan: disabled,
+                                disable_transfer: disabled,
+                                disable_countdown: disabled,
+                                disable_remote_transfer: disabled,
+                                disable_compare: disabled,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap()
+                    };
+                    let native = run(false);
+                    let rle = run(true);
+                    assert_eq!(
+                        native.output, expected,
+                        "cells={cells} selected={selected} constant={constant} fixed={static_frames}"
+                    );
+                    assert_eq!(rle.output, expected);
+                    assert_eq!(
+                        native.stats.executed_instructions,
+                        rle.stats.executed_instructions
+                    );
+                    assert_eq!(
+                        native.stats.executed_rle_instructions,
+                        rle.stats.executed_rle_instructions
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn constant_truth_copies_restore_every_source_before_aliasing_branch_bodies() {
     use FrameInstruction as I;
     let function = FunctionId::new(0);

@@ -33,7 +33,7 @@ pub(crate) fn build_layouts_with_regions(
     config: AbiConfig,
     regions: Option<&RegionPlan>,
 ) -> Result<HashMap<FunctionId, FunctionLayout>, FrameLayoutError> {
-    build_layouts_for_codegen(program, config, regions, false, false)
+    build_layouts_for_codegen(program, config, regions, false, false, false)
 }
 
 /// Apply optional physical guards after compact planning. Inlining cost
@@ -44,6 +44,7 @@ pub(crate) fn build_layouts_for_codegen(
     regions: Option<&RegionPlan>,
     inplace_compare: bool,
     boundary_nibbles: bool,
+    static_frames: bool,
 ) -> Result<HashMap<FunctionId, FunctionLayout>, FrameLayoutError> {
     let mut layouts = build_layouts_with_route(
         program,
@@ -53,18 +54,45 @@ pub(crate) fn build_layouts_for_codegen(
     )?;
     if inplace_compare {
         let mut operands: HashMap<FunctionId, BTreeSet<usize>> = HashMap::new();
+        // Extra truth banks would widen dynamic activations and every scan
+        // through them. Only grow frames selected for fixed global contexts.
+        let fixed = if static_frames {
+            crate::cir::analysis::call_graph::global_context_functions(program)
+        } else {
+            Default::default()
+        };
         for continuation in program.continuations() {
+            if fixed.contains(&continuation.function()) {
+                collect_truth_slots(
+                    continuation.body(),
+                    operands.entry(continuation.function()).or_default(),
+                );
+            }
             collect_compare_slots(
                 continuation.body(),
                 operands.entry(continuation.function()).or_default(),
             );
         }
         for (function, slots) in operands {
-            layouts
+            let frame = &mut layouts
                 .get_mut(&function)
                 .expect("validated continuation function")
-                .frame
-                .reserve_compare_slots(&slots)?;
+                .frame;
+            let mut augmented = frame.clone();
+            if augmented.reserve_compare_slots(&slots).is_ok() {
+                *frame = augmented;
+            } else {
+                // New guards must not reject a previously valid compare bank.
+                let mut original = BTreeSet::new();
+                for c in program
+                    .continuations()
+                    .iter()
+                    .filter(|c| c.function() == function)
+                {
+                    collect_compare_slots(c.body(), &mut original);
+                }
+                frame.reserve_compare_slots(&original)?;
+            }
         }
     }
     Ok(layouts)
@@ -207,4 +235,101 @@ pub(crate) fn estimated_frame_chunks_with_route(
         .into_iter()
         .map(|(id, layout)| (id, layout.frame.frame_chunks()))
         .collect())
+}
+
+/// Match the preserving truth-copy emitter without expanding control flow.
+/// Only fixed contexts may pay for new banks; compact inline estimates stay
+/// independent of this optional physical layout.
+fn collect_truth_slots(body: &[FrameInstruction], slots: &mut BTreeSet<usize>) {
+    for (i, instruction) in body.iter().enumerate() {
+        if let FrameInstruction::Copy {
+            src: Address::Frame(source),
+            dst: Address::Frame(destination),
+        } = instruction
+        {
+            let next = if matches!(body.get(i+1),Some(FrameInstruction::AddConst{dst,..}) if *dst==Address::Frame(*destination))
+            {
+                i + 2
+            } else {
+                i + 1
+            };
+            if source != destination
+                && matches!(body.get(next),Some(FrameInstruction::Branch{condition,..}) if *condition==Address::Frame(*destination))
+            {
+                slots.insert(source.index());
+            }
+        }
+        match instruction {
+            FrameInstruction::Loop { body, .. } => collect_truth_slots(body, slots),
+            FrameInstruction::Branch {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_truth_slots(then_body, slots);
+                collect_truth_slots(else_body, slots);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Continuation, ContinuationId, FunctionDescriptor, GlobalDescriptor, GlobalId, ValueType,
+    };
+
+    #[test]
+    fn extra_truth_banks_fall_back_before_exceeding_the_frame_limit() {
+        let function = FunctionId::new(0);
+        let entry = ContinuationId::new(1).unwrap();
+        let condition = Address::Frame(FrameSlot::new(9000));
+        let mut body = vec![FrameInstruction::Output {
+            src: Address::Global(GlobalId::new(0)),
+        }];
+        for i in 0..9000 {
+            let source = Address::Frame(FrameSlot::new(i));
+            body.extend([
+                FrameInstruction::Copy {
+                    src: source,
+                    dst: condition,
+                },
+                FrameInstruction::Branch {
+                    condition,
+                    then_body: vec![FrameInstruction::Output { src: source }],
+                    else_body: vec![],
+                },
+            ]);
+        }
+        let program = ContinuationProgram::new_with_globals(
+            function,
+            vec![GlobalDescriptor::cell(GlobalId::new(0))],
+            vec![FunctionDescriptor::new(
+                function,
+                vec![],
+                9001,
+                ValueType::Void,
+                entry,
+            )],
+            vec![Continuation::new(entry, function, body, Terminator::Halt)],
+        )
+        .unwrap();
+        let layouts =
+            build_layouts_for_codegen(&program, AbiConfig::default(), None, true, false, true)
+                .unwrap();
+        assert!(
+            layouts[&function]
+                .frame
+                .truth_guards(FrameSlot::new(0))
+                .is_none()
+        );
+        assert_eq!(
+            layouts[&function].frame.frame_chunks(),
+            build_layouts(&program, AbiConfig::default()).unwrap()[&function]
+                .frame
+                .frame_chunks()
+        );
+    }
 }

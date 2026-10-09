@@ -103,6 +103,56 @@ fn weight<'a>(nodes: impl Iterator<Item = &'a Continuation>) -> usize {
     })
 }
 
+/// Give each closed global context its own allowance, measured before any
+/// splice. A growing callee must not exhaust the allowance of unrelated global
+/// callers. Dynamic callers retain the shared work limit. Failed trials are
+/// charged too; repeatedly rejecting large templates still costs compiler work.
+struct WorkBudgets {
+    shared_limit: usize,
+    shared_spent: usize,
+    fixed: HashMap<FunctionId, (usize, usize)>,
+}
+
+impl WorkBudgets {
+    fn new(program: &ContinuationProgram, shared_limit: usize) -> Self {
+        let contexts = crate::cir::analysis::call_graph::global_context_functions(program);
+        let mut weights = HashMap::<FunctionId, usize>::new();
+        for continuation in program.continuations() {
+            if contexts.contains(&continuation.function()) {
+                let total = weights.entry(continuation.function()).or_default();
+                *total = total.saturating_add(weight(std::iter::once(continuation)));
+            }
+        }
+        let fixed = weights
+            .into_iter()
+            .map(|(function, weight)| {
+                let limit = weight
+                    .saturating_mul(8)
+                    .clamp(1024, 1_000_000)
+                    .min(shared_limit);
+                (function, (limit, 0))
+            })
+            .collect();
+        Self {
+            shared_limit,
+            shared_spent: 0,
+            fixed,
+        }
+    }
+
+    fn charge(&mut self, caller: FunctionId, work: usize) -> bool {
+        let (limit, spent) = match self.fixed.get_mut(&caller) {
+            Some((limit, spent)) => (*limit, spent),
+            None => (self.shared_limit, &mut self.shared_spent),
+        };
+        if spent.saturating_add(work) > limit {
+            return false;
+        }
+        *spent += work;
+        true
+    }
+}
+
 fn allocated_costs(
     program: &ContinuationProgram,
     options: ContinuationOptimizationOptions,
@@ -136,8 +186,9 @@ pub(crate) fn inline_automatic(
     program: &ContinuationProgram,
     options: ContinuationOptimizationOptions,
 ) -> Result<(ContinuationProgram, InlineStats), String> {
-    // Bound compiler work against exponential call-DAG expansion. This is not
-    // a BF-size profitability test; ordinary code growth is allowed.
+    // Bound compiler work against exponential call-DAG expansion. Closed global
+    // contexts receive separate, source-sized limits inside inline_with_budget.
+    // This is not a BF-size profitability test; ordinary code growth is allowed.
     let budget = weight(program.continuations().iter())
         .saturating_mul(8)
         .clamp(8192, 1_000_000);
@@ -160,7 +211,7 @@ fn inline_with_budget(
     let global = global_users(&cleaned);
     let recursive = recursive_functions(&cleaned);
     let ranks = callee_ranks(&cleaned);
-    let mut spent = 0usize;
+    let mut budgets = WorkBudgets::new(&cleaned, budget);
     let mut graph = Graph::normalize(&cleaned)?;
     let mut skipped = HashSet::new();
     loop {
@@ -188,18 +239,17 @@ fn inline_with_budget(
             stats.id_limit_calls_preserved += 1;
             continue;
         }
-        let work = weight(graph.nodes.iter().filter(|c| c.function() == callee));
-        if spent.saturating_add(work) > budget {
-            stats.work_limit_calls_preserved += 1;
-            continue;
-        }
-        spent += work;
         let caller = graph
             .nodes
             .iter()
             .find(|c| c.id() == site)
             .unwrap()
             .function();
+        let work = weight(graph.nodes.iter().filter(|c| c.function() == callee));
+        if !budgets.charge(caller, work) {
+            stats.work_limit_calls_preserved += 1;
+            continue;
+        }
         let mut candidate = graph.trial(caller, callee);
         let copied = candidate.splice(site)?;
         let Ok((new_cost, projection)) = caller_cost(
@@ -277,6 +327,79 @@ fn inline_with_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source(text: &str) -> ContinuationProgram {
+        let ast =
+            crate::frontend::parser::parse(crate::frontend::lexer::lex(text).unwrap()).unwrap();
+        let hir = crate::frontend::semantic::analyze(&ast).unwrap();
+        crate::frontend::lowering::lower_hir_unallocated(&hir).unwrap()
+    }
+
+    #[test]
+    fn closed_global_contexts_have_independent_work_limits() {
+        let program = source(
+            "cell g; cell leaf(cell x) { return x+g; } cell left(cell x) { return leaf(x); } cell right(cell x) { return leaf(x); } cell rec(cell n) { if(n) { return rec(n-1)+1; } return 0; } void main() { g=input(); output(left(input())); output(right(input())); output(rec(input())); }",
+        );
+        let function = |name| {
+            program
+                .functions()
+                .iter()
+                .find(|f| f.name() == Some(name))
+                .unwrap()
+                .id()
+        };
+        let mut budgets = WorkBudgets::new(&program, 8);
+        assert!(budgets.charge(function("left"), 8));
+        assert!(!budgets.charge(function("left"), 1));
+        assert!(budgets.charge(function("right"), 8));
+        assert!(!budgets.charge(function("right"), 1));
+        // main reaches recursion, so it and rec share the dynamic allowance.
+        assert!(budgets.charge(program.main(), 8));
+        assert!(!budgets.charge(function("rec"), 1));
+        let mut disabled = WorkBudgets::new(&program, 0);
+        assert!(!disabled.charge(function("left"), 1));
+        assert!(!disabled.charge(program.main(), 1));
+    }
+
+    #[test]
+    fn exhausting_one_global_caller_does_not_prevent_other_callers_from_inlining() {
+        let program = source(
+            "cell g; cell leaf(cell x) { return x+g; } cell left(cell x) { return leaf(x); } cell right(cell x) { return leaf(x); } cell rec(cell n) { if(n) { return rec(n-1)+1; } return 0; } void main() { g=input(); output(left(input())); output(right(input())); output(rec(input())); }",
+        );
+        let leaf = program
+            .functions()
+            .iter()
+            .find(|f| f.name() == Some("leaf"))
+            .unwrap()
+            .id();
+        let budget = weight(
+            program
+                .continuations()
+                .iter()
+                .filter(|c| c.function() == leaf),
+        );
+        let (after, stats) = inline_with_budget(&program, Default::default(), budget).unwrap();
+        assert!(stats.calls_inlined >= 2);
+        assert!(stats.work_limit_calls_preserved > 0);
+        assert!(
+            after
+                .continuations()
+                .iter()
+                .all(|c| c.terminator().callee() != Some(leaf))
+        );
+        for g in [0u8, 1, 128, 255] {
+            let mut output = Vec::new();
+            crate::run_continuations_with_io(
+                &after,
+                &mut &[g, 4, 8, 3][..],
+                &mut output,
+                Default::default(),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(output, [g.wrapping_add(4), g.wrapping_add(8), 3]);
+        }
+    }
 
     #[test]
     fn automatic_inline_retains_recursive_calls_and_respects_work_budget() {

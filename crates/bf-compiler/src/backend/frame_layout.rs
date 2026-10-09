@@ -272,7 +272,7 @@ impl FrameLayout {
         Ok(layout)
     }
 
-    /// Reserve [zero, value, flag, zero] only for comparison operands. Keep
+    /// Reserve [zero, value, flag, zero] for selected comparison/truth operands. Keep
     /// every bank within one data chunk so no allocation head is a guard.
     /// All other scalar slots retain one-cell storage. Callers use this only
     /// for BF emission; the default layout and CIR cost estimates stay compact.
@@ -320,6 +320,29 @@ impl FrameLayout {
         }
         debug_assert!(self.regions_do_not_overlap());
         Ok(())
+    }
+
+    /// For a small aggregate, use otherwise inaccessible payload padding.
+    /// Each field i owns flag=i+n and zero=i+2n. All three lie in the
+    /// first payload data chunk when 3*n <= D, with equal physical spacing.
+    /// No allocation head, protocol field or neighboring aggregate is used.
+    /// Activation cleanup and each test leave this padding zero.
+    pub(crate) fn aggregate_truth_guards(
+        &self,
+        aggregate: FrameAggregateId,
+        index: usize,
+    ) -> Result<Option<(isize, isize)>, FrameLayoutError> {
+        let layout = self.aggregate_layout(aggregate)?;
+        let cells = layout.descriptor.cells();
+        if cells == 0
+            || cells
+                .checked_mul(3)
+                .is_none_or(|n| n > self.config.chunk_cells())
+        {
+            return Ok(None);
+        }
+        let source = self.aggregate_element_offset(aggregate, index)?;
+        Ok(Some((source + cells as isize, source + 2 * cells as isize)))
     }
 
     pub const fn config(&self) -> AbiConfig {

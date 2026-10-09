@@ -133,7 +133,6 @@ impl AbiEmitter<'_> {
         };
         let function = continuation.function();
         if self.inplace_compare
-            && self.fixed_context.is_none()
             && let Address::Frame(slot) = condition
             && let Some((flag, zero)) = self.layout(function)?.frame.truth_guards(*slot)
         {
