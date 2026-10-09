@@ -45,6 +45,23 @@ dispatch先2,617→2,406、素BF−21.2524%／圧縮BF＋15.8537%。arena RLE−
 全256入力の4関数SCC・fmt/clippyを検証。
 [末尾wrapperと相互再帰SCCの評価](optimize_logs/FORWARDING_INLINE_SCC_EVALUATION_20261009.md)。
 
+同日追補: `BFC_EVAL_CLOSED_INLINE=4` は版3を先に実行した後、portalを持たず非末尾Callを含む
+小calleeを別の予算で試す。通常spliceで後続処理とlive値を保持し、callerのB1 root増大を棄却する。
+SCCの代表とself Callは展開しない。3Callでaggregateを組み立てるnode_*はresume増大により残る。
+compilerではdispatch先2,406→2,393、実Call223,296→221,515でもRLE＋1.22539%。既定OFF。
+
+`BFC_EVAL_ENTRY_PREFIX=1` はsourceのinline選択後・allocation前に、非再帰calleeの純粋な
+entry prefixを全callerへ移し、entry・portal・resume IDを共有したままsignatureをlive cellに変更する。
+snapshot／毎回のゼロ初期化／source spanを維持。I/O・local loop/branch・global writeの手前で止める。
+entryへ戻る内部edgeは除外。prefix長2〜128命令、callee storage最大4,096cell。
+`BFC_EVAL_ENTRY_PREFIX_ARGUMENTS`は搬送cell数上限（既定8）、`BFC_EVAL_ENTRY_PREFIX_REDUCE=1`
+は元の引数cell数より減る候補だけに限定する。公開binary CIRへの再割り当ては行わない。
+上限8のcompilerはscalar copy−4,098万RLEでもcall/return＋8,009万・global navigation＋3,969万、
+全体＋3.44948%。上限3でも＋0.20259%、引数数減少限定ではBF不変。既定OFF。
+小例のcaller `read(p-1)` とcallee `arena[p+1]` は相殺でき、p=255でRLE15,877→14,607。
+全481テスト・CLI native/RLE-only4,224実行・公開CIR48条件・fmt/clippyを検証。
+[3候補の比較と採否](optimize_logs/REGION_CANDIDATES_EVALUATION_20261009.md)。
+
 2026-09-23。allocation 前の CIR graph に clone／splice を実装した。
 source の既定経路は frame cost に基づく自動 CIR inline を使用する。HIR の汎用 inliner は撤去した。
 `ContinuationOptimizationOptions::inline_functions = false` または `bfc --disable-function-inline` で

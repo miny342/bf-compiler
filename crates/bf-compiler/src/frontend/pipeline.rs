@@ -31,12 +31,14 @@ pub(crate) fn lower_hir(
     // Replace general cloning with closed-callee expansion even when general
     // function inlining is disabled for the comparison.
     let closed = std::env::var("BFC_EVAL_CLOSED_INLINE").unwrap_or_default();
-    let lowered = if matches!(closed.as_str(), "1" | "2" | "3") {
+    let lowered = if matches!(closed.as_str(), "1" | "2" | "3" | "4") {
         let max_weight = std::env::var("BFC_EVAL_CLOSED_INLINE_WEIGHT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(128);
-        let trial = if closed == "3" {
+        let trial = if closed == "4" {
+            crate::cir::inline::inline_wrappers(&lowered, options, max_weight, true)
+        } else if closed == "3" {
             crate::cir::inline::inline_forwarding(&lowered, options, max_weight)
         } else {
             crate::cir::inline::inline_closed(&lowered, options, closed == "2", max_weight)
@@ -49,6 +51,20 @@ pub(crate) fn lower_hir(
             .0
     } else if options.inline_functions {
         crate::cir::inline::inline_automatic(&lowered, options)
+            .map_err(|detail| ContinuationLoweringError::InvalidHir {
+                function: None,
+                detail,
+            })?
+            .0
+    } else {
+        lowered
+    };
+    let lowered = if std::env::var("BFC_EVAL_ENTRY_PREFIX").as_deref() == Ok("1") {
+        let max_arguments = std::env::var("BFC_EVAL_ENTRY_PREFIX_ARGUMENTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        crate::cir::inline::hoist_prefixes(&lowered, max_arguments)
             .map_err(|detail| ContinuationLoweringError::InvalidHir {
                 function: None,
                 detail,

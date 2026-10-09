@@ -9,8 +9,11 @@ impl AbiEmitter<'_> {
     ) -> Result<(), AbiCodegenError> {
         self.branch_temporary_depth = 0;
         let layout = self.layout(function)?;
-        let selector =
-            Location::Relative(layout.frame.frame_offset(layout.region_selector.unwrap()));
+        let single = region.terminals.len() == 1
+            && std::env::var("BFC_EVAL_SINGLE_TERMINAL").as_deref() != Ok("0");
+        let selector = (!single).then(|| {
+            Location::Relative(layout.frame.frame_offset(layout.region_selector.unwrap()))
+        });
         self.emit_region_node(&region.root, selector)?;
         debug_assert_eq!(self.branch_temporary_depth, 0);
         debug_assert!(self.region_loops.is_empty());
@@ -19,6 +22,17 @@ impl AbiEmitter<'_> {
         // loop cannot finish, so no selector or hard gate is needed after it.
         if region.terminals.is_empty() {
             return Ok(());
+        }
+
+        if single {
+            // All frame-relative gates are closed here. The unique terminal
+            // can migrate to another context without a selector transport.
+            let terminal = self.program.continuation(region.terminals[0]).unwrap();
+            return self.with_continuation_site(terminal, |emitter| {
+                emitter.with_source_span(terminal.terminator_source(), |emitter| {
+                    emitter.emit_terminator(terminal)
+                })
+            });
         }
 
         self.with_profile_site(
@@ -30,7 +44,7 @@ impl AbiEmitter<'_> {
                 // use other ABI scratch, so stage the selection only after every
                 // frame-relative branch has closed. The scalar slot is consumed.
                 let pc = emitter.current_abi_offset(AbiField::PcLow)?;
-                emitter.move_location(selector, Location::Relative(pc));
+                emitter.move_location(selector.unwrap(), Location::Relative(pc));
                 emitter.add_abi_field(AbiField::PcLow, 255)?;
                 emitter.set_abi_field(AbiField::Branch, 1)?;
                 emitter.emit_region_terminal_level(&region.terminals, 0)
@@ -41,7 +55,7 @@ impl AbiEmitter<'_> {
     fn emit_region_node(
         &mut self,
         node: &RegionNode,
-        selector: Location,
+        selector: Option<Location>,
     ) -> Result<(), AbiCodegenError> {
         if matches!(node.flow, RegionFlow::Continue) {
             let (_, gate) = *self
@@ -89,7 +103,7 @@ impl AbiEmitter<'_> {
     fn emit_region_node_body(
         &mut self,
         node: &RegionNode,
-        selector: Location,
+        selector: Option<Location>,
     ) -> Result<(), AbiCodegenError> {
         let continuation = self
             .program
@@ -109,7 +123,9 @@ impl AbiEmitter<'_> {
                         "abi.region.select",
                         "region terminal selection",
                         |emitter| {
-                            emitter.set_location(selector, *index);
+                            if let Some(selector) = selector {
+                                emitter.set_location(selector, *index);
+                            }
                             Ok(())
                         },
                     ),
@@ -127,7 +143,7 @@ impl AbiEmitter<'_> {
         continuation: &Continuation,
         then_node: &RegionNode,
         else_node: &RegionNode,
-        selector: Location,
+        selector: Option<Location>,
     ) -> Result<(), AbiCodegenError> {
         let Terminator::Branch { condition, .. } = continuation.terminator() else {
             unreachable!("region branch");
@@ -189,7 +205,7 @@ impl AbiEmitter<'_> {
         guards: (isize, isize, isize),
         then_node: &RegionNode,
         else_node: &RegionNode,
-        selector: Location,
+        selector: Option<Location>,
     ) -> Result<(), AbiCodegenError> {
         let (value, flag, zero) = guards;
         debug_assert_eq!((flag - value, zero - flag), (1, 1));

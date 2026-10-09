@@ -14,6 +14,7 @@ enum Selection {
         allow_fixed_growth: bool,
         max_weight: usize,
         forward_wrappers: bool,
+        non_tail: bool,
     },
 }
 
@@ -28,6 +29,18 @@ fn closed_functions(graph: &Graph) -> HashSet<FunctionId> {
         }
     }
     closed
+}
+
+fn call_only_functions(graph: &Graph) -> HashSet<FunctionId> {
+    let mut eligible: HashSet<_> = graph.nodes.iter().map(Continuation::function).collect();
+    for node in &graph.nodes {
+        if node.terminator().boundary() == crate::cir::ir::BoundaryKind::Hard
+            && !matches!(node.terminator(), Terminator::Call { .. })
+        {
+            eligible.remove(&node.function());
+        }
+    }
+    eligible
 }
 
 fn dispatch_entries(program: &ContinuationProgram) -> HashMap<FunctionId, usize> {
@@ -269,6 +282,7 @@ pub(crate) fn inline_closed(
             allow_fixed_growth,
             max_weight,
             forward_wrappers: false,
+            non_tail: false,
         },
     )
 }
@@ -278,19 +292,43 @@ pub(crate) fn inline_forwarding(
     options: ContinuationOptimizationOptions,
     max_weight: usize,
 ) -> Result<(ContinuationProgram, InlineStats), String> {
+    inline_wrappers(program, options, max_weight, false)
+}
+
+pub(crate) fn inline_wrappers(
+    program: &ContinuationProgram,
+    options: ContinuationOptimizationOptions,
+    max_weight: usize,
+    non_tail: bool,
+) -> Result<(ContinuationProgram, InlineStats), String> {
+    // Preserve the preceding forwarding selection. Extra candidates must not
+    // displace previously accepted calls merely by spending the work budget.
+    let (program, baseline) = if non_tail {
+        inline_wrappers(program, options, max_weight, false)?
+    } else {
+        (program.clone(), InlineStats::default())
+    };
     let budget = weight(program.continuations().iter())
         .saturating_mul(8)
         .clamp(8192, 1_000_000);
-    inline_with_selection(
-        program,
+    let (program, mut stats) = inline_with_selection(
+        &program,
         options,
         budget,
         Selection::Closed {
             allow_fixed_growth: true,
             max_weight,
             forward_wrappers: true,
+            non_tail,
         },
-    )
+    )?;
+    stats.calls_inlined += baseline.calls_inlined;
+    stats.recursive_calls_preserved += baseline.recursive_calls_preserved;
+    stats.id_limit_calls_preserved += baseline.id_limit_calls_preserved;
+    stats.blocks_cloned += baseline.blocks_cloned;
+    stats.frame_limit_calls_preserved += baseline.frame_limit_calls_preserved;
+    stats.work_limit_calls_preserved += baseline.work_limit_calls_preserved;
+    Ok((program, stats))
 }
 
 fn inline_with_selection(
@@ -359,6 +397,18 @@ fn inline_with_selection(
                 .map(FunctionDescriptor::id),
         );
     }
+    let non_tail = matches!(selection, Selection::Closed { non_tail: true, .. });
+    if non_tail {
+        eligible = call_only_functions(&graph)
+            .into_iter()
+            .filter(|&f| {
+                !graph.forwards_calls(f)
+                    && graph.nodes.iter().any(|c| {
+                        c.function() == f && matches!(c.terminator(), Terminator::Call { .. })
+                    })
+            })
+            .collect();
+    }
     let mut skipped = HashSet::new();
     loop {
         let reachable = graph.reachable(cleaned.main());
@@ -402,7 +452,7 @@ fn inline_with_selection(
             continue;
         }
         let mut candidate = graph.trial(caller, callee);
-        let copied = if forward_wrappers {
+        let copied = if forward_wrappers && (!non_tail || graph.forwards_calls(callee)) {
             candidate.splice_forwarding(site)?
         } else {
             candidate.splice(site)?
@@ -472,7 +522,16 @@ fn inline_with_selection(
                 .iter()
                 .filter(|c| c.function() == caller)
                 .all(|c| c.terminator().boundary() != crate::cir::ir::BoundaryKind::Hard);
-            if closed || (forward_wrappers && graph.forwards_calls(caller)) {
+            let calls_only = non_tail
+                && graph
+                    .nodes
+                    .iter()
+                    .filter(|c| c.function() == caller)
+                    .all(|c| {
+                        c.terminator().boundary() != crate::cir::ir::BoundaryKind::Hard
+                            || matches!(c.terminator(), Terminator::Call { .. })
+                    });
+            if closed || calls_only || (forward_wrappers && graph.forwards_calls(caller)) {
                 eligible.insert(caller);
             } else {
                 eligible.remove(&caller);

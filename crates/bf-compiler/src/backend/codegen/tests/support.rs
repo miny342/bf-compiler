@@ -260,6 +260,18 @@ pub(super) fn measure(program: &ContinuationProgram, input: &[u8], enabled: bool
         }
     }
     assert_eq!(inputs, semantic.input_operations, "input consumption");
+    if std::env::var("BFC_EVAL_SINGLE_TERMINAL").as_deref() != Ok("0")
+        && let Some(plan) = &plan
+    {
+        // A unique terminal has no selector gate to count. Each completed
+        // visit of its root reaches that terminal once, after local gates close.
+        for (&root, region) in &plan.regions {
+            if region.terminals.len() == 1 {
+                *terminals.entry(region.terminals[0]).or_default() +=
+                    visits.get(&root).copied().unwrap_or(0);
+            }
+        }
+    }
     for continuation in program.continuations() {
         if continuation.terminator().boundary() != crate::cir::ir::BoundaryKind::Soft {
             let id = continuation.id();

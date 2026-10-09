@@ -8,7 +8,9 @@ use std::collections::{HashMap, HashSet};
 
 mod automatic;
 mod forwarding;
-pub(crate) use automatic::{inline_automatic, inline_closed, inline_forwarding};
+mod prefix;
+pub(crate) use automatic::{inline_automatic, inline_closed, inline_forwarding, inline_wrappers};
+pub(crate) use prefix::hoist_prefixes;
 
 use crate::cir::analysis::call_graph::recursive_functions;
 use crate::cir::operands::{map_body, map_operand, map_region, map_terminator};

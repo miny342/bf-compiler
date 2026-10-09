@@ -16,6 +16,14 @@ viewer の読み取り処理は削除した。旧 variant を使う Rust API 利
 
 ## 実装範囲
 
+2026-10-09追補（検証ブランチ）: hard terminalが1個のregionでは、selectorの書き込み・搬送・
+countdown gateを省き、local loop／branchの全gateを閉じてから唯一のterminalを直接実行する。
+frame layout／dispatch先は変えない。`BFC_EVAL_SINGLE_TERMINAL=0`で旧出力を比較できる。
+この場合`abi.region.enter.*`のselector loopは存在しない。有限実行のterminal訪問数は、
+単一終端regionの実際のroot訪問数から数える（複数終端は従来のgate counterを使う）。
+版3／weight256・三optionのcompiler入力でRLE−0.00346%／圧縮BF−0.10664%。
+[regionの3候補の評価](optimize_logs/REGION_CANDIDATES_EVALUATION_20261009.md)。
+
 2026-10-09補足: 最適化で避けたいのは本文の複製自体ではなく、dispatch先の増殖。
 callerがprologueを実行し、calleeのentry本文をBF出力時に展開しても、
 中断後のcontinuationとportal resumeを共有できれば新しいdispatch先は要らない。
