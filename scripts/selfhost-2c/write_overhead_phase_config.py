@@ -13,6 +13,7 @@ from ir_artifact_identity import VERSION, source_identity
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("root", type=Path)
 parser.add_argument("--disable-function-inline", action="store_true")
+parser.add_argument("--enable-generic-function-inline", action="store_true")
 parser.add_argument("--enable-local-control-flow", dest="local", action="store_true")
 parser.add_argument("--disable-local-control-flow", dest="local", action="store_false")
 parser.set_defaults(local=True)
@@ -22,7 +23,7 @@ path = root / "source" / "phase-config-overhead.json"
 if path.exists():
     raise SystemExit(f"refusing to overwrite phase config: {path}")
 program = root / "source" / "phase-portal-overhead.bfc"
-artifact_id = source_identity([str(program)], structure_local_control_flow=args.local, inline_functions=not args.disable_function_inline)
+artifact_id = source_identity([str(program)], structure_local_control_flow=args.local, inline_functions=not args.disable_function_inline, generic_function_inline=args.enable_generic_function_inline)
 path.write_text(
     json.dumps(
         {
@@ -33,7 +34,8 @@ path.write_text(
                 "identity_version": VERSION.decode(),
                 "lowering_options": {"inline_branch_successors": True,
                                      "structure_local_control_flow": args.local,
-                    "inline_functions": not args.disable_function_inline},
+                    "inline_functions": not args.disable_function_inline,
+                    "generic_function_inline": args.enable_generic_function_inline},
             },
             "chunk_cells": [16],
             "phases": [{"name": "main", "function_name": "main"}],

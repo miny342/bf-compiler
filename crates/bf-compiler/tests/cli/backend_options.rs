@@ -467,13 +467,13 @@ fn local_control_flow_options_bind_identity_and_preserve_execution() {
     assert_eq!(after["accounting"]["ok"], true);
     assert_eq!(
         after["artifact_identity_definition"]["version"],
-        "bfc-ir-artifact-v6"
+        "bfc-ir-artifact-v7"
     );
     let options = &after["measurement_options"]["lowering_options"];
     assert_eq!(options["structure_local_control_flow"], true);
     let id = after["artifact_identity"].as_str().unwrap();
     let mut config = json!({"format": "bfc-ir-phase-config-v1",
-        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v6",
+        "artifact": {"kind": "source", "id": id, "identity_version": "bfc-ir-artifact-v7",
             "lowering_options": options},
         "chunk_cells": [16], "phases": [{"name": "main", "function_name": "main"}]});
     fs::write(root.join("phase.json"), config.to_string()).unwrap();
@@ -600,7 +600,11 @@ fn cir_inline_and_region_defaults_match_explicit_flags_and_preserve_execution() 
     let enabled = run(&["--enable-function-inline", "--enable-region-emission"]);
     assert!(enabled.status.success(), "{:?}", enabled.stderr);
     assert_eq!(default.stdout, enabled.stdout);
-    for inline in ["--disable-function-inline", "--enable-function-inline"] {
+    for inline in [
+        "--disable-function-inline",
+        "--enable-function-inline",
+        "--enable-generic-function-inline",
+    ] {
         let fused = run(&[inline]);
         let ordinary = run(&[inline, "--disable-region-emission"]);
         for output in [&fused, &ordinary] {
@@ -620,7 +624,12 @@ fn cir_inline_and_region_defaults_match_explicit_flags_and_preserve_execution() 
         "--ir-metrics",
         "before.json",
     ]);
-    let inlined = run(&["--run-ir", "--ir-metrics", "after.json"]);
+    let inlined = run(&[
+        "--enable-generic-function-inline",
+        "--run-ir",
+        "--ir-metrics",
+        "after.json",
+    ]);
     assert!(baseline.status.success());
     assert!(inlined.status.success());
     assert_eq!(baseline.stdout, inlined.stdout);
@@ -634,4 +643,86 @@ fn cir_inline_and_region_defaults_match_explicit_flags_and_preserve_execution() 
     );
     assert!(before["run"]["calls"].as_u64().unwrap() > 0);
     assert_eq!(after["run"]["calls"], 0);
+}
+
+#[test]
+fn forwarding_inline_is_default_and_generic_inline_is_explicit() {
+    let root = test_root().with_file_name(format!("forwarding-default-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("main.bfc"), "cell[4] values; cell read(cell n){return values[n];} cell wrap(cell n){return read(n);} void main(){values[2]=65;output(wrap(input()));}").unwrap();
+    let run = |flags: &[&str], experiment: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bfc"));
+        command.current_dir(&root).args(flags).arg("main.bfc");
+        command.env_remove("BFC_EVAL_CLOSED_INLINE");
+        command.env_remove("BFC_EVAL_CLOSED_INLINE_WEIGHT");
+        command.env_remove("BFC_EVAL_ENTRY_PREFIX");
+        if experiment {
+            command.env("BFC_EVAL_CLOSED_INLINE", "3");
+            command.env("BFC_EVAL_CLOSED_INLINE_WEIGHT", "256");
+        }
+        let result = command.output().unwrap();
+        assert!(result.status.success(), "{:?}", result.stderr);
+        result.stdout
+    };
+    let default = run(&[], false);
+    assert_eq!(default, run(&["--disable-function-inline"], true));
+    assert_eq!(
+        default,
+        run(
+            &[
+                "--enable-generic-function-inline",
+                "--enable-function-inline"
+            ],
+            false
+        )
+    );
+    let generic = run(&["--enable-generic-function-inline"], false);
+    assert_ne!(default, generic);
+    assert_eq!(
+        generic,
+        run(
+            &[
+                "--enable-function-inline",
+                "--enable-generic-function-inline"
+            ],
+            false
+        )
+    );
+    let disabled = run(&["--disable-function-inline"], false);
+    assert_eq!(
+        disabled,
+        run(
+            &[
+                "--enable-generic-function-inline",
+                "--disable-function-inline"
+            ],
+            false
+        )
+    );
+    for program in [&default, &generic, &disabled] {
+        for (input, expected) in [(0, 0), (2, 65), (3, 0)] {
+            assert_eq!(bf_interpreter::run(program, &[input]).unwrap(), [expected]);
+        }
+    }
+    for (flags, name, generic) in [
+        (vec![], "forwarding.json", false),
+        (
+            vec!["--enable-generic-function-inline"],
+            "generic.json",
+            true,
+        ),
+    ] {
+        let mut flags = flags;
+        flags.extend(["--run-ir", "--ir-metrics", name]);
+        run(&flags, false);
+        let report: Value = serde_json::from_slice(&fs::read(root.join(name)).unwrap()).unwrap();
+        assert_eq!(
+            report["measurement_options"]["lowering_options"]["generic_function_inline"],
+            generic
+        );
+    }
+    let identity = |name| {
+        serde_json::from_slice::<Value>(&fs::read(root.join(name)).unwrap()).unwrap()["artifact_identity"].clone()
+    };
+    assert_ne!(identity("forwarding.json"), identity("generic.json"));
 }

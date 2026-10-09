@@ -50,7 +50,12 @@ pub(crate) fn lower_hir(
             })?
             .0
     } else if options.inline_functions {
-        crate::cir::inline::inline_automatic(&lowered, options)
+        let trial = if options.generic_function_inline {
+            crate::cir::inline::inline_automatic(&lowered, options)
+        } else {
+            crate::cir::inline::inline_forwarding(&lowered, options, 256)
+        };
+        trial
             .map_err(|detail| ContinuationLoweringError::InvalidHir {
                 function: None,
                 detail,

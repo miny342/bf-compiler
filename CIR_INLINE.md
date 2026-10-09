@@ -1,5 +1,24 @@
 # CIR graph inline migration
 
+2026-10-09採用: sourceの既定は**版3／weight 256**。割り当て前のCIRでclosed calleeと
+末尾scalar/void wrapperを展開し、計算グラフ・DSE・配置を適用する。各再帰SCCの代表を残し、
+callerのB1 dispatch rootが増える候補は棄却する。公開の割り当て済みCIRには再inlineしない。
+HIRの汎用inlinerは既に撤去済みで、今回切り替える従来方式もCIRのclone/spliceである。
+
+- 既定／`--enable-function-inline`: 版3、weight 256。
+- `--enable-generic-function-inline`: 従来の汎用CIR inline。APIは`inline_functions=true`かつ`generic_function_inline=true`。
+- `--disable-function-inline`: sourceの関数inlineを無効化。方式の指定は最後のenable flagを採用する。
+- `BFC_EVAL_CLOSED_INLINE=1..4`: 既存の明示実験を優先する。実験weightは従来どおり未指定なら128。
+  版4・entry prefix・backend shared direct callは既定OFFを維持する。
+
+自己入力stage1→stage2は従来の汎用方式比RLE−16.55%（865,525,153,660→722,271,750,104）、
+native execute 127.280→126.972秒でほぼ同じ。Rust生成込み137.382秒、生成stage2はIR VMともbyte一致。
+各1回・CPU固定の参考値であり、selfhostコンパイラへの移植やstage2→stage3の改善を意味しない。
+[測定](optimize_logs/SELFHOST_STAGE2_NATIVE_20261009.md)。
+inline方式をartifact hash／measurement options／Python identity helperへ追加し、identityをv7へ更新した。
+
+以下は試作時の経緯。既定OFFという記述は当時の採否であり、現在の設定は上記を優先する。
+
 2026-10-09追補: `experiment/shared-call-regions`で、中断しないcalleeだけを割り当て前に取り込む
 試作を追加した。`BFC_EVAL_CLOSED_INLINE=1` はglobal利用callerのframe増大禁止を維持し、
 `=2` は閉じた非再帰global contextに限って増大を許す。既定はOFF。

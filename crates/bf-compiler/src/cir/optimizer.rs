@@ -16,10 +16,14 @@ use crate::cir::ir::{
 /// Continuation CFG transformations applied after lowering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContinuationOptimizationOptions {
-    /// Inline nonrecursive functions before source frame allocation, subject to
-    /// frame costs and bounded expansion. Does not inline already allocated CIR
+    /// Inline closed callees and forwarding wrappers before source frame
+    /// allocation, with a body weight limit of 256 and no increase in B1 roots.
+    /// Does not inline already allocated CIR
     /// passed to `optimize_continuations_with_options` or the selfhost adapter.
     pub inline_functions: bool,
+    /// Select the previous general CIR cloning strategy instead of forwarding
+    /// inlining. Has no effect when `inline_functions` is false.
+    pub generic_function_inline: bool,
     /// Inline a nonempty same-function Branch successor into a Goto source.
     pub inline_branch_successors: bool,
     /// Reconstruct single-entry local branches and loops after CFG cleanup.
@@ -32,6 +36,7 @@ impl Default for ContinuationOptimizationOptions {
     fn default() -> Self {
         Self {
             inline_functions: true,
+            generic_function_inline: false,
             inline_branch_successors: true,
             structure_local_control_flow: true,
         }

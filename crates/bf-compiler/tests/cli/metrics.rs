@@ -29,7 +29,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "1e17ca41e768ac8d1a36a9f5b745b5680e847e4b8fa4090bd6deb7cb4f3e0431",
+            "3281583b92f3c6912cef6142eae24bd49d83a65f8080a6dd60a506810af63a19",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",
@@ -47,7 +47,7 @@ fn phase_portal_metrics_use_explicit_identity_and_activation_regions() {
     assert_eq!(report["format"], "bfc-continuation-ir-metrics-v2");
     assert_eq!(
         report["artifact_identity"],
-        "1e17ca41e768ac8d1a36a9f5b745b5680e847e4b8fa4090bd6deb7cb4f3e0431"
+        "3281583b92f3c6912cef6142eae24bd49d83a65f8080a6dd60a506810af63a19"
     );
     assert_eq!(report["phase_config"]["artifact"]["kind"], "source");
     assert_eq!(report["accounting"]["ok"], true);
@@ -317,7 +317,7 @@ fn phase_metrics_break_portal_adjacency_across_a_non_portal_phase() {
             "--ir-phase-config",
             "phase-config.json",
             "--ir-artifact-id",
-            "0303eced1b8cbdceed0546e74d78d737ea130e66cdef630f6a29df578aedb97a",
+            "990c17967fed8c96795a3165eb7f61b78bac71a3b289dfbaaa060d26a76c3cd1",
             "--ir-progress-interval",
             "86400s",
             "input.bfc",

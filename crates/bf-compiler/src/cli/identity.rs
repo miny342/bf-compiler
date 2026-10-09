@@ -8,13 +8,14 @@ pub(super) struct IrArtifactMetadata<'a> {
     pub(super) optimization_options: bf_compiler::ContinuationOptimizationOptions,
 }
 
-pub(super) const IR_ARTIFACT_ID_VERSION: &str = "bfc-ir-artifact-v6";
+pub(super) const IR_ARTIFACT_ID_VERSION: &str = "bfc-ir-artifact-v7";
 
 pub(super) fn lowering_options_json(
     optimization_options: bf_compiler::ContinuationOptimizationOptions,
 ) -> Value {
     json!({
         "inline_functions": optimization_options.inline_functions,
+        "generic_function_inline": optimization_options.generic_function_inline,
         "inline_branch_successors": optimization_options.inline_branch_successors,
         "structure_local_control_flow": optimization_options.structure_local_control_flow,
     })
@@ -73,6 +74,14 @@ pub(super) fn append_lowering_options(
             b"inline_functions=true"
         } else {
             b"inline_functions=false"
+        },
+    );
+    append_identity_frame(
+        data,
+        if options.generic_function_inline {
+            b"generic_function_inline=true"
+        } else {
+            b"generic_function_inline=false"
         },
     );
     append_identity_frame(

@@ -91,6 +91,10 @@ impl Options {
                 run_ir = true;
             } else if argument == "--enable-function-inline" {
                 optimization_options.inline_functions = true;
+                optimization_options.generic_function_inline = false;
+            } else if argument == "--enable-generic-function-inline" {
+                optimization_options.inline_functions = true;
+                optimization_options.generic_function_inline = true;
             } else if argument == "--disable-function-inline" {
                 optimization_options.inline_functions = false;
             } else if argument == "--enable-2c" {
@@ -128,7 +132,7 @@ impl Options {
         }
         if source_paths.is_empty() && cir_input.is_none() {
             return Err(format!(
-                "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--enable-function-inline|--disable-function-inline] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--enable-static-frames|--disable-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--enable-static-frames|--disable-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
+                "usage: {} [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--enable-local-control-flow|--disable-local-control-flow] [--enable-function-inline|--enable-generic-function-inline|--disable-function-inline] [--ir-progress-interval 10s] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--enable-static-frames|--disable-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source] <source.bfc>...\n       {} --cir-input <program.cir|-> [--run-ir] [--cir-output PATH] [--ir-dump PATH] [--ir-metrics PATH] [--ir-phase-config PATH --ir-artifact-id ID] [--no-ir-transitions] [--enable-2c|--disable-2c] [--unlimited-tape] [--compressed-bf] [--enable-nibble-transfer] [--enable-inplace-compare] [--enable-anchor-bank] [--disable-region-emission] [--enable-static-frames|--disable-static-frames] [--profile-map-output PATH] [--embed-profile] [--profile-granularity abi|continuation|instruction|source]",
                 executable.to_string_lossy(),
                 executable.to_string_lossy()
             )

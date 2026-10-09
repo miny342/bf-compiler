@@ -512,6 +512,7 @@ mod tests {
             let (program, _) = crate::lower_source_with_options(
                 source,
                 ContinuationOptimizationOptions {
+                    generic_function_inline: false,
                     inline_branch_successors,
                     inline_functions: false,
                     structure_local_control_flow: false,
@@ -521,6 +522,7 @@ mod tests {
             let (integrated, integrated_stats) = crate::lower_source_with_options(
                 source,
                 ContinuationOptimizationOptions {
+                    generic_function_inline: false,
                     inline_branch_successors,
                     inline_functions: false,
                     structure_local_control_flow: true,
@@ -638,6 +640,7 @@ mod tests {
             let (program, _) = crate::lower_selfhost_cir_with_options(
                 &decoded,
                 ContinuationOptimizationOptions {
+                    generic_function_inline: false,
                     inline_branch_successors,
                     inline_functions: false,
                     structure_local_control_flow: false,
@@ -647,6 +650,7 @@ mod tests {
             let (integrated, integrated_stats) = crate::lower_selfhost_cir_with_options(
                 &decoded,
                 ContinuationOptimizationOptions {
+                    generic_function_inline: false,
                     inline_branch_successors,
                     inline_functions: false,
                     structure_local_control_flow: true,
