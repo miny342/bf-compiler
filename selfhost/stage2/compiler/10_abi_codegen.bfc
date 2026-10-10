@@ -847,6 +847,11 @@ cell emit_ir_instruction(cell position, NodeId instruction) {
         position = emit_constant(position, destination, instruction_source(instruction));
     } else if (kind == IR_COPY) {
         position = emit_frame_copy(position, source, destination);
+    } else if (kind == IR_MOVE) {
+        // Owned assignment temporaries are disjoint from the destination and
+        // released immediately after delivery; preserving them is unnecessary.
+        position = emit_clear(position, destination);
+        position = emit_transfer(position, source, destination, 0);
     } else if (kind == IR_COPY_ABI_VALUE) {
         // The resume consumes each call result once, before another call can
         // overwrite it. User variables were never stored in this ABI inbox.

@@ -76,6 +76,13 @@ void main() {
             cell initialized=a+1;output(initialized);rounds-=1;}
         hits=0;cell andval=a&&side(b);cell orval=a||side(b);
         output(andval);output(orval);output(hits);
+        // Assignment owns a snapshot; live sources and overlap remain intact.
+        q=p;output(q.x);output(q.y);output(q.z);
+        p=p;output(p.x);output(p.y);output(p.z);
+        Box box;box.value=p;box.value=box.value;
+        output(box.value.x);output(box.value.y);output(box.value.z);
+        copy=payload;copy=copy;output(copy[31]);output(payload[31]);
+        n=n+1;output(n);
     }
 }
 """
@@ -96,6 +103,7 @@ def fixture(values):
         result.extend((a+31, a+31, g[1], a+k, a+k))
         result.extend((a+1, a, 111, 107, 0, a+1, 0, a+1,
                        a != 0 and b != 0, a != 0 or b != 0, 1))
+        result.extend((*p, *p, *p, a+31, a+31, 2*a+1))
         expected.extend(x & 255 for x in result)
     data.append(0)
     return bytes(data), bytes(expected)
@@ -156,6 +164,7 @@ def main():
               "mutual recursion through depth 255 and frame reuse, "
               "static field/index returns and dynamic/global fallbacks, "
               "shadowed/string/short-circuit initializers and uninitialized loop resets, "
+              "aggregate/scalar/self/overlapping assignment snapshots, "
               "global/local/scalar/32-cell returns, source preservation, and void returns passed.", flush=True)
 
 

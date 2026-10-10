@@ -39,6 +39,8 @@ const cell IR_OFFSET_ADD_CONSTANT = 28;
 // Local control is shared by BF and CIR v2. 29 is the BF-only portal resume.
 const cell IR_LOCAL_OPEN = 30;
 const cell IR_LOCAL_CLOSE = 31;
+// Internal only: consume an owned assignment snapshot into a disjoint local.
+const cell IR_MOVE = 32;
 
 const cell VOID_RETURN_SLOT = 0xff;
 // Continuation records use every common field plus a dense dispatch ID.
@@ -875,7 +877,7 @@ void lower_ast_statement(NodeId statement) {
                     );
                 } else {
                     append_ir_instruction(
-                        IR_COPY,
+                        IR_MOVE,
                         node_value(left) + index,
                         snapshot + index
                     );
@@ -927,7 +929,7 @@ void lower_ast_statement(NodeId statement) {
             } else if (operator == AST_ASSIGNMENT_SUBTRACT) {
                 append_ir_instruction(IR_SUBTRACT, destination, source);
             } else {
-                append_ir_instruction(IR_COPY, destination, source);
+                append_ir_instruction(IR_MOVE, destination, source);
             }
         }
         release_lowering_temp(source);

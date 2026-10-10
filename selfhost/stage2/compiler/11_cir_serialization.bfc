@@ -91,6 +91,20 @@ void emit_cir_function(NodeId function) {
 
 void emit_cir_instruction(NodeId instruction) {
     cell kind = node_tag(instruction);
+    if (kind == IR_MOVE) {
+        // Keep the public format unchanged: Set(0), then destructive Add.
+        cell destination = node_value(instruction);
+        cell source = instruction_source(instruction);
+        compiler_output!(CIR_RECORD_INSTRUCTION);
+        compiler_output!(IR_SET);
+        compiler_output!(destination);
+        compiler_output!(0);
+        compiler_output!(CIR_RECORD_INSTRUCTION);
+        compiler_output!(IR_ADD);
+        compiler_output!(destination);
+        compiler_output!(source);
+        return;
+    }
     compiler_output!(CIR_RECORD_INSTRUCTION);
     compiler_output!(kind);
     if (kind == IR_SET || kind == IR_COPY) {
