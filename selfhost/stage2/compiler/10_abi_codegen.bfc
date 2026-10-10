@@ -19,7 +19,7 @@ const cell FRAME_SCRATCH_1 = 12;
 const cell FRAME_SCRATCH_2 = 13;
 const cell FRAME_SCRATCH_3 = 14;
 const cell FRAME_DATA_BASE = 16;
-const cell NIBBLE_STATIC_CELLS = 6;
+const cell NIBBLE_STATIC_CELLS = 7;
 
 cell stage8_frame_cells;
 cell stage8_outbox_base;
@@ -336,27 +336,21 @@ cell emit_global_constant(
     return position;
 }
 
-// Increment four Boolean low bits, carrying directly into the high nibble.
-// Only the decomposition contains this recursion; the long stack-navigation
-// template is emitted twice, once per digit. Carry is zero on entry and exit.
+// Increment four Boolean low bits using a bounded slide. Zero guards flank
+// the bits; crossing the right guard records one carry into the high digit.
+// Both guards are zero on entry and exit, so the scan cannot leave scratch.
 cell emit_nibble_increment(
-    cell position, cell carry, cell bits, cell high, cell index, cell return_to
+    cell position, cell guard, cell bits, cell overflow, cell high, cell return_to
 ) {
-    cell bit = bits + index;
-    position = emit_loop_open(position, bit);
+    position = emit_move_to(position, bits);
+    compiler_output!('[');compiler_output!('>');compiler_output!(']');
+    compiler_output!('+');compiler_output!('+');
+    compiler_output!('[');compiler_output!('-');compiler_output!('<');compiler_output!(']');
+    position = guard;
+    position = emit_loop_open(position, overflow);
     compiler_output!('-');
-    position = emit_add_constant(position, carry, 1);
-    position = emit_loop_close(position, bit);
-    compiler_output!('+');
-    position = emit_loop_open(position, carry);
-    compiler_output!('-');
-    position = emit_add_constant(position, bit, 255);
-    if (index != 3) {
-        position = emit_nibble_increment(position, carry, bits, high, index + 1, carry);
-    } else {
-        position = emit_add_constant(position, high, 1);
-    }
-    position = emit_loop_close(position, carry);
+    position = emit_add_constant(position, high, 1);
+    position = emit_loop_close(position, overflow);
     return emit_move_to(position, return_to);
 }
 
@@ -384,15 +378,19 @@ cell emit_nibble_pack(cell position, cell bits) {
     return position;
 }
 
-// Consume source into bits[0] (low nibble) and high. All other scratch is
-// cleared, including carry. Source, carry, bits[0..3], high must be distinct.
+// Consume source into bits[0] (low nibble) and high. bits-1 is the dead
+// FRAME_BRANCH guard at portal entry/resume; carry temporarily holds high.
+// Source, carry, guard, four bits and high must be distinct.
 cell emit_nibble_split(cell position, cell source, cell carry, cell bits, cell high) {
+    // carry is the temporary high digit, bits-1 the zero guard, high the overflow.
     position = emit_nibble_clear(position, carry, bits, high);
+    position = emit_clear(position, bits - 1);
     position = emit_loop_open(position, source);
     compiler_output!('-');
-    position = emit_nibble_increment(position, carry, bits, high, 0, source);
+    position = emit_nibble_increment(position, bits - 1, bits, high, carry, source);
     position = emit_loop_close(position, source);
-    return emit_nibble_pack(position, bits);
+    position = emit_nibble_pack(position, bits);
+    return emit_transfer(position, carry, high, 0);
 }
 
 cell emit_global_copy_nibbles(
@@ -402,14 +400,15 @@ cell emit_global_copy_nibbles(
     WideValue scratch_distance = wide_from_cell(NIBBLE_STATIC_CELLS);
     WideValue source_distance = wide_subtract(distance, scratch_distance);
     position = emit_current_to_global_distance(position, scratch_distance, frame_cells);
-    position = emit_nibble_clear(position, 0, 1, 5);
+    position = emit_nibble_clear(position, 0, 1, 6);
+    position = emit_clear(position, 5);
     position = emit_move_to(position, 0);
     position = emit_anchor_to_global_distance(position, source_distance);
     // Decompose directly while consuming the global. An intermediate byte
     // buffer would duplicate long static moves and add a second runtime loop.
     compiler_output!('['); compiler_output!('-');
     position = emit_global_to_anchor_distance(position, source_distance);
-    position = emit_nibble_increment(position, 0, 1, 5, 0, 0);
+    position = emit_nibble_increment(position, 0, 1, 5, 6, 0);
     position = emit_anchor_to_global_distance(position, source_distance);
     compiler_output!(']');
     position = emit_global_to_anchor_distance(position, source_distance);
@@ -417,7 +416,7 @@ cell emit_global_copy_nibbles(
 
     cell digit = 1;
     cell contribution = 1;
-    while (digit <= 5) {
+    while (digit <= 6) {
         position = emit_loop_open(position, digit);
         compiler_output!('-');
         position = emit_move_to(position, 0);
@@ -427,7 +426,7 @@ cell emit_global_copy_nibbles(
         position = emit_add_constant(position, destination, contribution);
         position = emit_current_to_global_distance(position, scratch_distance, frame_cells);
         position = emit_loop_close(position, digit);
-        digit += 4;
+        digit += 5;
         contribution = 16;
     }
     position = emit_move_to(position, 0);

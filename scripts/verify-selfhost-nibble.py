@@ -115,17 +115,19 @@ cell position;position=emit_constant(position,21,1);position=emit_loop_open(posi
 position=emit_clear(position,21);position=emit_input(position,16);
 position=emit_constant(position,9,255);cell index=11;
 while(index<=15){position=emit_constant(position,index,255);index+=1;}
+position=emit_constant(position,10,255);
 position=emit_nibble_split(position,16,9,11,15);
 position=emit_move_to(position,11);compiler_output!('.');
 position=emit_move_to(position,15);compiler_output!('.');
 position=emit_move_to(position,9);compiler_output!('.');
 position=emit_move_to(position,16);compiler_output!('.');
 index=12;while(index<=14){position=emit_move_to(position,index);compiler_output!('.');index+=1;}
+position=emit_move_to(position,10);compiler_output!('.');
 position=emit_add_constant(position,20,1);position=emit_frame_copy(position,20,21);
 position=emit_loop_close(position,21);
 } """)
     generate(harness, b"", "split")
-    split_expected = b"".join(bytes((v % 16, v // 16, 0, 0, 0, 0, 0)) for v in range(256))
+    split_expected = b"".join(bytes((v % 16, v // 16, 0, 0, 0, 0, 0, 0)) for v in range(256))
     for flags in ([], RLE_ONLY):
         assert execute(work / "split.bf", bytes(range(256)), flags, f"split-run-{len(flags)}")[0] == split_expected
     print("split: all 256 bytes, dirty scratch, native/RLE-only matched", flush=True)

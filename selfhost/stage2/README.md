@@ -346,6 +346,9 @@ globalや動的アクセス、計算式は従来どおりmaterializeする。BF�
 BFの大小比較は既存scratch 11〜14でSLIDEを使い、operandを一度だけ消費する。
 二つの出口をzeroセルへ位置合わせして結果を返し、scratchを0へ戻す。frame幅の追加はない。
 `>`／`<=`はoperandを逆順に渡して同じ格納先へ結果を返し、比較前のswapを省く。
+nibble有効時のcounterは4 bit左右のzero guardでbounded SLIDEを使う。
+frameではportal entry/resumeで死んだBranchも利用し、static scratchだけ7セル予約する。
+通常設定のframe幅と生成BF、公開CIRには影響しない。
 
 ## 検証
 

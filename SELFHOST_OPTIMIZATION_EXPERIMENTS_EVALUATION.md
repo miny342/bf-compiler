@@ -6,6 +6,7 @@
 
 | 案 | 判断 | 根拠と制約 |
 |---|---|---|
+| selfhostのbounded SLIDE nibble increment | 採用（既存nibble flag内、既定OFF） | 4 bitの左右zero guardでincrementし、右guard経由でhigh carry。frame幅不変、flag ONのstatic scratchだけ6→7 cells。arena nibble有効でRLE−0.961%、native−4.942%、圧縮BF−1.913%。全byte・dirty guard・再帰・両flagの実stage2・RLE-only counter・出力形式を照合。通常BFと公開CIR不変、IR VMに明らかな悪化なし。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
 | selfhostの静的local returnを直接payloadへ | 採用（既定ON、BF・公開CIR共通） | localの名前・固定field/indexをReturnへ直接渡し保存temporaryを省略。2c9f57c比arena RLE−3.675%、compilerのarena生成RLE−3.797%、公開CIR→Rust−1.136%、IR VM20.8秒を維持。global／動的place／計算式は従来materialize。全byte・field/index・fallback・再帰・nibble・CIR・limitsを照合、wire追加なし。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
 | selfhostのcallee header／caller inboxの既知zero | 採用（既定ON、BF backend） | 空きframeのActive・PCはAddだけで設定し、resumeで消費済みValue/outboxへの配送前clearを省略。d817ceb比arena RLE−0.04618%、生成stage2 BF−2.492%、IR VM約21秒。深さ255相互再帰・返値長・global保存・nibble・再帰portal・CIRを照合。return全域cleanupは維持。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
 | selfhostの逆順SLIDE比較でswap省略 | 採用（既定ON、BF backend） | operand順とresult destinationを指定し、`>`／`<=`前の3 transferを除去。全65,536 pairの四比較kernelでRLE−13.252%、圧縮BF−5.36%。arenaは不変、compilerのarena生成RLE−0.080%、IR VM約21秒。逆順result・scratch・alias・実RLE-onlyを照合、frame幅・公開CIR不変。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
