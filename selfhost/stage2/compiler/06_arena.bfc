@@ -182,8 +182,11 @@ cell[255][256] arena_cells_14;
 cell[255][256] arena_cells_15;
 NodeId arena_next;
 cell arena_exhausted;
-NodeId first_name;
-NodeId last_name;
+// Interning uses spelling-length buckets; only this table owns name next links.
+// MAX_NAME is 64. Separate byte arrays keep dynamic accesses at stride one.
+cell[32] name_bucket_bank;
+cell[32] name_bucket_page;
+cell[32] name_bucket_slot;
 NodeId first_function;
 NodeId last_function;
 NodeId first_global;
@@ -344,8 +347,13 @@ void reset_ast_arena() {
     arena_next.page = 0;
     arena_next.slot = 1;
     arena_exhausted = 0;
-    first_name = null_node();
-    last_name = null_node();
+    cell bucket;
+    while (bucket < 32) {
+        name_bucket_bank[bucket] = 0;
+        name_bucket_page[bucket] = 0;
+        name_bucket_slot[bucket] = 0;
+        bucket += 1;
+    }
     first_function = null_node();
     last_function = null_node();
     first_global = null_node();
@@ -580,7 +588,15 @@ cell token_matches_name(NodeId name) {
 }
 
 NodeId intern_token_name() {
-    NodeId probe = first_name;
+    cell bucket = token_length;
+    while (bucket >= 32) {
+        bucket -= 32;
+    }
+    NodeId probe;
+    probe.bank = name_bucket_bank[bucket];
+    probe.page = name_bucket_page[bucket];
+    probe.slot = name_bucket_slot[bucket];
+    NodeId first = probe;
     while (!node_is_null(probe)) {
         if (token_matches_name(probe)) {
             return probe;
@@ -602,11 +618,9 @@ NodeId intern_token_name() {
         index += 1;
     }
 
-    if (node_is_null(first_name)) {
-        first_name = name;
-    } else {
-        node_set_next(last_name, name);
-    }
-    last_name = name;
+    node_set_next(name, first);
+    name_bucket_bank[bucket] = name.bank;
+    name_bucket_page[bucket] = name.page;
+    name_bucket_slot[bucket] = name.slot;
     return name;
 }

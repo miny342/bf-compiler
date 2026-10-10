@@ -126,6 +126,7 @@ void main() {
     test_wide_arithmetic();
     test_compact_node_sizes();
     test_arena_page_boundary();
+    test_name_interning();
     test_continuation_dispatch_ids();
     test_dispatch_encoding();
     test_ast_parser();

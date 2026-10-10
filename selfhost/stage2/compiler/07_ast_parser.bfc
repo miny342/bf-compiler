@@ -25,6 +25,9 @@ const cell ARRAY_LENGTH_LITERAL = 0;
 const cell ARRAY_LENGTH_256 = 1;
 const cell ARRAY_LENGTH_CONSTANT = 2;
 
+// Set while parsing a function body, including nested blocks and conditions.
+cell parser_body_has_macro;
+
 void append_ast_type(NodeId ty) {
     if (node_is_null(first_type)) {
         first_type = ty;
@@ -378,6 +381,7 @@ NodeId parse_ast_primary() {
             next_token();
             NodeId invocation = parse_ast_call(name);
             arena_write(invocation, FIELD_KIND, NODE_MACRO_INVOCATION);
+            parser_body_has_macro = 1;
             return invocation;
         }
         if (token_kind == TokenKind::ColonColon) {
@@ -699,7 +703,12 @@ NodeId parse_ast_function_after_name(
     }
     consume(TokenKind::RightParen);
     node_set_a(function, first_parameter);
+    parser_body_has_macro = 0;
     node_set_b(function, parse_ast_statement());
+    if (parser_body_has_macro) {
+        // FUNCTION's value byte is parser-owned until macro expansion.
+        node_set_value(function, 1);
+    }
     if (node_kind(node_b(function)) != NODE_BLOCK) {
         fail('C', 'N');
     }

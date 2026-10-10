@@ -99,6 +99,49 @@ void test_arena_page_boundary() {
     expect_test(node_equals(arena_advance(next_bank, 0), next_bank), '=');
 }
 
+void test_name_interning() {
+    reset_ast_arena();
+    token_length = MAX_NAME;
+    cell index;
+    while (index < MAX_NAME) {
+        token_text[index] = 'a';
+        index += 1;
+    }
+    NodeId long_a = intern_token_name();
+    token_text[MAX_NAME - 1] = 'b';
+    NodeId long_b = intern_token_name();
+    expect_test(!node_equals(long_a, long_b), 'p');
+    token_text[MAX_NAME - 1] = 'a';
+    expect_test(node_equals(long_a, intern_token_name()), 'q');
+
+    // Distinct lengths 32/64 and 1/33 collide in the same table bucket.
+    token_length = 32;
+    NodeId medium = intern_token_name();
+    expect_test(!node_equals(medium, long_a)
+        && node_equals(medium, intern_token_name()), 'r');
+    token_length = 1;
+    NodeId short = intern_token_name();
+    token_length = 33;
+    NodeId longer = intern_token_name();
+    token_length = 1;
+    expect_test(!node_equals(short, longer)
+        && node_equals(short, intern_token_name()), 's');
+
+    // Hygiene creates a separate identity without inserting it into the table.
+    NodeId fresh = fresh_macro_name(short);
+    expect_test(!node_equals(fresh, short)
+        && node_equals(short, intern_token_name()), 't');
+
+    reset_ast_arena();
+    token_length = MAX_NAME;
+    NodeId reset = intern_token_name();
+    expect_test(node_kind(reset) == NODE_NAME_RECORD
+        && node_value(reset) == MAX_NAME
+        && node_equals(arena_next, arena_advance(
+            reset, node_cell_count(NODE_NAME_RECORD) + MAX_NAME
+        )), 'u');
+}
+
 void test_continuation_dispatch_ids() {
     reset_ast_arena();
     first_continuation = null_node();

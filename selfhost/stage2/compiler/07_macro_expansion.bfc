@@ -511,7 +511,11 @@ void expand_ast_macros() {
     validate_macro_declarations();
     NodeId function = first_function;
     while (!node_is_null(function)) {
-        node_set_b(function, expand_macro_statement(node_b(function)));
+        if (node_value(function)) {
+            node_set_b(function, expand_macro_statement(node_b(function)));
+            // Restore the unused value byte before semantic analysis/lowering.
+            node_set_value(function, 0);
+        }
         function = node_next(function);
     }
 }
