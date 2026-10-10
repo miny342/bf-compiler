@@ -936,20 +936,38 @@ void lower_ast_statement(NodeId statement) {
         return;
     }
     if (kind == NODE_RETURN_STATEMENT) {
-        if (node_is_null(node_a(statement))) {
+        NodeId expression = node_a(statement);
+        if (node_is_null(expression)) {
             finish_return(VOID_RETURN_SLOT);
-        } else if (node_tag(lowering_current_function) == AST_TYPE_ARRAY) {
-            cell length = arena_read(
-                node_c(lowering_current_function),
-                FIELD_B_PAGE
-            );
-            cell slot = allocate_lowering_cells(length);
-            lower_aggregate_expression(node_a(statement), slot, length);
-            finish_array_return(slot, length);
         } else {
-            cell slot = allocate_lowering_temp();
-            lower_ast_expression(node_a(statement), slot);
-            finish_return(slot);
+            // A static local place is owned by this dying activation. Return
+            // its cells directly; globals and computed values need a snapshot.
+            cell expression_kind = node_kind(expression);
+            cell direct = (expression_kind == NODE_NAME_EXPRESSION
+                || expression_kind == NODE_FIELD_EXPRESSION
+                || expression_kind == NODE_INDEX_EXPRESSION)
+                && node_tag(expression) == RESOLVED_LOCAL;
+            cell slot;
+            if (node_tag(lowering_current_function) == AST_TYPE_ARRAY) {
+                cell length = arena_read(
+                    node_c(lowering_current_function), FIELD_B_PAGE
+                );
+                if (direct) {
+                    slot = node_value(expression);
+                } else {
+                    slot = allocate_lowering_cells(length);
+                    lower_aggregate_expression(expression, slot, length);
+                }
+                finish_array_return(slot, length);
+            } else {
+                if (direct) {
+                    slot = node_value(expression);
+                } else {
+                    slot = allocate_lowering_temp();
+                    lower_ast_expression(expression, slot);
+                }
+                finish_return(slot);
+            }
         }
         lowering_current_continuation = null_node();
         return;

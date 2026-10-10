@@ -10,6 +10,7 @@ RLE_ONLY = ["--disable-clear", "--disable-scan", "--disable-transfer",
             "--disable-countdown", "--disable-compare", "--disable-remote-transfer"]
 PROGRAM = """
 struct Triple { cell x; cell y; cell z; }
+struct Box { cell pad; Triple value; }
 Triple global;
 cell sum(cell a, cell b) { return a+b; }
 Triple make(cell a) { Triple p; p.x=a; p.y=a+1; p.z=a+2; return p; }
@@ -28,6 +29,12 @@ cell recur_scalar(cell a, cell d) { if(d) { return recur_scalar(a+1,d-1); } retu
 cell even(cell d, cell v) { if(d) { return odd(d-1,v+1); } return v; }
 cell odd(cell d, cell v) { if(d) { return even(d-1,v+1); } return v; }
 cell[32] echo(cell[32] p) { return p; }
+Triple pick_field(Triple p) { Box b; b.value=p; return b.value; }
+Triple pick_element(Triple p) { Triple[2] a; a[1]=p; return a[1]; }
+cell scalar_field(Triple p) { return p.y; }
+cell pick_byte(cell[32] p) { return p[31]; }
+cell pick_dynamic(cell[32] p, cell index) { return p[index]; }
+cell global_y() { return global.y; }
 void discard(Triple p) {}
 void main() {
     while(input()) {
@@ -50,10 +57,16 @@ void main() {
         output(recur_scalar(a,3));output(a);output(b);
         // Reuse the same free frames at different depths, up to 255 calls.
         output(even(a,b));output(a);output(b);
+        Triple f=pick_field(p);output(f.x);output(f.y);output(f.z);
+        Triple e=pick_element(p);output(e.x);output(e.y);output(e.z);
+        output(scalar_field(p));
         cell[32] payload; cell j;
         while(j<32) { payload[j]=a+j; j+=1; }
         cell[32] copy=echo(payload);j=0;
         while(j<32) { output(copy[j]);output(payload[j]);j+=1; }
+        output(pick_byte(payload));output(payload[31]);output(global_y());
+        cell k;if(a<32){k=a;}
+        output(pick_dynamic(payload,k));output(payload[k]);
     }
 }
 """
@@ -68,8 +81,10 @@ def fixture(values):
         data.extend((1, a, b))
         result = [2*a, a, *p, *p, p[0]+p[1]+b, p[1]+p[2], p[2]+p[0], *p,
                   *p, b, *g, *g, a+3, p[1], p[2], *p, *g, *p, a+3, a, b,
-                  a+b, a, b]
+                  a+b, a, b, *p, *p, p[1]]
         result.extend(x for j in range(32) for x in (a+j, a+j))
+        k = a if a < 32 else 0
+        result.extend((a+31, a+31, g[1], a+k, a+k))
         expected.extend(x & 255 for x in result)
     data.append(0)
     return bytes(data), bytes(expected)
@@ -128,6 +143,7 @@ def main():
             print(f"{bf.name}: 256 inputs and RLE-only 0/255 passed", flush=True)
         print("Call moves: duplicate arguments, late global mutation, nested/recursive calls, "
               "mutual recursion through depth 255 and frame reuse, "
+              "static field/index returns and dynamic/global fallbacks, "
               "global/local/scalar/32-cell returns, source preservation, and void returns passed.", flush=True)
 
 

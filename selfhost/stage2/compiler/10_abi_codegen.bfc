@@ -553,16 +553,6 @@ cell emit_transfer_to_previous_context(
     return position;
 }
 
-cell emit_clear_previous_context(
-    cell position,
-    cell destination,
-    cell frame_cells
-) {
-    position = emit_previous_context(position, frame_cells);
-    position = emit_clear(position, destination);
-    return emit_next_context(position, frame_cells);
-}
-
 cell emit_array_case_operation(
     cell position,
     cell kind,

@@ -337,6 +337,8 @@ resumeはValue／outboxを一度だけ読み、所有temporaryへmoveする。
 portalとanchor scanは空きframeを書き換えない。戻りPCの配送とreturnの全域cleanupは維持する。
 callee headerの定数設定とcaller Value／outboxへの配送も、既知zeroへ加算する。
 公開CIRの形式・命令は変更しない。
+returnのloweringは静的localの名前・field・indexを直接payloadへ渡し、返値temporaryを省く。
+globalや動的アクセス、計算式は従来どおりmaterializeする。BFと公開CIRで共通の変換。
 
 動的offsetのloweringは、low byteがまだ0であることをprojection間で引き継ぐ。
 256の倍数のstrideはその事実を保ち、stride 1のbyte indexはcarryなしの`IR_ADD`へ落とす。
