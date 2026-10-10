@@ -35,6 +35,8 @@ cell odd(cell d, cell v) { if(d) { return even(d-1,v+1); } return v; }
 cell[32] echo(cell[32] p) { return p; }
 Triple pick_field(Triple p) { Box b; b.value=p; return b.value; }
 Triple pick_element(Triple p) { Triple[2] a; a[1]=p; return a[1]; }
+Box make_box(Triple p) { Box b; b.pad=255; b.value=p; return b; }
+Triple[2] make_pairs(Triple p) { Triple[2] a; a[0]=p; a[1]=make(p.x+1); return a; }
 cell scalar_field(Triple p) { return p.y; }
 cell pick_byte(cell[32] p) { return p[31]; }
 cell pick_dynamic(cell[32] p, cell index) { return p[index]; }
@@ -98,6 +100,17 @@ void main() {
         text="hi";output(text[0]);output(text[1]);
         n=len(text);output(n);n=Fixed;output(n);
         Mode mode=Mode::First;mode=Mode::Second;output(mode==Mode::Second);
+        // Computed aggregate projections own private temporaries, not p/payload.
+        output(make(a).y);output(identity(make(b)).z);
+        Triple projected=make_box(p).value;
+        output(projected.x);output(projected.y);output(projected.z);
+        projected=make_pairs(p)[1];
+        output(projected.x);output(projected.y);output(projected.z);
+        output(echo(payload)[31]);output(make_pairs(p)[0].z);
+        output(make_box(p).value.y);
+        output(p.x);output(p.y);output(p.z);output(payload[31]);
+        // Repeated projections reuse dirty temporary cells and evaluate once.
+        hits=0;output(make(side(a)).y);output(make(side(b)).x);output(hits);
     }
 }
 """
@@ -120,6 +133,7 @@ def fixture(values):
                        a != 0 and b != 0, a != 0 or b != 0, 1))
         result.extend((*p, *p, *p, a+31, a+31, 2*a+1))
         result.extend((2*a+b+1, b, *p, *p, a+31, a+31, *g, *g, 2*a+2*b+1, 7, 104, 105, 2, 255, 1))
+        result.extend((a+1,b+2,*p,a+1,a+2,a+3,a+31,a+2,a+1,*p,a+31,a+1,b,2))
         expected.extend(x & 255 for x in result)
     data.append(0)
     return bytes(data), bytes(expected)
@@ -182,6 +196,8 @@ def main():
               "shadowed/string/short-circuit initializers and uninitialized loop resets, "
               "aggregate/scalar/self/overlapping assignment snapshots, "
               "direct call receives into argument sources and general RHS fallbacks, "
+              "computed aggregate field/index and nested projections with dirty temporary reuse, "
+              "single evaluation and live-source preservation, "
               "global/local/scalar/32-cell returns, source preservation, and void returns passed.", flush=True)
 
 

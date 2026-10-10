@@ -232,13 +232,47 @@ NodeId arena_advance(NodeId position, cell amount) {
 }
 
 cell arena_read(NodeId id, cell field) {
-    NodeId position = arena_advance(id, field);
-    return arena_cell_read(position);
+    // Keep arena_advance carry semantics, but update this private parameter
+    // in place to avoid its argument/return transport on every field access.
+    // A byte-sized advance can cross at most one page boundary.
+    id.slot += field;
+    // Overflow makes the sum smaller than either operand. Compare against
+    // field to keep the BF countdown short for small field offsets.
+    if (id.slot < field) {
+        if (id.page == ARENA_LAST_PAGE) {
+            if (id.bank == ARENA_LAST_BANK) {
+                fail('B', 'P');
+            }
+            id.page = 0;
+            id.bank += 1;
+        } else {
+            id.page += 1;
+        }
+    }
+
+    return arena_cell_read(id);
 }
 
 void arena_write(NodeId id, cell field, cell value) {
-    NodeId position = arena_advance(id, field);
-    arena_cell_write(position, value);
+    // Keep arena_advance carry semantics, but update this private parameter
+    // in place to avoid its argument/return transport on every field access.
+    // A byte-sized advance can cross at most one page boundary.
+    id.slot += field;
+    // Overflow makes the sum smaller than either operand. Compare against
+    // field to keep the BF countdown short for small field offsets.
+    if (id.slot < field) {
+        if (id.page == ARENA_LAST_PAGE) {
+            if (id.bank == ARENA_LAST_BANK) {
+                fail('B', 'P');
+            }
+            id.page = 0;
+            id.bank += 1;
+        } else {
+            id.page += 1;
+        }
+    }
+
+    arena_cell_write(id, value);
 }
 
 cell arena_cell_read(NodeId position) {

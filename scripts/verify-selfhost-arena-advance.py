@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the real arena_advance across all byte additions and bank boundaries."""
+"""Check arena advance/read/write across all byte additions and bank boundaries."""
 import argparse
 from pathlib import Path
 import re
@@ -23,17 +23,27 @@ def main():
     last_bank = int(re.search(r"ARENA_LAST_BANK = (\d+)", arena)[1])
     last_page = int(re.search(r"ARENA_LAST_PAGE = (\d+)", arena)[1])
     start = arena.index("NodeId arena_advance(")
-    end = arena.index("\ncell arena_read(", start)
+    end = arena.index("\ncell arena_cell_read(", start)
     program = (f"const cell ARENA_LAST_BANK={last_bank};"
                f"const cell ARENA_LAST_PAGE={last_page};"
                "struct NodeId{cell bank;cell page;cell slot;}"
                "void fail(cell a,cell b){output(250);output(a);output(b);abort();}"
                + arena[start:end] + """
-void main(){while(input()){
+// Trace the actual wrapper address without allocating the million-cell arena.
+cell arena_cell_read(NodeId p){output(p.bank);output(p.page);return p.slot;}
+void arena_cell_write(NodeId p,cell v){output(p.bank);output(p.page);output(p.slot);output(v);}
+void main(){cell mode=input();while(mode){
     NodeId p;p.bank=input();p.page=input();p.slot=input();cell amount=input();
-    NodeId q=arena_advance(p,amount);
-    output(q.bank);output(q.page);output(q.slot);
-    output(p.bank);output(p.page);output(p.slot);
+    if(mode==2){output(arena_read(p,amount));}
+    else if(mode==3){arena_write(p,amount,177);}
+    else {
+        NodeId q=arena_advance(p,amount);
+        output(q.bank);output(q.page);output(q.slot);
+        output(p.bank);output(p.page);output(p.slot);
+        output(arena_read(p,amount));arena_write(p,amount,177);
+        output(p.bank);output(p.page);output(p.slot);
+    }
+    mode=input();
 }}
 """)
     span = (last_page + 1) * 256
@@ -46,7 +56,9 @@ void main(){while(input()){
             assert result_bank <= last_bank
             result_page, result_slot = divmod(remainder, 256)
             data.extend((1, bank, page, slot, amount))
-            expected.extend((result_bank, result_page, result_slot, bank, page, slot))
+            expected.extend((result_bank, result_page, result_slot, bank, page, slot,
+                             result_bank, result_page, result_slot,
+                             result_bank, result_page, result_slot, 177, bank, page, slot))
         data.append(0)
         return bytes(data), bytes(expected)
 
@@ -102,10 +114,11 @@ void main(){while(input()){
             assert run([*command, str(bf)], data) == expected, bf.name
             assert run([*command, *RLE_ONLY, str(bf)], small_data) == small_expected, bf.name
             for slot, amount in [(255, 1), (128, 128)]:
-                invalid = bytes((1, last_bank, last_page, slot, amount, 0))
-                assert run([*command, str(bf)], invalid) == bytes((250, ord("B"), ord("P")))
+                for mode in (1, 2, 3):
+                    invalid = bytes((mode, last_bank, last_page, slot, amount, 0))
+                    assert run([*command, str(bf)], invalid) == bytes((250, ord("B"), ord("P")))
             print(f"{bf.name}: all 65,536 additions, bank carries, source preservation, "
-                  "overflow aborts and RLE-only edges passed.", flush=True)
+                  "read/write wrapper traces, overflow aborts and RLE-only edges passed.", flush=True)
 
 
 if __name__ == "__main__":

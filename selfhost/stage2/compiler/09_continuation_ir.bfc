@@ -493,10 +493,11 @@ void lower_aggregate_expression(NodeId expression, cell destination, cell length
         cell base_cells = bounded_type_cells(expression_type(base));
         cell temporary = allocate_lowering_cells(base_cells);
         lower_aggregate_expression(base, temporary, base_cells);
+        // This private base is released below; consume its selected cells.
         cell index;
         while (index < length) {
             append_ir_instruction(
-                IR_COPY,
+                IR_MOVE,
                 destination + index,
                 temporary + resolved_address(expression).low + index
             );
@@ -557,8 +558,9 @@ void lower_ast_expression(NodeId expression, cell destination) {
             cell base_cells = bounded_type_cells(expression_type(base));
             cell temporary = allocate_lowering_cells(base_cells);
             lower_aggregate_expression(base, temporary, base_cells);
+            // The selected cell belongs to a private base, released below.
             append_ir_instruction(
-                IR_COPY,
+                IR_MOVE,
                 destination,
                 temporary + node_value(expression)
             );
@@ -573,8 +575,9 @@ void lower_ast_expression(NodeId expression, cell destination) {
         cell base_cells = bounded_type_cells(expression_type(base));
         cell temporary = allocate_lowering_cells(base_cells);
         lower_aggregate_expression(base, temporary, base_cells);
+        // No later use observes this private base; move its selected cell.
         append_ir_instruction(
-            IR_COPY,
+            IR_MOVE,
             destination,
             temporary + resolved_address(expression).low
         );
