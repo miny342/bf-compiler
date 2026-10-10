@@ -485,3 +485,5 @@ regionごとのhidden routerで共有する。測定時の917MB BFは約2.5秒�
 request packet搬送とdispatcher縮約が次のcode-size改善点である。
 
 `python3 scripts/verify-selfhost-arena-advance.py --compiler target/release/bfc --interpreter target/release/bf-interpreter`でarena_advanceの全byte pair、bank/page carry、overflow、公開CIR経路の回帰検証を実行できる。local initializerの先行clearは省略し、初期化なしlocalは毎回zeroに戻す。
+
+静的localへの単純代入はRHSを直接destinationへloweringする。callは引数をsnapshotしてから返値を受け取り、一般式と重なるrangeは中継snapshotを維持する。局所if/whileは非zero条件を直接使い、body入口で所有conditionを消す。公開CIRも同じ意味で出力する。

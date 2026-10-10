@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check owned call arguments and direct return transport in the selfhost ABI."""
+"""Check owned call/assignment values and direct transport in the selfhost ABI."""
 import argparse
 from pathlib import Path
 import subprocess
@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 RLE_ONLY = ["--disable-clear", "--disable-scan", "--disable-transfer",
             "--disable-countdown", "--disable-compare", "--disable-remote-transfer"]
 PROGRAM = """
+const cell Fixed=255;
+enum Mode { First, Second }
 struct Triple { cell x; cell y; cell z; }
 struct Box { cell pad; Triple value; }
 Triple global;
@@ -40,7 +42,7 @@ cell global_y() { return global.y; }
 void discard(Triple p) {}
 void main() {
     while(input()) {
-        cell a=input(); cell b=input();
+        cell a;a=input();cell b;b=input();
         cell n=sum(a,a);output(n);output(a);
         Triple p=make(a); Triple q=identity(p);
         output(q.x);output(q.y);output(q.z);output(p.x);output(p.y);output(p.z);
@@ -83,6 +85,19 @@ void main() {
         output(box.value.x);output(box.value.y);output(box.value.z);
         copy=payload;copy=copy;output(copy[31]);output(payload[31]);
         n=n+1;output(n);
+        // Direct receives must snapshot their own destination as an argument.
+        n=sum(n,b);output(n);output(b);
+        p=identity(p);output(p.x);output(p.y);output(p.z);
+        box.value=identity(box.value);
+        output(box.value.x);output(box.value.y);output(box.value.z);
+        copy=echo(copy);output(copy[31]);output(payload[31]);
+        q=get_global();output(q.x);output(q.y);output(q.z);
+        q=global;output(q.x);output(q.y);output(q.z);
+        // General RHS expressions still need their old destination intact.
+        n=b+n;output(n);n=7;n=n;output(n);
+        text="hi";output(text[0]);output(text[1]);
+        n=len(text);output(n);n=Fixed;output(n);
+        Mode mode=Mode::First;mode=Mode::Second;output(mode==Mode::Second);
     }
 }
 """
@@ -104,6 +119,7 @@ def fixture(values):
         result.extend((a+1, a, 111, 107, 0, a+1, 0, a+1,
                        a != 0 and b != 0, a != 0 or b != 0, 1))
         result.extend((*p, *p, *p, a+31, a+31, 2*a+1))
+        result.extend((2*a+b+1, b, *p, *p, a+31, a+31, *g, *g, 2*a+2*b+1, 7, 104, 105, 2, 255, 1))
         expected.extend(x & 255 for x in result)
     data.append(0)
     return bytes(data), bytes(expected)
@@ -165,6 +181,7 @@ def main():
               "static field/index returns and dynamic/global fallbacks, "
               "shadowed/string/short-circuit initializers and uninitialized loop resets, "
               "aggregate/scalar/self/overlapping assignment snapshots, "
+              "direct call receives into argument sources and general RHS fallbacks, "
               "global/local/scalar/32-cell returns, source preservation, and void returns passed.", flush=True)
 
 

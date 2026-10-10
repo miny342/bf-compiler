@@ -6,6 +6,8 @@
 
 | 案 | 判断 | 根拠と制約 |
 |---|---|---|
+| selfhost静的local単純代入のdirect destination | 採用（既定ON、BF・公開CIR共通） | call／literal／input／静的disjoint source等を直接destinationへloweringし、同一rangeへの自己代入を省略。一般式・重なり・dynamic/global destinationはsnapshot維持。単独arena RLE−1.930%、compiler arena生成−1.617%、併用frame123→120／stage2 BF−0.895%、公開CIR→Rust−2.489%、全段自己入力RLE−0.3814%／native−0.4512%・fixed point成功。全byte・同一localを引数にするcall・nibble・CIR・limits確認。[評価](optimize_logs/SELFHOST_DIRECT_DESTINATION_LOCAL_CONTROL_20261010.md)。 |
+| selfhost局所if/whileのBoolean化省略 | 採用（既定ON、BF・公開CIR共通） | 非zero条件を直接LOCAL_OPEN/CLOSEへ渡しbody入口clearを維持。一般Branch／短絡式は変更なし。局所kernel RLE−0.4666%、1,736実行とCIR・全byte／else／入れ子／temp再利用・実RLE-only counterを確認。arena/large64生成BFは単独では不変。[評価](optimize_logs/SELFHOST_DIRECT_DESTINATION_LOCAL_CONTROL_20261010.md)。 |
 | selfhost静的local代入の所有snapshotをMove化 | 採用（既定ON、BF・公開CIR共通） | 解放直前temporaryからの保存copyを破壊的配送へ。公開CIRは既存Set＋Addへ展開。arena RLE−3.273%、compilerのarena生成−1.132%、stage2 BF−0.946%、自己入力IR VMほぼ不変。self/aggregate代入・source保存・再帰・nibble・CIRを照合。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
 | selfhostのbounded SLIDE nibble increment | 採用（既存nibble flag内、既定OFF） | 4 bitの左右zero guardでincrementし、右guard経由でhigh carry。frame幅不変、flag ONのstatic scratchだけ6→7 cells。arena nibble有効でRLE−0.961%、native−4.942%、圧縮BF−1.913%。全byte・dirty guard・再帰・両flagの実stage2・RLE-only counter・出力形式を照合。通常BFと公開CIR不変、IR VMに明らかな悪化なし。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
 | selfhostの静的local returnを直接payloadへ | 採用（既定ON、BF・公開CIR共通） | localの名前・固定field/indexをReturnへ直接渡し保存temporaryを省略。2c9f57c比arena RLE−3.675%、compilerのarena生成RLE−3.797%、公開CIR→Rust−1.136%、IR VM20.8秒を維持。global／動的place／計算式は従来materialize。全byte・field/index・fallback・再帰・nibble・CIR・limitsを照合、wire追加なし。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |

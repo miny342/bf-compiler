@@ -32,6 +32,9 @@ def fixtures():
     # The last field requires byte-identical BF when local control is disabled.
     return [
         ("repeat", "void main(){cell n=input();while(n){output(n);n-=1;}}", values, False),
+        ("noncanonical-byte-if", "void main(){cell n=input();if(n){output(n);}else{output(65);}output(n);if(n){if(n){output(n);}else{output(66);}}else{output(67);}cell after=n+1;output(after);}", [bytes([x]) for x in range(256)], False),
+        ("noncanonical-byte-while", "void main(){cell n=input();cell count;while(n){count+=1;n=0;}output(count);output(n);}", [bytes([x]) for x in range(256)], False),
+        ("noncanonical-reused-temp", "void main(){cell n=input();cell flag;if(n){flag=255;}else{flag=128;}while(flag){if(n){output(flag);}else{output(1);}flag=0;}if(n){output(2);}else{output(3);}output(n);}", [bytes([x]) for x in range(256)], False),
         ("nested", "void main(){cell n=input();cell total;while(n){cell j=3;while(j){if(j==2){total+=n;}else{total+=j;}j-=1;}n-=1;}output(total);}", values, False),
         ("branches", "void main(){cell again=input();while(again){cell n=input();if(n<128){if(n!=0){output(n+1);}else{output(17);}}else{output(n-1);}again=input();}}",
          [b"".join(bytes((1, x)) for x in range(256)) + b"\0"], False),

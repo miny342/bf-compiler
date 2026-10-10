@@ -742,14 +742,14 @@ void lower_local_cfg_statement(NodeId statement) {
     cell previous_region = lowering_local_region;
     lowering_local_region = 1;
     cell condition = allocate_lowering_temp();
+    // Local loops test nonzero directly and consume the owned condition at
+    // body entry. Canonicalizing to 0/1 adds an unnecessary round trip.
     lower_ast_expression(node_a(statement), condition);
-    append_ir_instruction(IR_BOOLEANIZE, condition, 0);
     if (node_kind(statement) == NODE_WHILE_STATEMENT) {
         append_ir_instruction(IR_LOCAL_OPEN, condition, 0);
         append_ir_instruction(IR_SET, condition, 0);
         lower_ast_statement(node_b(statement));
         lower_ast_expression(node_a(statement), condition);
-        append_ir_instruction(IR_BOOLEANIZE, condition, 0);
         append_ir_instruction(IR_LOCAL_CLOSE, condition, 0);
     } else {
         NodeId alternative = node_c(statement);
@@ -772,6 +772,33 @@ void lower_local_cfg_statement(NodeId statement) {
     }
     release_lowering_temp(condition);
     lowering_local_region = previous_region;
+}
+
+// A direct assignment must not overwrite a source needed by a later RHS
+// operation. Restrict it to complete values, not arbitrary expression trees.
+// 2 denotes an identical static local range: no evaluation or delivery needed.
+cell direct_assignment_kind(NodeId expression, cell destination, cell cells) {
+    cell kind = node_kind(expression);
+    if (kind == NODE_LITERAL_EXPRESSION || kind == NODE_ENUM_EXPRESSION
+        || kind == NODE_LEN_EXPRESSION || kind == NODE_INPUT_EXPRESSION
+        || kind == NODE_CALL_EXPRESSION || kind == NODE_STRING_EXPRESSION) {
+        return 1;
+    }
+    if (kind == NODE_NAME_EXPRESSION || kind == NODE_FIELD_EXPRESSION
+        || kind == NODE_INDEX_EXPRESSION) {
+        cell storage = node_tag(expression);
+        if (storage == RESOLVED_CONSTANT || storage == RESOLVED_GLOBAL) {
+            return 1;
+        }
+        if (storage == RESOLVED_LOCAL) {
+            cell source = node_value(expression);
+            if (source == destination) { return 2; }
+            // Compare distances rather than range ends to avoid byte wrap.
+            if (source < destination) { return destination - source >= cells; }
+            return source - destination >= cells;
+        }
+    }
+    return 0;
 }
 
 void lower_ast_statement(NodeId statement) {
@@ -829,6 +856,23 @@ void lower_ast_statement(NodeId statement) {
     if (kind == NODE_ASSIGNMENT) {
         NodeId left = node_a(statement);
         cell aggregate_cells = bounded_type_cells(expression_type(left));
+        if (node_tag(left) == RESOLVED_LOCAL
+            && node_tag(statement) == AST_ASSIGNMENT_SET) {
+            NodeId right = node_b(statement);
+            cell destination = node_value(left);
+            cell direct = direct_assignment_kind(right, destination, aggregate_cells);
+            if (direct == 2) { return; }
+            if (direct) {
+                // Calls snapshot every argument before receiving into this
+                // local. Static copies are admitted only for disjoint ranges.
+                if (type_is_aggregate(expression_type(left))) {
+                    lower_aggregate_expression(right, destination, aggregate_cells);
+                } else {
+                    lower_ast_expression(right, destination);
+                }
+                return;
+            }
+        }
         if (type_is_aggregate(expression_type(left))) {
             cell snapshot = allocate_lowering_cells(aggregate_cells);
             lower_aggregate_expression(node_b(statement), snapshot, aggregate_cells);
