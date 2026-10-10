@@ -328,7 +328,11 @@ global accessはcurrent frameからanchorへ左走査し、処理後にanchorか
 activationへ戻るため、再帰深度によらず単一のstatic領域を参照する。動的添字はsource indexを
 一度だけframe temporaryへ評価し、local/global共通の破壊的countdown portalで対象要素を選択する。
 配列引数は後続引数の評価前にcaller temporaryへ完全にsnapshotする。配列returnは全functionで
-必要な最大長を予約したcaller固有outboxへcopyし、resume continuationが直ちに所有temporaryへ回収する。
+必要な最大長を予約したcaller固有outboxへ渡し、resume continuationが直ちに所有temporaryへ回収する。
+BF backendではscalar・aggregateの引数snapshotをcalleeへ破壊的に搬送する。
+各引数は独立したtemporaryへ評価済みで、resumeでは再利用できるためsourceの復元は不要。
+returnもlocal payloadをcallerのValue／outboxへ直接消費し、FRAME_VALUEへの中継copyを省く。
+戻りPCの配送とframe全域のcleanupは維持する。公開CIRの形式・命令は変更しない。
 
 動的offsetのloweringは、low byteがまだ0であることをprojection間で引き継ぐ。
 256の倍数のstrideはその事実を保ち、stride 1のbyte indexはcarryなしの`IR_ADD`へ落とす。
@@ -352,6 +356,8 @@ python3 scripts/verify-selfhost-offsets.py --compiler target/release/bfc \
   --interpreter target/release/bf-interpreter
 python3 scripts/verify-selfhost-comparisons.py --compiler target/release/bfc \
   --interpreter target/release/bf-interpreter
+python3 scripts/verify-selfhost-call-moves.py --compiler target/release/bfc \
+  --interpreter target/release/bf-interpreter
 ```
 
 `verify-stage2-limits.py`は301関数の小さな入力を通常BF・圧縮BF・CIR経路でコンパイルして実行し、
@@ -366,6 +372,10 @@ index評価中のcallとcarry fallbackをBF／公開CIR／RLE-onlyで照合す�
 生成済みstage2 BFとIR VMのbyte一致も確認できる。
 `verify-selfhost-comparisons.py`は全65,536 pairの四つの大小比較、元operand保存、
 dirty scratchと離れたoperand、同一operandを検証する。RLE-onlyでは境界pairを確認する。
+`verify-selfhost-call-moves.py`は全byte値で重複引数、後続引数によるglobal変更、
+入れ子・再帰call、scalar／struct／32セル配列return、globalと元localの保存を検証する。
+BF／公開CIR／RLE-only端点を照合し、`--enable-nibble-transfer`と
+`--selfhost-compiler PATH`にも対応する。
 
 診断だけの短い回帰検証は次で実行する。全call siteのID重複・引数漏れと、lexer・semantic・
 内部算術helperのエラー表示および停止を確認する。compiler自身を入力する実験は行わない。

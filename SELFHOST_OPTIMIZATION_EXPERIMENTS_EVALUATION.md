@@ -6,6 +6,8 @@
 
 | 案 | 判断 | 根拠と制約 |
 |---|---|---|
+| selfhostの引数snapshotを消費するcall搬送 | 採用（既定ON、BF backend） | 独立した所有temporaryをcalleeへmoveし、source保存・復元を省略。113f140比arena RLE単独−8.69%、直接return併用−13.19%、生成stage2 BF−4.87%、自己入力--run-ir約21秒を維持。重複・後続global変更・再帰・32セル配列・nibble・公開CIR・実RLE-only端点を検証。wire/ABI不変、stage3全段未測定。[評価](optimize_logs/SELFHOST_CALL_RETURN_MOVES_EVALUATION_20261010.md)。 |
+| selfhostのlocal返値をcallerへ直接消費 | 採用（既定ON、BF backend） | local→FRAME_VALUE→callerの中継・保存copyを除去。113f140比arena RLE単独−4.51%、call併用−13.19%。scalar／aggregate／global返値・再帰・source保存を検証。戻りPC・全frame cleanupを維持し、受信側Value/outboxの保存copyは残る。公開CIR生成物はbyte不変、stage3全段未測定。[評価](optimize_logs/SELFHOST_CALL_RETURN_MOVES_EVALUATION_20261010.md)。 |
 | selfhostのknown-zero low／stride1 offset | 採用（既定ON、BF・公開CIR共通） | projection間でlow=0を証明し、byte indexを所有temporaryから直接IR_ADDで加算。arena RLE79.10→28.43億（−64.06%）、公開CIR→Rust60.79→9.95億（−83.64%）。unknown low／他strideは従来carry、ABI・wire形式不変、自己入力--run-ir約21〜22秒。全byte／nested／field carry／call／CIR／nibble／RLE-onlyを検証、stage3全段未測定。[評価](optimize_logs/SELFHOST_OFFSET_COMPARE_ADOPTION_20261010.md)。 |
 | selfhostのSLIDE大小比較 | 採用（既定ON、frame拡張なし） | scratch 11〜14へoperandを一度だけ消費し、二つの出口をzeroへ合わせてboolを返す。zero-low採用後arena RLE28.43→26.29億（追加−7.53%）、圧縮BF微減、--run-irに明らかな悪化なし。四関係・dirty scratch・離れたoperand・aliasを全pair、RLE-only端点も検証。早期終了できたゼロpairの局所悪化は残る、公開CIR比較は不変、stage3全段未測定。[評価](optimize_logs/SELFHOST_OFFSET_COMPARE_ADOPTION_20261010.md)。 |
 | Rust CIR版3／weight256の既定化 | 採用（既定ON、selfhost未移植） | 閉じたcallee・末尾wrapperと再帰SCC停止点を割り当て前CIRで展開、B1 root増大を棄却。従来の汎用方式は`--enable-generic-function-inline`で選択。自己入力stage1→stage2の論理RLE−16.55%、native126.972秒（従来127.280秒）、Rust生成込み137.382秒、IR VMとstage2 byte一致。nibble等3optionは既定OFF、identity v7へ更新。[評価](optimize_logs/CIR_FORWARDING_DEFAULT_EVALUATION_20261009.md)。 |

@@ -513,13 +513,14 @@ cell emit_transfer_to_global(
     return position;
 }
 
-cell emit_copy_to_next_context(
+// lower_ast_call stages every argument into distinct owned temporaries before
+// the call. They are released at resume, so none needs to survive this move.
+cell emit_transfer_to_next_context(
     cell position,
     cell source,
     cell destination,
     cell frame_cells
 ) {
-    position = emit_clear(position, FRAME_RESTORE);
     position = emit_move_to(position, source);
     compiler_output!('[');
     compiler_output!('-');
@@ -531,11 +532,8 @@ cell emit_copy_to_next_context(
     position = emit_move_to(position, 0);
     emit_repeat_character('<', frame_cells);
     position = 0;
-    position = emit_move_to(position, FRAME_RESTORE);
-    compiler_output!('+');
     position = emit_move_to(position, source);
     compiler_output!(']');
-    position = emit_transfer(position, FRAME_RESTORE, source, 0);
     position = emit_move_to(position, 0);
     return position;
 }
@@ -988,7 +986,7 @@ cell emit_call_terminator(cell position, NodeId continuation) {
         }
         cell index;
         while (index < cells) {
-            position = emit_copy_to_next_context(
+            position = emit_transfer_to_next_context(
                 position,
                 physical_frame_slot(source + index),
                 physical_frame_slot(destination + index),
@@ -1009,9 +1007,6 @@ cell emit_return_terminator(cell position, NodeId continuation) {
         cell length = arena_read(continuation, FIELD_NAME_PAGE);
         cell index;
         while (index < length) {
-            position = emit_frame_copy(
-                position, physical_frame_slot(slot + index), FRAME_VALUE
-            );
             position = emit_clear_previous_context(
                 position,
                 physical_frame_slot(stage8_outbox_base + index),
@@ -1019,7 +1014,7 @@ cell emit_return_terminator(cell position, NodeId continuation) {
             );
             position = emit_transfer_to_previous_context(
                 position,
-                FRAME_VALUE,
+                physical_frame_slot(slot + index),
                 physical_frame_slot(stage8_outbox_base + index),
                 frame_cells
             );
@@ -1028,13 +1023,10 @@ cell emit_return_terminator(cell position, NodeId continuation) {
     } else if (slot == VOID_RETURN_SLOT) {
         position = emit_clear_previous_context(position, FRAME_VALUE, frame_cells);
     } else {
-        position = emit_frame_copy(
-            position, physical_frame_slot(slot), FRAME_VALUE
-        );
         position = emit_clear_previous_context(position, FRAME_VALUE, frame_cells);
         position = emit_transfer_to_previous_context(
             position,
-            FRAME_VALUE,
+            physical_frame_slot(slot),
             FRAME_VALUE,
             frame_cells
         );
