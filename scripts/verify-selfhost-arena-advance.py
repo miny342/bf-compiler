@@ -22,7 +22,7 @@ def main():
     arena = (ROOT / "selfhost/stage2/compiler/06_arena.bfc").read_text()
     last_bank = int(re.search(r"ARENA_LAST_BANK = (\d+)", arena)[1])
     last_page = int(re.search(r"ARENA_LAST_PAGE = (\d+)", arena)[1])
-    start = arena.index("NodeId arena_advance(")
+    start = arena.index("macro arena_advance_in_place(")
     end = arena.index("\ncell arena_cell_read(", start)
     program = (f"const cell ARENA_LAST_BANK={last_bank};"
                f"const cell ARENA_LAST_PAGE={last_page};"

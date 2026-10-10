@@ -489,4 +489,4 @@ request packet搬送とdispatcher縮約が次のcode-size改善点である。
 静的localへの単純代入はRHSを直接destinationへloweringする。callは引数をsnapshotしてから返値を受け取り、一般式と重なるrangeは中継snapshotを維持する。局所if/whileは非zero条件を直接使い、body入口で所有conditionを消す。公開CIRも同じ意味で出力する。
 
 計算されたaggregateのfield/indexを取り出す場合は、private base temporaryの選択cellをMoveで消費してから領域を解放する。静的user localの値は保存し、公開CIRは既存Set＋Addで表現する。`verify-selfhost-call-moves.py`は入れ子のprojectionとtemporary再利用も検証する。
-arena_read/writeはprivate NodeId parameterに直接field offsetを加算し、arena_advanceのcall／返値搬送を省く。carry・overflow規則はarena_advanceと同じで、`verify-selfhost-arena-advance.py`が3関数の全byte pairとread/write先・caller保存を照合する。bank選択とportal本体は共有する。
+arena_read/writeはprivate NodeId parameterに直接field offsetを加算し、arena_advanceのcall／返値搬送を省く。3関数のcarry・overflow処理はplace macro `arena_advance_in_place!`で共通化する。offsetには更新先とaliasしない安定した値を渡す。`verify-selfhost-arena-advance.py`が3関数の全byte pairとread/write先・caller保存を照合し、bank選択とportal本体は共有する。

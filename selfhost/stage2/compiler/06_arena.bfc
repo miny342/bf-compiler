@@ -212,7 +212,9 @@ cell node_equals(NodeId left, NodeId right) {
         && left.page == right.page && left.slot == right.slot;
 }
 
-NodeId arena_advance(NodeId position, cell amount) {
+// Update a local NodeId place using a stable byte offset. Parameters are
+// substituted at every occurrence; the offset must not alias the place.
+macro arena_advance_in_place(position, amount) {
     // A byte-sized advance can cross at most one page boundary.
     position.slot += amount;
     // Overflow makes the sum smaller than either operand. Compare against
@@ -228,50 +230,21 @@ NodeId arena_advance(NodeId position, cell amount) {
             position.page += 1;
         }
     }
+}
+
+NodeId arena_advance(NodeId position, cell amount) {
+    arena_advance_in_place!(position, amount);
     return position;
 }
 
 cell arena_read(NodeId id, cell field) {
-    // Keep arena_advance carry semantics, but update this private parameter
-    // in place to avoid its argument/return transport on every field access.
-    // A byte-sized advance can cross at most one page boundary.
-    id.slot += field;
-    // Overflow makes the sum smaller than either operand. Compare against
-    // field to keep the BF countdown short for small field offsets.
-    if (id.slot < field) {
-        if (id.page == ARENA_LAST_PAGE) {
-            if (id.bank == ARENA_LAST_BANK) {
-                fail('B', 'P');
-            }
-            id.page = 0;
-            id.bank += 1;
-        } else {
-            id.page += 1;
-        }
-    }
-
+    // Mutate the private parameter instead of transporting a NodeId return.
+    arena_advance_in_place!(id, field);
     return arena_cell_read(id);
 }
 
 void arena_write(NodeId id, cell field, cell value) {
-    // Keep arena_advance carry semantics, but update this private parameter
-    // in place to avoid its argument/return transport on every field access.
-    // A byte-sized advance can cross at most one page boundary.
-    id.slot += field;
-    // Overflow makes the sum smaller than either operand. Compare against
-    // field to keep the BF countdown short for small field offsets.
-    if (id.slot < field) {
-        if (id.page == ARENA_LAST_PAGE) {
-            if (id.bank == ARENA_LAST_BANK) {
-                fail('B', 'P');
-            }
-            id.page = 0;
-            id.bank += 1;
-        } else {
-            id.page += 1;
-        }
-    }
-
+    arena_advance_in_place!(id, field);
     arena_cell_write(id, value);
 }
 
