@@ -472,10 +472,11 @@ NodeId clone_macro_statement(NodeId statement) {
 }
 
 NodeId expand_macro_statement(NodeId statement) {
-    if (node_kind(statement) == NODE_MACRO_INVOCATION) {
+    cell kind = node_kind(statement);
+    if (kind == NODE_MACRO_INVOCATION) {
         return instantiate_macro(statement);
     }
-    if (node_kind(statement) == NODE_BLOCK) {
+    if (kind == NODE_BLOCK) {
         NodeId child = node_a(statement);
         NodeId first;
         NodeId last;
@@ -491,12 +492,12 @@ NodeId expand_macro_statement(NodeId statement) {
             child = next;
         }
         node_set_a(statement, first);
-    } else if (node_kind(statement) == NODE_IF_STATEMENT) {
+    } else if (kind == NODE_IF_STATEMENT) {
         node_set_b(statement, expand_macro_statement(node_b(statement)));
         if (!node_is_null(node_c(statement))) {
             node_set_c(statement, expand_macro_statement(node_c(statement)));
         }
-    } else if (node_kind(statement) == NODE_WHILE_STATEMENT) {
+    } else if (kind == NODE_WHILE_STATEMENT) {
         node_set_b(statement, expand_macro_statement(node_b(statement)));
     }
     return statement;
