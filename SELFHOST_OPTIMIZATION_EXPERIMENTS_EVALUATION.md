@@ -6,6 +6,7 @@
 
 | 案 | 判断 | 根拠と制約 |
 |---|---|---|
+| selfhostのcallee header／caller inboxの既知zero | 採用（既定ON、BF backend） | 空きframeのActive・PCはAddだけで設定し、resumeで消費済みValue/outboxへの配送前clearを省略。d817ceb比arena RLE−0.04618%、生成stage2 BF−2.492%、IR VM約21秒。深さ255相互再帰・返値長・global保存・nibble・再帰portal・CIRを照合。return全域cleanupは維持。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
 | selfhostの逆順SLIDE比較でswap省略 | 採用（既定ON、BF backend） | operand順とresult destinationを指定し、`>`／`<=`前の3 transferを除去。全65,536 pairの四比較kernelでRLE−13.252%、圧縮BF−5.36%。arenaは不変、compilerのarena生成RLE−0.080%、IR VM約21秒。逆順result・scratch・alias・実RLE-onlyを照合、frame幅・公開CIR不変。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
 | selfhostのValue/outbox受信move | 採用（既定ON、BF backend） | resumeで一度だけ読む返値を所有temporaryへ消費し、保存・復元を省略。cfaa654比arena RLE単独−3.334%、call前clear省略併用−3.636%。深さ255の相互再帰・重複・global保存・32セル配列・nibble・CIR・実RLE-onlyを確認。公開CIR byte不変、stage3全段未測定。[評価](optimize_logs/SELFHOST_RECEIVE_ZERO_FRAME_EVALUATION_20261010.md)。 |
 | selfhostのcall前全域clear省略 | 採用（既定ON、BF backend） | 初回tape0／return全域cleanup／portalが空きframeを汚さない契約により省略。cfaa654比arena RLE単独−0.302%、受信move併用−3.636%、生成stage2 BF−40.995%、全ON kernel execute中央値−6.759%、自己入力IR VM約21秒。frame幅維持、再帰portal・301関数・255-cell frameを検証。return cleanupは維持、stage3全段未測定。[評価](optimize_logs/SELFHOST_RECEIVE_ZERO_FRAME_EVALUATION_20261010.md)。 |

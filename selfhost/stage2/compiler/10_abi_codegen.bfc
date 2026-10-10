@@ -963,11 +963,11 @@ cell emit_call_terminator(cell position, NodeId continuation) {
     // An unused activation starts zero, and return clears the entire frame.
     // Portals only visit globals or the current frame. Thus the free frame
     // above the frontier is already zero, including scratch and outbox.
-    position = emit_constant(position, FRAME_ACTIVE, 1);
-    position = emit_constant(position, FRAME_NEXT_PC_LOW, entry_id.slot);
-    position = emit_constant(position, FRAME_NEXT_PC_HIGH, entry_id.page);
-    position = emit_constant(position, FRAME_RETURN_PC_LOW, resume_id.slot);
-    position = emit_constant(position, FRAME_RETURN_PC_HIGH, resume_id.page);
+    position = emit_add_constant(position, FRAME_ACTIVE, 1);
+    position = emit_add_constant(position, FRAME_NEXT_PC_LOW, entry_id.slot);
+    position = emit_add_constant(position, FRAME_NEXT_PC_HIGH, entry_id.page);
+    position = emit_add_constant(position, FRAME_RETURN_PC_LOW, resume_id.slot);
+    position = emit_add_constant(position, FRAME_RETURN_PC_HIGH, resume_id.page);
     position = emit_previous_context(position, frame_cells);
 
     NodeId argument = node_c(continuation);
@@ -1001,11 +1001,8 @@ cell emit_return_terminator(cell position, NodeId continuation) {
         cell length = arena_read(continuation, FIELD_NAME_PAGE);
         cell index;
         while (index < length) {
-            position = emit_clear_previous_context(
-                position,
-                physical_frame_slot(stage8_outbox_base + index),
-                frame_cells
-            );
+            // Every resume consumes the whole returned payload. Caller
+            // inboxes start zero and no user instruction writes them.
             position = emit_transfer_to_previous_context(
                 position,
                 physical_frame_slot(slot + index),
@@ -1014,10 +1011,7 @@ cell emit_return_terminator(cell position, NodeId continuation) {
             );
             index += 1;
         }
-    } else if (slot == VOID_RETURN_SLOT) {
-        position = emit_clear_previous_context(position, FRAME_VALUE, frame_cells);
-    } else {
-        position = emit_clear_previous_context(position, FRAME_VALUE, frame_cells);
+    } else if (slot != VOID_RETURN_SLOT) {
         position = emit_transfer_to_previous_context(
             position,
             physical_frame_slot(slot),

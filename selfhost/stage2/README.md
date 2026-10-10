@@ -335,6 +335,7 @@ returnもlocal payloadをcallerのValue／outboxへ直接消費し、FRAME_VALUE
 resumeはValue／outboxを一度だけ読み、所有temporaryへmoveする。
 空きframeは初回tapeとreturn後の全域cleanupによって0なので、call前の全域clearは省く。
 portalとanchor scanは空きframeを書き換えない。戻りPCの配送とreturnの全域cleanupは維持する。
+callee headerの定数設定とcaller Value／outboxへの配送も、既知zeroへ加算する。
 公開CIRの形式・命令は変更しない。
 
 動的offsetのloweringは、low byteがまだ0であることをprojection間で引き継ぐ。
