@@ -342,6 +342,7 @@ portalとanchor scanは空きframeを書き換えない。戻りPCの配送とre
 途中にlowへの非ゼロ寄与があれば従来のcarry処理を使う。BFと公開CIRで共通の変換で、既定ON。
 BFの大小比較は既存scratch 11〜14でSLIDEを使い、operandを一度だけ消費する。
 二つの出口をzeroセルへ位置合わせして結果を返し、scratchを0へ戻す。frame幅の追加はない。
+`>`／`<=`はoperandを逆順に渡して同じ格納先へ結果を返し、比較前のswapを省く。
 
 ## 検証
 

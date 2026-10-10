@@ -52,9 +52,9 @@ def main():
         # Exercise the real emitter with dirty private scratch, unrelated live
         # data between operands, and the separate left==right fast path.
         prefix = source.read_text().rsplit("void main() {", 1)[0]
-        for alias in [False, True]:
+        for alias, reverse in [(False, False), (False, True), (True, False)]:
             left, right = 16, 16 if alias else 23
-            harness = work / ("alias.bfc" if alias else "scratch.bfc")
+            harness = work / ("alias.bfc" if alias else "reverse.bfc" if reverse else "scratch.bfc")
             harness.write_text(prefix + f"""
 void main(){{
     output('@');output('B');output('F');output('C');output('R');
@@ -67,7 +67,7 @@ void main(){{
     p=emit_constant(p,12,{0 if alias else 123});
     p=emit_constant(p,13,{0 if alias else 42});
     p=emit_constant(p,14,{0 if alias else 99});
-    p=emit_frame_less(p,{left},{right});
+    p=emit_frame_less(p,{right if reverse else left},{left if reverse else right},{left});
     p=emit_move_to(p,{left});compiler_output!('.');
     p=emit_move_to(p,{right});compiler_output!('.');
     p=emit_move_to(p,18);compiler_output!('.');
@@ -82,10 +82,12 @@ void main(){{
             generated = harness.with_suffix(".bf")
             generated.write_bytes(run([compiler, "--run-ir", "--no-ir-transitions", str(harness)]))
             for rows, flags in [(pairs, []), (selected, RLE_ONLY)]:
-                expected = b"".join(bytes((0 if alias else a < b, 0, 77, 88, 0, 0, 0, 0))
+                expected = b"".join(bytes((0 if alias else a > b if reverse else a < b,
+                                          0, 77, 88, 0, 0, 0, 0))
                                     for a, b in rows)
                 assert run([interpreter, "--no-progress", *flags, str(generated)], data(rows)) == expected
-            print(f"{'Alias' if alias else 'Dirty scratch/separated operands'}: all pairs and RLE-only edges passed.", flush=True)
+            label = "Alias" if alias else "Reversed result/dirty scratch" if reverse else "Dirty scratch/separated operands"
+            print(f"{label}: all pairs and RLE-only edges passed.", flush=True)
 
 
 if __name__ == "__main__":

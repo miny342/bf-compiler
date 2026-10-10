@@ -186,17 +186,9 @@ cell emit_frame_negate(cell position, cell destination) {
     return position;
 }
 
-cell emit_frame_swap(cell position, cell left, cell right) {
-    position = emit_clear(position, FRAME_SCRATCH_3);
-    position = emit_transfer(position, left, FRAME_SCRATCH_3, 0);
-    position = emit_transfer(position, right, left, 0);
-    position = emit_transfer(position, FRAME_SCRATCH_3, right, 0);
-    return position;
-}
-
-cell emit_frame_less(cell position, cell left, cell right) {
+cell emit_frame_less(cell position, cell left, cell right, cell result) {
     if (left == right) {
-        return emit_clear(position, left);
+        return emit_clear(position, result);
     }
     // Operands are data cells (>=16). Use existing private scratch 11..14 as
     // right | flag=1 | zero | left, consuming both operands only once.
@@ -215,10 +207,10 @@ cell emit_frame_less(cell position, cell left, cell right) {
     // flag is 1 iff original left>=right. Never infer a single loop-end cell.
     compiler_output!('>'); compiler_output!('['); compiler_output!('>'); compiler_output!(']');
     position = FRAME_SCRATCH_2;
-    position = emit_constant(position, left, 1);
+    position = emit_constant(position, result, 1);
     position = emit_loop_open(position, FRAME_SCRATCH_1);
     compiler_output!('-');
-    position = emit_clear(position, left);
+    position = emit_clear(position, result);
     position = emit_loop_close(position, FRAME_SCRATCH_1);
     position = emit_clear(position, FRAME_SCRATCH_0);
     position = emit_clear(position, FRAME_SCRATCH_3);
@@ -934,13 +926,12 @@ cell emit_ir_instruction(cell position, NodeId instruction) {
             position = emit_frame_booleanize(position, destination);
         }
     } else if (kind == IR_LESS || kind == IR_GREATER_EQUAL) {
-        position = emit_frame_less(position, destination, source);
+        position = emit_frame_less(position, destination, source, destination);
         if (kind == IR_GREATER_EQUAL) {
             position = emit_frame_not(position, destination);
         }
     } else if (kind == IR_GREATER || kind == IR_LESS_EQUAL) {
-        position = emit_frame_swap(position, destination, source);
-        position = emit_frame_less(position, destination, source);
+        position = emit_frame_less(position, source, destination, destination);
         if (kind == IR_LESS_EQUAL) {
             position = emit_frame_not(position, destination);
         }
