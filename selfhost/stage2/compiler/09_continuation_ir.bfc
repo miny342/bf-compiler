@@ -799,16 +799,20 @@ void lower_ast_statement(NodeId statement) {
         if (node_tag(statement) == AST_DECLARATION_ARRAY) {
             cells = node_value(statement);
         }
-        cell index;
-        while (index < cells) {
-            append_ir_instruction(IR_SET, slot + index, 0);
-            index += 1;
-        }
-        if (!node_is_null(node_a(statement))) {
+        // Initializers are resolved before the new local enters scope and
+        // every supported expression overwrites its full destination.
+        NodeId initializer = node_a(statement);
+        if (node_is_null(initializer)) {
+            cell index;
+            while (index < cells) {
+                append_ir_instruction(IR_SET, slot + index, 0);
+                index += 1;
+            }
+        } else {
             if (node_tag(statement) == AST_DECLARATION_ARRAY) {
-                lower_aggregate_expression(node_a(statement), slot, cells);
+                lower_aggregate_expression(initializer, slot, cells);
             } else {
-                lower_ast_expression(node_a(statement), slot);
+                lower_ast_expression(initializer, slot);
             }
         }
         return;

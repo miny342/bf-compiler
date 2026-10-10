@@ -483,3 +483,5 @@ regionごとのhidden routerで共有する。測定時の917MB BFは約2.5秒�
 出力できた。最初の素朴な接続は8.42GB、75秒、最大RSS約8.36GBだったため、出力を89.1%、backend
 時間を96.7%、peak memoryを98.4%削減した。artifact自体はまだ大きく、routerから各segmentへの
 request packet搬送とdispatcher縮約が次のcode-size改善点である。
+
+`python3 scripts/verify-selfhost-arena-advance.py --help`でarena_advanceの全byte pair、bank/page carry、overflow、公開CIR経路の回帰検証を実行できる。local initializerの先行clearは省略し、初期化なしlocalは毎回zeroに戻す。

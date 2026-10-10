@@ -82,6 +82,8 @@
 | portal nibbleの固定距離dispatch | 不採用・撤回 | nibble値ごとのlocal equality dispatchで、値ごとに一回の`value*stride`交換を試した。長い異値配列の出力は一致したが、heterogeneous fixtureのBF 21,613→83,003 bytes、global-large 184,673→307,453 bytes。4-bit popcount分解はこの比較表を使わない別実装が必要で、productionには残していない。 |
 | phase/portal計測のレビュー修正 | 採用 | 設定入力上書きを拒否し、portalなしの別phaseを挟む隣接も切断。実入力・options identityを照合し、未知CIRへ固定ID mappingを流用しない。 |
 | 高い再訪率を根拠にportal batchを優先する判断 | 撤回 | 開始chunk再訪はphase全体の履歴指標。直前要求の近さやcall/I/O/aliasを跨ぐbatch安全性を示さない。候補を調べる根拠までに限定する。 |
+| selfhost初期化ありlocal宣言の先行clear省略 | 採用（既定ON、公開CIR共通） | initializerが全域上書きする場合のみ省略し、未初期化宣言はzero維持。固定arena RLE−0.0153%、shadowing／文字列／loop再利用／short-circuit副作用を検証。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
+| selfhost arena_advanceのin-place slot更新 | 採用（既定ON） | 中継localと最終copyを除去、比較・carry規則は維持。compilerのarena入力生成RLE単独−7.038%、新helper入力の実行−7.337%。全65,536 pair・bank境界・overflow・caller保存／公開CIR確認。旧carry試作とは別変更。[評価](optimize_logs/SELFHOST_DEADLINE_LOOP_20261010.md)。 |
 
 sourceのphase別IR集計では`arena_advance`が熱い関数として確認され、局所構造化の候補に残る。
 CIRの関数名は推測しない。frame/global regionと再帰activationを区別し、

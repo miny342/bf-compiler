@@ -214,10 +214,10 @@ cell node_equals(NodeId left, NodeId right) {
 
 NodeId arena_advance(NodeId position, cell amount) {
     // A byte-sized advance can cross at most one page boundary.
-    cell slot = position.slot + amount;
+    position.slot += amount;
     // Overflow makes the sum smaller than either operand. Compare against
     // amount to keep the BF countdown short for small field offsets.
-    if (slot < amount) {
+    if (position.slot < amount) {
         if (position.page == ARENA_LAST_PAGE) {
             if (position.bank == ARENA_LAST_BANK) {
                 fail('B', 'P');
@@ -228,7 +228,6 @@ NodeId arena_advance(NodeId position, cell amount) {
             position.page += 1;
         }
     }
-    position.slot = slot;
     return position;
 }
 

@@ -12,6 +12,8 @@ PROGRAM = """
 struct Triple { cell x; cell y; cell z; }
 struct Box { cell pad; Triple value; }
 Triple global;
+cell hits;
+cell side(cell n) { hits+=1; return n; }
 cell sum(cell a, cell b) { return a+b; }
 Triple make(cell a) { Triple p; p.x=a; p.y=a+1; p.z=a+2; return p; }
 Triple identity(Triple p) { return p; }
@@ -67,6 +69,13 @@ void main() {
         output(pick_byte(payload));output(payload[31]);output(global_y());
         cell k;if(a<32){k=a;}
         output(pick_dynamic(payload,k));output(payload[k]);
+        { cell a=a+1;output(a); }output(a);
+        cell[] text="ok";output(text[0]);output(text[1]);
+        cell rounds=2;
+        while(rounds){cell reset;output(reset);reset=255;
+            cell initialized=a+1;output(initialized);rounds-=1;}
+        hits=0;cell andval=a&&side(b);cell orval=a||side(b);
+        output(andval);output(orval);output(hits);
     }
 }
 """
@@ -85,6 +94,8 @@ def fixture(values):
         result.extend(x for j in range(32) for x in (a+j, a+j))
         k = a if a < 32 else 0
         result.extend((a+31, a+31, g[1], a+k, a+k))
+        result.extend((a+1, a, 111, 107, 0, a+1, 0, a+1,
+                       a != 0 and b != 0, a != 0 or b != 0, 1))
         expected.extend(x & 255 for x in result)
     data.append(0)
     return bytes(data), bytes(expected)
@@ -144,6 +155,7 @@ def main():
         print("Call moves: duplicate arguments, late global mutation, nested/recursive calls, "
               "mutual recursion through depth 255 and frame reuse, "
               "static field/index returns and dynamic/global fallbacks, "
+              "shadowed/string/short-circuit initializers and uninitialized loop resets, "
               "global/local/scalar/32-cell returns, source preservation, and void returns passed.", flush=True)
 
 
