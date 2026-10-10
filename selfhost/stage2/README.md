@@ -332,7 +332,10 @@ activationへ戻るため、再帰深度によらず単一のstatic領域を参�
 BF backendではscalar・aggregateの引数snapshotをcalleeへ破壊的に搬送する。
 各引数は独立したtemporaryへ評価済みで、resumeでは再利用できるためsourceの復元は不要。
 returnもlocal payloadをcallerのValue／outboxへ直接消費し、FRAME_VALUEへの中継copyを省く。
-戻りPCの配送とframe全域のcleanupは維持する。公開CIRの形式・命令は変更しない。
+resumeはValue／outboxを一度だけ読み、所有temporaryへmoveする。
+空きframeは初回tapeとreturn後の全域cleanupによって0なので、call前の全域clearは省く。
+portalとanchor scanは空きframeを書き換えない。戻りPCの配送とreturnの全域cleanupは維持する。
+公開CIRの形式・命令は変更しない。
 
 動的offsetのloweringは、low byteがまだ0であることをprojection間で引き継ぐ。
 256の倍数のstrideはその事実を保ち、stride 1のbyte indexはcarryなしの`IR_ADD`へ落とす。
@@ -373,7 +376,8 @@ index評価中のcallとcarry fallbackをBF／公開CIR／RLE-onlyで照合す�
 `verify-selfhost-comparisons.py`は全65,536 pairの四つの大小比較、元operand保存、
 dirty scratchと離れたoperand、同一operandを検証する。RLE-onlyでは境界pairを確認する。
 `verify-selfhost-call-moves.py`は全byte値で重複引数、後続引数によるglobal変更、
-入れ子・再帰call、scalar／struct／32セル配列return、globalと元localの保存を検証する。
+入れ子call・深さ255までの相互再帰とframe再利用、scalar／struct／32セル配列return、
+globalと元localの保存を検証する。
 BF／公開CIR／RLE-only端点を照合し、`--enable-nibble-transfer`と
 `--selfhost-compiler PATH`にも対応する。
 

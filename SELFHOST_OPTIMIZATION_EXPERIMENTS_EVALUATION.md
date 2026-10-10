@@ -6,6 +6,8 @@
 
 | 案 | 判断 | 根拠と制約 |
 |---|---|---|
+| selfhostのValue/outbox受信move | 採用（既定ON、BF backend） | resumeで一度だけ読む返値を所有temporaryへ消費し、保存・復元を省略。cfaa654比arena RLE単独−3.334%、call前clear省略併用−3.636%。深さ255の相互再帰・重複・global保存・32セル配列・nibble・CIR・実RLE-onlyを確認。公開CIR byte不変、stage3全段未測定。[評価](optimize_logs/SELFHOST_RECEIVE_ZERO_FRAME_EVALUATION_20261010.md)。 |
+| selfhostのcall前全域clear省略 | 採用（既定ON、BF backend） | 初回tape0／return全域cleanup／portalが空きframeを汚さない契約により省略。cfaa654比arena RLE単独−0.302%、受信move併用−3.636%、生成stage2 BF−40.995%、全ON kernel execute中央値−6.759%、自己入力IR VM約21秒。frame幅維持、再帰portal・301関数・255-cell frameを検証。return cleanupは維持、stage3全段未測定。[評価](optimize_logs/SELFHOST_RECEIVE_ZERO_FRAME_EVALUATION_20261010.md)。 |
 | selfhostの引数snapshotを消費するcall搬送 | 採用（既定ON、BF backend） | 独立した所有temporaryをcalleeへmoveし、source保存・復元を省略。113f140比arena RLE単独−8.69%、直接return併用−13.19%、生成stage2 BF−4.87%、自己入力--run-ir約21秒を維持。重複・後続global変更・再帰・32セル配列・nibble・公開CIR・実RLE-only端点を検証。wire/ABI不変、stage3全段未測定。[評価](optimize_logs/SELFHOST_CALL_RETURN_MOVES_EVALUATION_20261010.md)。 |
 | selfhostのlocal返値をcallerへ直接消費 | 採用（既定ON、BF backend） | local→FRAME_VALUE→callerの中継・保存copyを除去。113f140比arena RLE単独−4.51%、call併用−13.19%。scalar／aggregate／global返値・再帰・source保存を検証。戻りPC・全frame cleanupを維持し、受信側Value/outboxの保存copyは残る。公開CIR生成物はbyte不変、stage3全段未測定。[評価](optimize_logs/SELFHOST_CALL_RETURN_MOVES_EVALUATION_20261010.md)。 |
 | selfhostのknown-zero low／stride1 offset | 採用（既定ON、BF・公開CIR共通） | projection間でlow=0を証明し、byte indexを所有temporaryから直接IR_ADDで加算。arena RLE79.10→28.43億（−64.06%）、公開CIR→Rust60.79→9.95億（−83.64%）。unknown low／他strideは従来carry、ABI・wire形式不変、自己入力--run-ir約21〜22秒。全byte／nested／field carry／call／CIR／nibble／RLE-onlyを検証、stage3全段未測定。[評価](optimize_logs/SELFHOST_OFFSET_COMPARE_ADOPTION_20261010.md)。 |

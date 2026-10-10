@@ -25,6 +25,8 @@ Triple recurse(Triple p, cell d) {
     return p;
 }
 cell recur_scalar(cell a, cell d) { if(d) { return recur_scalar(a+1,d-1); } return a; }
+cell even(cell d, cell v) { if(d) { return odd(d-1,v+1); } return v; }
+cell odd(cell d, cell v) { if(d) { return even(d-1,v+1); } return v; }
 cell[32] echo(cell[32] p) { return p; }
 void discard(Triple p) {}
 void main() {
@@ -46,6 +48,8 @@ void main() {
         output(nested.x);output(nested.y);output(nested.z);
         discard(p);output(p.x);output(p.y);output(p.z);
         output(recur_scalar(a,3));output(a);output(b);
+        // Reuse the same free frames at different depths, up to 255 calls.
+        output(even(a,b));output(a);output(b);
         cell[32] payload; cell j;
         while(j<32) { payload[j]=a+j; j+=1; }
         cell[32] copy=echo(payload);j=0;
@@ -63,7 +67,8 @@ def fixture(values):
         g = [b, (b+1) & 255, (b+2) & 255]
         data.extend((1, a, b))
         result = [2*a, a, *p, *p, p[0]+p[1]+b, p[1]+p[2], p[2]+p[0], *p,
-                  *p, b, *g, *g, a+3, p[1], p[2], *p, *g, *p, a+3, a, b]
+                  *p, b, *g, *g, a+3, p[1], p[2], *p, *g, *p, a+3, a, b,
+                  a+b, a, b]
         result.extend(x for j in range(32) for x in (a+j, a+j))
         expected.extend(x & 255 for x in result)
     data.append(0)
@@ -122,6 +127,7 @@ def main():
             assert run([*command, *RLE_ONLY, str(bf)], small_data) == small_expected, bf.name
             print(f"{bf.name}: 256 inputs and RLE-only 0/255 passed", flush=True)
         print("Call moves: duplicate arguments, late global mutation, nested/recursive calls, "
+              "mutual recursion through depth 255 and frame reuse, "
               "global/local/scalar/32-cell returns, source preservation, and void returns passed.", flush=True)
 
 

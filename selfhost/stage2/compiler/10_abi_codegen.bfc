@@ -867,14 +867,19 @@ cell emit_ir_instruction(cell position, NodeId instruction) {
     } else if (kind == IR_COPY) {
         position = emit_frame_copy(position, source, destination);
     } else if (kind == IR_COPY_ABI_VALUE) {
-        position = emit_frame_copy(position, FRAME_VALUE, destination);
+        // The resume consumes each call result once, before another call can
+        // overwrite it. User variables were never stored in this ABI inbox.
+        position = emit_clear(position, destination);
+        position = emit_transfer(position, FRAME_VALUE, destination, 0);
     } else if (kind == IR_COPY_OUTBOX) {
-        position = emit_frame_copy(
+        position = emit_clear(position, destination);
+        position = emit_transfer(
             position,
             physical_frame_slot(
                 stage8_outbox_base + instruction_source(instruction)
             ),
-            destination
+            destination,
+            0
         );
     } else if (kind == IR_INPUT) {
         position = emit_input(position, destination);
@@ -964,11 +969,9 @@ cell emit_call_terminator(cell position, NodeId continuation) {
 
     cell frame_cells = stage8_frame_cells;
     position = emit_next_context(position, frame_cells);
-    cell clear_index;
-    while (clear_index < frame_cells) {
-        position = emit_clear(position, clear_index);
-        clear_index += 1;
-    }
+    // An unused activation starts zero, and return clears the entire frame.
+    // Portals only visit globals or the current frame. Thus the free frame
+    // above the frontier is already zero, including scratch and outbox.
     position = emit_constant(position, FRAME_ACTIVE, 1);
     position = emit_constant(position, FRAME_NEXT_PC_LOW, entry_id.slot);
     position = emit_constant(position, FRAME_NEXT_PC_HIGH, entry_id.page);
